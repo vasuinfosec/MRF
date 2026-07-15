@@ -58,9 +58,10 @@ export default function More() {
       </Card>
 
       <Card style={{ marginTop: 12 }} testID="reports-card">
-        <H2>Reports</H2>
+        <H2>Reports & Tools</H2>
         <View style={{ marginTop: 8, gap: 8 }}>
           <Btn testID="reports-btn" title="Full Reports Dashboard" variant="primary" onPress={() => router.push("/reports")} />
+          <Btn testID="import-btn" title="Excel Bulk Import" variant="outline" onPress={() => router.push("/import")} />
           <Btn testID="audit-log-btn" title="System Audit Trail" variant="outline" onPress={() => router.push("/audit")} />
         </View>
       </Card>

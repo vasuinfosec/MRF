@@ -17,9 +17,11 @@ export default function PODetail() {
   const [po, setPo] = useState<any>(null);
   const [vendor, setVendor] = useState<any>(null);
   const [project, setProject] = useState<any>(null);
+  const [grns, setGrns] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
   const [receiveOpen, setReceiveOpen] = useState(false);
   const [receiveQty, setReceiveQty] = useState<Record<string, string>>({});
+  const [receiveRemarks, setReceiveRemarks] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
 
@@ -28,11 +30,12 @@ export default function PODetail() {
     try {
       const p = await api<any>(`/po/${id}`);
       setPo(p);
-      const [v, pr] = await Promise.all([
+      const [v, pr, gs] = await Promise.all([
         api<any[]>("/vendors").then((vs) => vs.find((x) => x.vendor_id === p.vendor_id)),
         api<any[]>("/projects").then((ps) => ps.find((x) => x.project_id === p.project_id)),
+        api<any[]>(`/po/${id}/grns`),
       ]);
-      setVendor(v); setProject(pr);
+      setVendor(v); setProject(pr); setGrns(gs);
     } catch (_e) { /* noop */ }
     setBusy(false);
   }, [id]);
@@ -136,6 +139,18 @@ export default function PODetail() {
                 <MiniStat label="GST" value={`${it.gst}%`} />
                 <MiniStat label="Total" value={`₹${(ad + gst).toFixed(2)}`} />
               </View>
+              {Array.isArray(it.receipts) && it.receipts.length > 0 ? (
+                <View style={styles.receiptsBox} testID={`receipts-${i}`}>
+                  <Text style={styles.receiptsLabel}>Receipt History</Text>
+                  {it.receipts.map((r: any, ri: number) => (
+                    <View key={ri} style={styles.receiptRow}>
+                      <Text style={styles.receiptDate}>{new Date(r.date).toLocaleString()}</Text>
+                      <Text style={styles.receiptQty}>+{r.qty} {it.unit}</Text>
+                      <Text style={styles.receiptUser}>{r.user_name}</Text>
+                    </View>
+                  ))}
+                </View>
+              ) : null}
             </Card>
           );
         })}
@@ -167,6 +182,32 @@ export default function PODetail() {
           <Btn testID="pdf-download-btn" title="Download PDF" variant="primary" onPress={downloadPDF} />
           {canReceive ? <Btn testID="mark-received-btn" title="Receive Items" variant="action" onPress={markReceived} /> : null}
         </View>
+
+        {grns.length > 0 ? (
+          <>
+            <H2 style={{ marginTop: 20, marginBottom: 8 }}>Goods Received Notes ({grns.length})</H2>
+            {grns.map((g) => (
+              <Card key={g.grn_id} style={{ marginBottom: 8 }} testID={`grn-${g.grn_number.replace(/\//g, "-")}`}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontWeight: "700", color: theme.colors.primary }}>{g.grn_number}</Text>
+                    <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+                      {new Date(g.date).toLocaleString()} · {g.received_by_name}
+                    </Text>
+                    <Text style={{ fontSize: 12, color: theme.colors.textSecondary, marginTop: 4 }}>
+                      {g.items?.length || 0} line(s) · {(g.items || []).reduce((s: number, it: any) => s + (Number(it.qty) || 0), 0)} units received
+                    </Text>
+                  </View>
+                  <TouchableOpacity testID={`grn-pdf-${g.grn_number.replace(/\//g, "-")}`} onPress={() => downloadGRN(g.grn_id)}
+                    style={styles.grnPdfBtn}>
+                    <Ionicons name="document-outline" size={18} color="#fff" />
+                    <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12, marginLeft: 4 }}>PDF</Text>
+                  </TouchableOpacity>
+                </View>
+              </Card>
+            ))}
+          </>
+        ) : null}
       </ScrollView>
 
       {/* Per-line receipt modal */}
@@ -205,6 +246,14 @@ export default function PODetail() {
               })}
             </ScrollView>
             {err ? <Text testID="recv-err" style={{ color: theme.colors.danger, marginTop: 6 }}>{err}</Text> : null}
+            <TextInput
+              testID="recv-remarks"
+              placeholder="Remarks (optional) — challan #, transporter, etc."
+              value={receiveRemarks}
+              onChangeText={setReceiveRemarks}
+              style={styles.remarksInp}
+              multiline
+            />
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
               <View style={{ flex: 1 }}>
                 <Btn title="Cancel" variant="outline" onPress={() => setReceiveOpen(false)} />
@@ -235,4 +284,12 @@ const styles = StyleSheet.create({
   modal: { backgroundColor: "#fff", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 20 },
   recvRow: { flexDirection: "row", alignItems: "center", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: theme.colors.border },
   recvInp: { width: 80, borderWidth: 1, borderColor: theme.colors.borderStrong, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8, textAlign: "right", fontSize: 14, backgroundColor: "#fff" },
+  remarksInp: { borderWidth: 1, borderColor: theme.colors.borderStrong, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 10, marginTop: 10, fontSize: 13, minHeight: 44, backgroundColor: "#fff" },
+  receiptsBox: { marginTop: 10, padding: 10, backgroundColor: theme.colors.surface, borderRadius: 6, borderWidth: 1, borderColor: theme.colors.border },
+  receiptsLabel: { fontSize: 10, fontWeight: "700", color: theme.colors.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 },
+  receiptRow: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 4, borderTopWidth: 1, borderTopColor: theme.colors.border },
+  receiptDate: { fontSize: 11, color: theme.colors.textSecondary, flex: 1 },
+  receiptQty: { fontSize: 12, fontWeight: "700", color: theme.colors.success, marginHorizontal: 8 },
+  receiptUser: { fontSize: 11, color: theme.colors.textMuted, minWidth: 60, textAlign: "right" },
+  grnPdfBtn: { flexDirection: "row", alignItems: "center", backgroundColor: theme.colors.primary, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6 },
 });

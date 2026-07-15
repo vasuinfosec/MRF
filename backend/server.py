@@ -428,6 +428,16 @@ async def next_po_number() -> str:
     seq = r["seq"] if r else 1
     return f"PO/{year}/{seq:04d}"
 
+async def next_grn_number() -> str:
+    year = datetime.now().year
+    r = await db.counters.find_one_and_update(
+        {"_id": f"grn_{year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True, return_document=True
+    )
+    seq = r["seq"] if r else 1
+    return f"GRN/{year}/{seq:04d}"
+
 @api.post("/mrf")
 async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
@@ -688,6 +698,7 @@ async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] 
     # Track per-line received qty on the PO itself
     po_items = po["items"]
     any_received = False
+    grn_items: List[Dict[str, Any]] = []
     for pit in po_items:
         prev = float(pit.get("qty_received") or 0)
         ordered = float(pit.get("qty") or 0)
@@ -701,7 +712,20 @@ async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] 
         if receive_now <= 0:
             continue
         pit["qty_received"] = prev + receive_now
+        pit.setdefault("receipts", []).append({
+            "date": now_utc().isoformat(),
+            "qty": receive_now,
+            "user_id": u.user_id,
+            "user_name": u.name,
+        })
         any_received = True
+        grn_items.append({
+            "mrf_id": pit["mrf_id"],
+            "item_line_id": pit["item_line_id"],
+            "description": pit.get("description", ""),
+            "unit": pit.get("unit", ""),
+            "qty": receive_now,
+        })
 
         # Roll up to MRF item qty_received
         mrf = await db.mrfs.find_one({"mrf_id": pit["mrf_id"]}, {"_id": 0})
@@ -732,10 +756,31 @@ async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] 
         {"po_id": po_id},
         {"$set": {"items": po_items, "status": new_status}}
     )
-    await audit("po", po_id, "received", u, {"status": new_status, "per_line": [
-        {"item_line_id": k[1], "qty": v} for k, v in per_line.items()
-    ]})
-    return {"ok": True, "status": new_status}
+
+    # Create GRN record if any qty was received
+    grn_id = None
+    grn_number = None
+    if grn_items:
+        grn_id = gid("grn")
+        grn_number = await next_grn_number()
+        await db.grns.insert_one({
+            "grn_id": grn_id,
+            "grn_number": grn_number,
+            "po_id": po_id,
+            "po_number": po["po_number"],
+            "mrf_refs": po.get("mrf_refs", []),
+            "vendor_id": po.get("vendor_id"),
+            "project_id": po.get("project_id"),
+            "date": now_utc(),
+            "items": grn_items,
+            "received_by": u.user_id,
+            "received_by_name": u.name,
+            "remarks": (body or {}).get("remarks", ""),
+        })
+
+    await audit("po", po_id, "received", u, {"status": new_status, "grn_number": grn_number,
+                                              "per_line": grn_items})
+    return {"ok": True, "status": new_status, "grn_id": grn_id, "grn_number": grn_number}
 
 # ---------------------- Billing ----------------------
 @api.get("/billing/items")
@@ -1038,6 +1083,215 @@ async def export_po(token: Optional[str] = None,
                    p.get("vendor_id"), p.get("project_id"), ", ".join(p.get("mrf_refs", [])),
                    p.get("total", 0), p.get("status", "")])
     return _excel_response(wb, "po_export.xlsx")
+
+# ---------------------- GRN ----------------------
+@api.get("/po/{po_id}/grns")
+async def list_grns_for_po(po_id: str, authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    grns = await db.grns.find({"po_id": po_id}, {"_id": 0}).sort("date", -1).to_list(200)
+    return grns
+
+@api.get("/grns")
+async def list_all_grns(authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    return await db.grns.find({}, {"_id": 0}).sort("date", -1).to_list(500)
+
+@api.get("/grn/{grn_id}/pdf")
+async def grn_pdf(grn_id: str, token: Optional[str] = None,
+                  authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    await get_current_user(auth)
+    grn = await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
+    if not grn:
+        raise HTTPException(404, "GRN not found")
+    vendor = await db.vendors.find_one({"vendor_id": grn.get("vendor_id")}, {"_id": 0}) or {}
+    project = await db.projects.find_one({"project_id": grn.get("project_id")}, {"_id": 0}) or {}
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                            leftMargin=15*mm, rightMargin=15*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('t', parent=styles['Title'], fontSize=18, textColor=colors.HexColor('#002FA7'))
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
+    story = [
+        Paragraph("VASU INFOSEC", title_style),
+        Paragraph("GOODS RECEIVED NOTE", styles['Heading2']),
+        Spacer(1, 6),
+        Paragraph(f"<b>GRN Number:</b> {grn['grn_number']}   <b>Date:</b> "
+                  f"{grn['date'].strftime('%d-%b-%Y %H:%M') if isinstance(grn['date'], datetime) else str(grn['date'])}", small),
+        Paragraph(f"<b>PO Ref:</b> {grn.get('po_number','')}    <b>MRF Ref:</b> {', '.join(grn.get('mrf_refs') or [])}", small),
+        Spacer(1, 6),
+        Paragraph(f"<b>Vendor:</b> {vendor.get('name','')} | GSTIN: {vendor.get('gstin','')}", small),
+        Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})", small),
+        Paragraph(f"<b>Received by:</b> {grn.get('received_by_name','')}", small),
+        Spacer(1, 8),
+    ]
+    data = [["#", "Description", "Unit", "Qty Received"]]
+    for idx, it in enumerate(grn.get("items", []), 1):
+        data.append([str(idx), (it.get("description") or "")[:60], it.get("unit", ""), str(it.get("qty", ""))])
+    tbl = Table(data, colWidths=[25, 320, 60, 80])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor('#002FA7')),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(tbl)
+    if grn.get("remarks"):
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f"<b>Remarks:</b> {grn['remarks']}", small))
+    story += [
+        Spacer(1, 40),
+        Paragraph("_______________________________&nbsp;&nbsp;&nbsp;&nbsp;_______________________________", small),
+        Paragraph("Received By&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Vendor Signature", small),
+    ]
+    doc.build(story)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{grn["grn_number"].replace("/","_")}.pdf"'})
+
+# ---------------------- Excel Bulk Import ----------------------
+@api.get("/import/vendors/template")
+async def vendor_template(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    await get_current_user(auth)
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "Vendors"
+    cols = ["name", "address", "gstin", "contact", "email"]
+    ws.append(cols)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+    ws.append(["Sample Vendor Pvt Ltd", "Bangalore", "29AAACS0000A1Z5", "9800000000", "sales@sample.com"])
+    return _excel_response(wb, "vendor_template.xlsx")
+
+@api.get("/import/mrf/template")
+async def mrf_template(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    await get_current_user(auth)
+    wb = openpyxl.Workbook(); ws = wb.active; ws.title = "MRF"
+    cols = ["project_code", "site", "required_by", "requesting_person", "system_category",
+            "description", "specification", "part_number", "unit", "qty_requested",
+            "purpose", "drawing_ref", "billable", "boq_ref", "remarks"]
+    ws.append(cols)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+    ws.append(["VIS-101", "Bangalore Whitefield", "2026-05-15", "Ravi Kumar", "Fire Alarm",
+               "Smoke Detector Photoelectric", "Honeywell 5251E", "5251E", "Nos", 25,
+               "Level 1 Common Area", "FA-DWG-01", "Y", "BOQ-05", "Urgent"])
+    return _excel_response(wb, "mrf_template.xlsx")
+
+@api.post("/import/vendors")
+async def import_vendors(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin" and u.role != "purchase":
+        raise HTTPException(403, "Only admin/purchase")
+    content = await file.read()
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid xlsx: {e}")
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < 2:
+        raise HTTPException(400, "Empty sheet")
+    header = [str(c or "").strip().lower() for c in rows[0]]
+    inserted, skipped, errors = 0, 0, []
+    for idx, row in enumerate(rows[1:], start=2):
+        rec = {header[i]: (row[i] if i < len(row) else None) for i in range(len(header))}
+        name = (rec.get("name") or "").strip() if rec.get("name") else ""
+        if not name:
+            skipped += 1; continue
+        existing = await db.vendors.find_one({"name": name}, {"_id": 0})
+        if existing:
+            skipped += 1; continue
+        try:
+            v = {
+                "vendor_id": gid("vnd"), "name": name,
+                "address": str(rec.get("address") or ""),
+                "gstin": str(rec.get("gstin") or ""),
+                "contact": str(rec.get("contact") or ""),
+                "email": str(rec.get("email") or ""),
+                "active": True,
+            }
+            await db.vendors.insert_one(v)
+            inserted += 1
+            await audit("vendor", v["vendor_id"], "import", u, {"name": name})
+        except Exception as e:
+            errors.append(f"row {idx}: {e}")
+    return {"inserted": inserted, "skipped": skipped, "errors": errors}
+
+@api.post("/import/mrf")
+async def import_mrf(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    content = await file.read()
+    try:
+        wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+    except Exception as e:
+        raise HTTPException(400, f"Invalid xlsx: {e}")
+    ws = wb.active
+    rows = list(ws.iter_rows(values_only=True))
+    if len(rows) < 2:
+        raise HTTPException(400, "Empty sheet")
+    header = [str(c or "").strip().lower() for c in rows[0]]
+
+    # Group by (project_code, site, required_by, requesting_person, system_category)
+    projects = {p["code"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(500)}
+    groups: Dict[tuple, List[Dict[str, Any]]] = {}
+    errors: List[str] = []
+    for idx, row in enumerate(rows[1:], start=2):
+        rec = {header[i]: (row[i] if i < len(row) else None) for i in range(len(header))}
+        code = str(rec.get("project_code") or "").strip()
+        if not code or code not in projects:
+            errors.append(f"row {idx}: unknown project_code '{code}'")
+            continue
+        if not rec.get("description"):
+            errors.append(f"row {idx}: description required")
+            continue
+        key = (code, str(rec.get("site") or ""), str(rec.get("required_by") or ""),
+               str(rec.get("requesting_person") or ""), str(rec.get("system_category") or "Other"))
+        item = {
+            "description": str(rec.get("description")),
+            "specification": str(rec.get("specification") or ""),
+            "part_number": str(rec.get("part_number") or ""),
+            "unit": str(rec.get("unit") or "Nos"),
+            "qty_requested": float(rec.get("qty_requested") or 0),
+            "purpose": str(rec.get("purpose") or ""),
+            "drawing_ref": str(rec.get("drawing_ref") or ""),
+            "billable": str(rec.get("billable") or "Y").strip().upper() != "N",
+            "boq_ref": str(rec.get("boq_ref") or ""),
+            "remarks": str(rec.get("remarks") or ""),
+        }
+        groups.setdefault(key, []).append(item)
+
+    created: List[str] = []
+    for key, items in groups.items():
+        code, site, required_by, requester, syscat = key
+        proj = projects[code]
+        mrf_items = []
+        for it in items:
+            d = dict(it)
+            d["qty_approved"] = d["qty_requested"]
+            mrf_items.append(MRFItem(**d))
+        mrf = MRF(
+            mrf_number=await next_mrf_number(),
+            project_id=proj["project_id"],
+            site=site or proj.get("site", ""),
+            required_by=required_by,
+            requesting_person=requester,
+            system_category=syscat,
+            items=mrf_items,
+            attachments=[],
+            remarks="Imported from Excel",
+            status="draft",
+            created_by=u.user_id,
+        )
+        await db.mrfs.insert_one(mrf.model_dump())
+        await audit("mrf", mrf.mrf_id, "import", u, {"mrf_number": mrf.mrf_number, "items": len(mrf_items)})
+        created.append(mrf.mrf_number)
+
+    return {"created": created, "errors": errors, "count": len(created)}
 
 # ---------------------- Seed ----------------------
 @api.post("/seed")
