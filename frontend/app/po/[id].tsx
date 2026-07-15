@@ -18,6 +18,7 @@ export default function PODetail() {
   const [vendor, setVendor] = useState<any>(null);
   const [project, setProject] = useState<any>(null);
   const [grns, setGrns] = useState<any[]>([]);
+  const [mrfNumbers, setMrfNumbers] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [receiveOpen, setReceiveOpen] = useState(false);
   const [receiveQty, setReceiveQty] = useState<Record<string, string>>({});
@@ -36,6 +37,13 @@ export default function PODetail() {
         api<any[]>(`/po/${id}/grns`),
       ]);
       setVendor(v); setProject(pr); setGrns(gs);
+      // Resolve MRF ids -> mrf_number for display
+      const refs: string[] = p.mrf_refs || [];
+      const map: Record<string, string> = {};
+      await Promise.all(refs.map(async (mid) => {
+        try { const m = await api<any>(`/mrf/${mid}`); map[mid] = m.mrf_number; } catch (_e) { /* noop */ }
+      }));
+      setMrfNumbers(map);
     } catch (_e) { /* noop */ }
     setBusy(false);
   }, [id]);
@@ -112,7 +120,9 @@ export default function PODetail() {
           <Label>PROJECT</Label>
           <Text style={{ fontWeight: "700", fontSize: 15 }}>{project?.code} — {project?.name}</Text>
           <Text style={{ color: theme.colors.textMuted }}>Delivery: {po.delivery_site}</Text>
-          <Text style={{ color: theme.colors.textMuted, marginTop: 4 }}>MRF Refs: {po.mrf_refs?.join(", ")}</Text>
+          <Text style={{ color: theme.colors.textMuted, marginTop: 4 }}>
+            MRF Refs: {(po.mrf_refs || []).map((r: string) => mrfNumbers[r] || r).join(", ") || "—"}
+          </Text>
         </Card>
 
         <H2 style={{ marginTop: 16, marginBottom: 8 }}>Items</H2>

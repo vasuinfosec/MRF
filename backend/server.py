@@ -1225,6 +1225,8 @@ async def import_vendors(file: UploadFile = File(...), authorization: Optional[s
 @api.post("/import/mrf")
 async def import_mrf(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
+    if u.role not in ["admin", "site_engineer", "project_manager"]:
+        raise HTTPException(403, "Only admin/site engineer/project manager can import MRFs")
     content = await file.read()
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
