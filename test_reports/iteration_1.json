@@ -1,0 +1,41 @@
+{
+  "summary": "Full backend + frontend testing for Vasu Infosec MRF & PO System. Backend: 27/27 pytest cases passing after fixing a duplicate-kwarg bug in create_mrf (MRFItem(**dict, qty_approved=...) — MRFItemIn already exposes qty_approved). All flows exercised end-to-end via HTTP: seed → dev-login (5 roles) → auth/me → role enforcement (site_engineer POST /api/po = 403; non-admin POST /api/users/role = 403) → MRF create/submit/approve with item-level actions (approve+reject+modify qty) → return flow → send-to-purchase → PO create (validates rejected items excluded, updates MRF qty_ordered, computes fully_ordered) → PO PDF download (application/pdf, %PDF header) → PO received (updates qty_received on MRF) → billing update auto-computes fully_billed status → override enforcement (fully_billed with billed<received requires override_reason) → dashboard (ageing buckets present) → mrf-ageing → audit-logs populated → Excel export (xlsx PK header) → notifications listed → admin can change role. Frontend UI: login screen renders with all 5 demo buttons; login-as-site_engineer navigates to /home with role-appropriate quick actions; MRF create form works (project picker, item table, add-item, submit); MRF list & detail render; PM approve confirm-modal flow works; send-to-purchase button (testID `send-purchase-btn`) works; Purchase PO list + create-po screen load with approved items enumerated correctly; PO detail shows items/rates/GST/total and PDF download button; Billing screen shows dashboard stats + filters + item cards. Minor deprecation warning: React Native props.pointerEvents (from RN Web layer, low priority).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "RN Web (framework-level)", "issue": "Deprecation warning: props.pointerEvents is deprecated. Use style.pointerEvents. Likely originates from a library, not application code. Reference: browser console."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_mrf_po_workflow.py",
+    "/app/test_reports/pytest/pytest_results.xml"
+  ],
+  "action_items": [
+    "(Optional) Locate and update usages of the deprecated `pointerEvents` prop (or wait for upstream library update).",
+    "(Optional) Consider hiding the Purchase & Billing bottom tabs for the site_engineer role — currently the Home shows role-appropriate quick actions but bottom tab bar is uniform for all users, which may hint at cross-role features. Non-blocking; API-level RBAC is enforced."
+  ],
+  "critical_code_review_comments": [
+    "server.py line 434 (fixed): create_mrf built MRFItem(**i.model_dump(), qty_approved=i.qty_requested) but MRFItemIn already declares qty_approved -> TypeError on every MRF create. Fixed by populating qty_approved from qty_requested only when None before constructing MRFItem.",
+    "server.py is 1100+ lines — consider splitting into modules (auth.py, mrf.py, po.py, billing.py, reports.py, exports.py, seed.py) per the 700-line guideline.",
+    "PO/MRF endpoints do not currently check that `it.qty` on a PO line does not exceed remaining approved qty on the MRF item — over-ordering is silently allowed (all_ordered logic uses >=). Consider clamping/validating.",
+    "PO mark_received endpoint accepts body: dict but never uses per-line received quantities — assumes full qty received. If partial deliveries are expected, extend the payload.",
+    "Billing auto-compute uses qty_approved as denominator when comparing qb >= qa for `fully_billed`. When qty_received < qty_approved this can under-report status. Confirm this is intended.",
+    "CORS is set to allow_origins=['*'] which is fine for dev but should be locked to the production domain in production."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (fixed duplicate-kwarg TypeError in create_mrf)",
+    "/app/backend/tests/test_mrf_po_workflow.py (new comprehensive pytest suite)"
+  ],
+  "success_rate": {"backend": "100% (27/27)", "frontend": "100% of tested flows (login, home, MRF create/submit, PM approve+confirm, send-to-purchase, PO list/create/detail with PDF button, billing dashboard)"},
+  "seed_data_creation": "POST /api/seed called (idempotent). MRF/2026/0001 created via API tests, MRF/2026/0002 (return-flow), MRF/2026/0003 (UI-created & approved & sent to purchase). PO/2026/0001 created & marked received. All test data prefixed with TEST_ or UI_TEST for cleanup.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend test suite at /app/backend/tests/test_mrf_po_workflow.py — run with `pytest backend/tests/test_mrf_po_workflow.py -v`. Base URL from EXPO_PUBLIC_BACKEND_URL in frontend/.env (https://purchase-workflow-10.preview.emergentagent.com). All 5 demo emails/roles created via /api/seed. Frontend testIDs use pattern like `demo-<role>-btn`, `mrf-item-MRF-2026-0003` (slashes replaced with dashes), `approve-mrf-btn`, `send-purchase-btn` (note: NOT send-to-purchase-btn), `confirm-action-btn` for modal confirms, `download-pdf-btn`, `pdf-download-btn`. The MRF create form's 'Submit for Approval' button both creates + submits in one step (MRF goes straight to pm_review, skipping draft).",
+  "rca_of_issue": "Root cause of pre-fix MRF create failure: `MRFItem(**i.model_dump(), qty_approved=i.qty_requested)` — MRFItemIn (parent of MRFItem) declares `qty_approved: Optional[float] = None`, so model_dump() always includes the key. Explicitly passing qty_approved again produced `TypeError: MRFItem() got multiple values for keyword argument 'qty_approved'` on every MRF create request, cascading to 500 errors. Fix: build dict, set qty_approved only if None, then splat into MRFItem(**d)."
+}

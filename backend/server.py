@@ -1,60 +1,1099 @@
-from fastapi import FastAPI, APIRouter
-from dotenv import load_dotenv
-from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+"""
+Vasu Infosec — Material Requisition & Purchase Order System
+Backend: FastAPI + MongoDB + Emergent Google Auth
+"""
 import os
+import io
+import uuid
 import logging
 from pathlib import Path
-from pydantic import BaseModel, Field
-from typing import List
-import uuid
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+from typing import List, Optional, Literal, Dict, Any
 
+import httpx
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Request, Response, UploadFile, File
+from fastapi.responses import StreamingResponse, JSONResponse
+from starlette.middleware.cors import CORSMiddleware
+from dotenv import load_dotenv
+from motor.motor_asyncio import AsyncIOMotorClient
+from pydantic import BaseModel, Field, EmailStr
+
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+
+import openpyxl
+from openpyxl.styles import Font, PatternFill, Alignment
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+MONGO_URL = os.environ['MONGO_URL']
+DB_NAME = os.environ['DB_NAME']
 
-# Create the main app without a prefix
-app = FastAPI()
+client = AsyncIOMotorClient(MONGO_URL)
+db = client[DB_NAME]
 
-# Create a router with the /api prefix
-api_router = APIRouter(prefix="/api")
+app = FastAPI(title="Vasu Infosec MRF & PO System")
+api = APIRouter(prefix="/api")
 
+# ---------------------- Constants ----------------------
+ROLES = ["site_engineer", "project_manager", "purchase", "billing", "admin"]
+SYSTEMS = ["Fire Alarm", "Fire Fighting", "Gas Suppression", "Water Mist",
+           "CCTV", "Access Control", "Structured Cabling", "Electrical", "Other"]
+MRF_STATUS = ["draft", "submitted", "pm_review", "approved", "rejected",
+              "returned", "sent_to_purchase", "partially_ordered", "fully_ordered",
+              "received", "closed"]
+BILLING_STATUS = ["not_billed", "partially_billed", "fully_billed", "non_billable"]
 
-# Define Models
-class StatusCheck(BaseModel):
-    id: str = Field(default_factory=lambda: str(uuid.uuid4()))
-    client_name: str
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
+# ---------------------- Models ----------------------
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
 
-class StatusCheckCreate(BaseModel):
-    client_name: str
+def gid(prefix: str = "id") -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
-# Add your routes to the router instead of directly to app
-@api_router.get("/")
+class UserOut(BaseModel):
+    user_id: str
+    email: str
+    name: str
+    picture: Optional[str] = None
+    role: str = "site_engineer"
+    is_active: bool = True
+
+class RoleUpdate(BaseModel):
+    user_id: str
+    role: str
+
+class SessionRequest(BaseModel):
+    session_id: str
+
+class Project(BaseModel):
+    project_id: str = Field(default_factory=lambda: gid("prj"))
+    code: str
+    name: str
+    site: str
+    client: Optional[str] = None
+    active: bool = True
+
+class Vendor(BaseModel):
+    vendor_id: str = Field(default_factory=lambda: gid("vnd"))
+    name: str
+    address: Optional[str] = ""
+    gstin: Optional[str] = ""
+    contact: Optional[str] = ""
+    email: Optional[str] = ""
+    active: bool = True
+
+class MasterItem(BaseModel):
+    item_id: str = Field(default_factory=lambda: gid("itm"))
+    name: str
+    category: str  # unit/system/brand/material
+    active: bool = True
+
+class MRFItemIn(BaseModel):
+    description: str
+    specification: Optional[str] = ""
+    part_number: Optional[str] = ""
+    unit: str
+    qty_requested: float
+    qty_approved: Optional[float] = None
+    purpose: Optional[str] = ""
+    drawing_ref: Optional[str] = ""
+    billable: bool = True
+    boq_ref: Optional[str] = ""
+    remarks: Optional[str] = ""
+
+class MRFItem(MRFItemIn):
+    item_line_id: str = Field(default_factory=lambda: gid("mli"))
+    status: str = "pending"  # pending/approved/rejected
+    rejection_reason: Optional[str] = ""
+    billing_status: str = "not_billed"
+    qty_received: float = 0
+    qty_issued: float = 0
+    qty_billed: float = 0
+    qty_ordered: float = 0
+    client_bill_ref: Optional[str] = ""
+    ra_bill_no: Optional[str] = ""
+    billing_date: Optional[str] = ""
+    billing_remarks: Optional[str] = ""
+
+class MRFCreate(BaseModel):
+    project_id: str
+    site: str
+    required_by: str
+    requesting_person: str
+    system_category: str
+    items: List[MRFItemIn]
+    attachments: List[str] = []  # base64 or descriptions
+    remarks: Optional[str] = ""
+
+class MRF(BaseModel):
+    mrf_id: str = Field(default_factory=lambda: gid("mrf"))
+    mrf_number: str
+    date: datetime = Field(default_factory=now_utc)
+    project_id: str
+    site: str
+    required_by: str
+    requesting_person: str
+    system_category: str
+    items: List[MRFItem]
+    attachments: List[str] = []
+    remarks: str = ""
+    status: str = "draft"
+    created_by: str
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+    pm_comments: str = ""
+    deleted: bool = False
+
+class POItemIn(BaseModel):
+    mrf_id: str
+    item_line_id: str
+    description: str
+    specification: Optional[str] = ""
+    unit: str
+    qty: float
+    rate: float = 0
+    discount: float = 0
+    gst: float = 18
+    remarks: Optional[str] = ""
+
+class POCreate(BaseModel):
+    vendor_id: str
+    project_id: str
+    delivery_site: str
+    items: List[POItemIn]
+    delivery_schedule: Optional[str] = ""
+    payment_terms: Optional[str] = ""
+    warranty_terms: Optional[str] = ""
+    freight: float = 0
+    other_charges: float = 0
+    authorised_signatory: Optional[str] = ""
+    vendor_quotation: Optional[str] = ""
+
+class PO(POCreate):
+    po_id: str = Field(default_factory=lambda: gid("po"))
+    po_number: str
+    date: datetime = Field(default_factory=now_utc)
+    mrf_refs: List[str] = []
+    status: str = "issued"  # issued/received/closed
+    total: float = 0
+    created_by: str
+    created_at: datetime = Field(default_factory=now_utc)
+    deleted: bool = False
+
+class BillingUpdate(BaseModel):
+    mrf_id: str
+    item_line_id: str
+    qty_received: Optional[float] = None
+    qty_issued: Optional[float] = None
+    qty_billed: Optional[float] = None
+    client_bill_ref: Optional[str] = None
+    ra_bill_no: Optional[str] = None
+    billing_date: Optional[str] = None
+    billing_remarks: Optional[str] = None
+    billing_status: Optional[str] = None
+    override_reason: Optional[str] = None
+
+class ApprovalAction(BaseModel):
+    action: str  # approve/reject/return
+    comment: Optional[str] = ""
+    item_actions: Optional[List[Dict[str, Any]]] = None  # [{item_line_id, action, qty_approved, reason}]
+
+# ---------------------- Auth ----------------------
+async def get_current_user(authorization: Optional[str] = Header(None)) -> UserOut:
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Missing token")
+    token = authorization.split(" ", 1)[1]
+    sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+    if not sess:
+        raise HTTPException(status_code=401, detail="Invalid session")
+    exp = sess["expires_at"]
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if exp < now_utc():
+        raise HTTPException(status_code=401, detail="Session expired")
+    user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+    return UserOut(**user)
+
+def require_roles(*allowed):
+    async def dep(user: UserOut = None, authorization: Optional[str] = Header(None)):
+        u = await get_current_user(authorization)
+        if u.role not in allowed and u.role != "admin":
+            raise HTTPException(status_code=403, detail=f"Role {u.role} not allowed")
+        return u
+    return dep
+
+@api.post("/auth/session")
+async def create_session(body: SessionRequest):
+    async with httpx.AsyncClient(timeout=15) as client_http:
+        r = await client_http.get(
+            "https://demobackend.emergentagent.com/auth/v1/env/oauth/session-data",
+            headers={"X-Session-ID": body.session_id},
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=401, detail="Invalid session_id")
+        data = r.json()
+
+    email = data["email"]
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+        role = existing.get("role", "site_engineer")
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        # First user becomes admin
+        count = await db.users.count_documents({})
+        role = "admin" if count == 0 else "site_engineer"
+        await db.users.insert_one({
+            "user_id": user_id,
+            "email": email,
+            "name": data.get("name", email),
+            "picture": data.get("picture", ""),
+            "role": role,
+            "is_active": True,
+            "created_at": now_utc(),
+        })
+
+    session_token = data["session_token"]
+    await db.user_sessions.update_one(
+        {"session_token": session_token},
+        {"$set": {
+            "session_token": session_token,
+            "user_id": user_id,
+            "expires_at": now_utc() + timedelta(days=7),
+            "created_at": now_utc(),
+        }},
+        upsert=True,
+    )
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"session_token": session_token, "user": UserOut(**user).model_dump()}
+
+@api.get("/auth/me", response_model=UserOut)
+async def me(authorization: Optional[str] = Header(None)):
+    return await get_current_user(authorization)
+
+@api.post("/auth/logout")
+async def logout(authorization: Optional[str] = Header(None)):
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization.split(" ", 1)[1]
+        await db.user_sessions.delete_one({"session_token": token})
+    return {"ok": True}
+
+@api.post("/auth/dev-login")
+async def dev_login(body: dict):
+    """Dev-only: create/login as a given role. Used for testing without Google OAuth."""
+    email = body.get("email")
+    role = body.get("role", "site_engineer")
+    name = body.get("name", email.split("@")[0] if email else "Dev User")
+    if not email:
+        raise HTTPException(400, "email required")
+    if role not in ROLES:
+        raise HTTPException(400, "invalid role")
+    existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if existing:
+        user_id = existing["user_id"]
+        await db.users.update_one({"user_id": user_id}, {"$set": {"role": role, "name": name}})
+    else:
+        user_id = f"user_{uuid.uuid4().hex[:12]}"
+        await db.users.insert_one({
+            "user_id": user_id, "email": email, "name": name, "picture": "",
+            "role": role, "is_active": True, "created_at": now_utc(),
+        })
+    session_token = f"dev_{uuid.uuid4().hex}"
+    await db.user_sessions.insert_one({
+        "session_token": session_token, "user_id": user_id,
+        "expires_at": now_utc() + timedelta(days=7), "created_at": now_utc(),
+    })
+    user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    return {"session_token": session_token, "user": UserOut(**user).model_dump()}
+
+# ---------------------- Users / Roles ----------------------
+@api.get("/users", response_model=List[UserOut])
+async def list_users(authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    users = await db.users.find({}, {"_id": 0}).to_list(1000)
+    return [UserOut(**u) for u in users]
+
+@api.post("/users/role", response_model=UserOut)
+async def set_role(body: RoleUpdate, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin can change roles")
+    if body.role not in ROLES:
+        raise HTTPException(400, "Invalid role")
+    r = await db.users.update_one({"user_id": body.user_id}, {"$set": {"role": body.role}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "User not found")
+    user = await db.users.find_one({"user_id": body.user_id}, {"_id": 0})
+    return UserOut(**user)
+
+# ---------------------- Audit ----------------------
+async def audit(entity: str, entity_id: str, action: str, user: UserOut, details: dict = None):
+    await db.audit_logs.insert_one({
+        "audit_id": gid("aud"),
+        "entity": entity,
+        "entity_id": entity_id,
+        "action": action,
+        "user_id": user.user_id,
+        "user_name": user.name,
+        "user_role": user.role,
+        "details": details or {},
+        "timestamp": now_utc(),
+    })
+
+async def notify(user_ids: List[str], title: str, body_text: str, link: str = ""):
+    for uid in user_ids:
+        await db.notifications.insert_one({
+            "notification_id": gid("ntf"),
+            "user_id": uid,
+            "title": title,
+            "body": body_text,
+            "link": link,
+            "read": False,
+            "created_at": now_utc(),
+        })
+
+# ---------------------- Master Data ----------------------
+@api.get("/projects")
+async def list_projects(authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    return await db.projects.find({"active": True}, {"_id": 0}).to_list(500)
+
+@api.post("/projects")
+async def add_project(p: Project, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["admin"]:
+        raise HTTPException(403, "Only admin")
+    await db.projects.insert_one(p.model_dump())
+    await audit("project", p.project_id, "create", u, p.model_dump())
+    return p
+
+@api.get("/vendors")
+async def list_vendors(authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    return await db.vendors.find({"active": True}, {"_id": 0}).to_list(500)
+
+@api.post("/vendors")
+async def add_vendor(v: Vendor, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["admin", "purchase"]:
+        raise HTTPException(403, "Not allowed")
+    await db.vendors.insert_one(v.model_dump())
+    await audit("vendor", v.vendor_id, "create", u, v.model_dump())
+    return v
+
+@api.get("/masters")
+async def list_masters(authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    items = await db.masters.find({"active": True}, {"_id": 0}).to_list(1000)
+    grouped: Dict[str, List] = {"unit": [], "brand": [], "system": [], "material": []}
+    for it in items:
+        grouped.setdefault(it["category"], []).append(it)
+    grouped["system"] = grouped.get("system") or [{"name": s} for s in SYSTEMS]
+    return grouped
+
+@api.post("/masters")
+async def add_master(m: MasterItem, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin")
+    await db.masters.insert_one(m.model_dump())
+    await audit("master", m.item_id, "create", u, m.model_dump())
+    return m
+
+# ---------------------- MRF ----------------------
+async def next_mrf_number() -> str:
+    year = datetime.now().year
+    r = await db.counters.find_one_and_update(
+        {"_id": f"mrf_{year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True, return_document=True
+    )
+    seq = r["seq"] if r else 1
+    return f"MRF/{year}/{seq:04d}"
+
+async def next_po_number() -> str:
+    year = datetime.now().year
+    r = await db.counters.find_one_and_update(
+        {"_id": f"po_{year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True, return_document=True
+    )
+    seq = r["seq"] if r else 1
+    return f"PO/{year}/{seq:04d}"
+
+@api.post("/mrf")
+async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    items = []
+    for i in body.items:
+        d = i.model_dump()
+        if d.get("qty_approved") is None:
+            d["qty_approved"] = i.qty_requested
+        items.append(MRFItem(**d))
+    mrf = MRF(
+        mrf_number=await next_mrf_number(),
+        project_id=body.project_id,
+        site=body.site,
+        required_by=body.required_by,
+        requesting_person=body.requesting_person,
+        system_category=body.system_category,
+        items=items,
+        attachments=body.attachments,
+        remarks=body.remarks or "",
+        status="draft",
+        created_by=u.user_id,
+    )
+    await db.mrfs.insert_one(mrf.model_dump())
+    await audit("mrf", mrf.mrf_id, "create", u, {"mrf_number": mrf.mrf_number})
+    return mrf.model_dump()
+
+@api.get("/mrf")
+async def list_mrfs(
+    status: Optional[str] = None,
+    project_id: Optional[str] = None,
+    system_category: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
+):
+    u = await get_current_user(authorization)
+    q: Dict[str, Any] = {"deleted": False}
+    if status:
+        q["status"] = status
+    if project_id:
+        q["project_id"] = project_id
+    if system_category:
+        q["system_category"] = system_category
+    # Site engineers only see their own
+    if u.role == "site_engineer":
+        q["created_by"] = u.user_id
+    docs = await db.mrfs.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+@api.get("/mrf/{mrf_id}")
+async def get_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "MRF not found")
+    return d
+
+@api.post("/mrf/{mrf_id}/submit")
+async def submit_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "MRF not found")
+    if d["status"] not in ["draft", "returned"]:
+        raise HTTPException(400, "Cannot submit from current status")
+    await db.mrfs.update_one(
+        {"mrf_id": mrf_id},
+        {"$set": {"status": "pm_review", "updated_at": now_utc()}}
+    )
+    await audit("mrf", mrf_id, "submit", u)
+    # Notify PMs
+    pms = await db.users.find({"role": "project_manager"}, {"_id": 0, "user_id": 1}).to_list(50)
+    await notify([p["user_id"] for p in pms], "MRF pending review",
+                 f"{d['mrf_number']} needs your review", f"/mrf/{mrf_id}")
+    return {"ok": True}
+
+@api.post("/mrf/{mrf_id}/approve")
+async def approve_mrf(mrf_id: str, body: ApprovalAction, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["project_manager", "admin"]:
+        raise HTTPException(403, "Only PM/admin")
+    d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "MRF not found")
+
+    if body.action == "return":
+        await db.mrfs.update_one(
+            {"mrf_id": mrf_id},
+            {"$set": {"status": "returned", "pm_comments": body.comment or "",
+                      "updated_at": now_utc()}}
+        )
+        await audit("mrf", mrf_id, "return", u, {"comment": body.comment})
+        await notify([d["created_by"]], "MRF returned", f"{d['mrf_number']} returned for correction", f"/mrf/{mrf_id}")
+        return {"ok": True, "status": "returned"}
+
+    # apply item-level actions
+    items = d["items"]
+    if body.item_actions:
+        for ia in body.item_actions:
+            for it in items:
+                if it["item_line_id"] == ia.get("item_line_id"):
+                    if ia.get("action") == "reject":
+                        it["status"] = "rejected"
+                        it["rejection_reason"] = ia.get("reason", "")
+                        it["qty_approved"] = 0
+                    else:
+                        it["status"] = "approved"
+                        if ia.get("qty_approved") is not None:
+                            it["qty_approved"] = float(ia["qty_approved"])
+    else:
+        for it in items:
+            it["status"] = "approved"
+
+    all_rejected = all(it["status"] == "rejected" for it in items)
+    if body.action == "reject" or all_rejected:
+        new_status = "rejected"
+    else:
+        new_status = "approved"
+
+    await db.mrfs.update_one(
+        {"mrf_id": mrf_id},
+        {"$set": {"items": items, "status": new_status,
+                  "pm_comments": body.comment or "", "updated_at": now_utc()}}
+    )
+    await audit("mrf", mrf_id, body.action, u, {"comment": body.comment, "items": body.item_actions})
+    # Notify creator + purchase
+    tgt = [d["created_by"]]
+    if new_status == "approved":
+        purchases = await db.users.find({"role": "purchase"}, {"_id": 0, "user_id": 1}).to_list(50)
+        tgt += [p["user_id"] for p in purchases]
+    await notify(tgt, f"MRF {new_status}", f"{d['mrf_number']} {new_status}", f"/mrf/{mrf_id}")
+    return {"ok": True, "status": new_status}
+
+@api.post("/mrf/{mrf_id}/send-to-purchase")
+async def send_to_purchase(mrf_id: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["project_manager", "admin"]:
+        raise HTTPException(403, "Not allowed")
+    d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not d or d["status"] != "approved":
+        raise HTTPException(400, "MRF must be approved first")
+    await db.mrfs.update_one({"mrf_id": mrf_id}, {"$set": {"status": "sent_to_purchase", "updated_at": now_utc()}})
+    await audit("mrf", mrf_id, "send_to_purchase", u)
+    return {"ok": True}
+
+@api.delete("/mrf/{mrf_id}")
+async def delete_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin can delete")
+    await db.mrfs.update_one({"mrf_id": mrf_id}, {"$set": {"deleted": True}})
+    await audit("mrf", mrf_id, "soft_delete", u)
+    return {"ok": True}
+
+# ---------------------- Purchase Orders ----------------------
+@api.post("/po")
+async def create_po(body: POCreate, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["purchase", "admin"]:
+        raise HTTPException(403, "Only purchase/admin")
+
+    # Validate: no rejected items
+    mrf_refs = set()
+    total = 0.0
+    for it in body.items:
+        mrf_refs.add(it.mrf_id)
+        mrf = await db.mrfs.find_one({"mrf_id": it.mrf_id}, {"_id": 0})
+        if not mrf:
+            raise HTTPException(400, f"MRF {it.mrf_id} not found")
+        if mrf["status"] not in ["approved", "sent_to_purchase", "partially_ordered"]:
+            raise HTTPException(400, f"MRF {mrf['mrf_number']} not in purchasable state")
+        for mi in mrf["items"]:
+            if mi["item_line_id"] == it.item_line_id:
+                if mi["status"] == "rejected":
+                    raise HTTPException(400, f"Item {mi['description']} is rejected")
+        gross = it.qty * it.rate
+        after_disc = gross - it.discount
+        gst_amt = after_disc * it.gst / 100
+        total += after_disc + gst_amt
+    total += body.freight + body.other_charges
+
+    po = PO(
+        po_number=await next_po_number(),
+        vendor_id=body.vendor_id,
+        project_id=body.project_id,
+        delivery_site=body.delivery_site,
+        items=body.items,
+        delivery_schedule=body.delivery_schedule,
+        payment_terms=body.payment_terms,
+        warranty_terms=body.warranty_terms,
+        freight=body.freight,
+        other_charges=body.other_charges,
+        authorised_signatory=body.authorised_signatory,
+        vendor_quotation=body.vendor_quotation,
+        mrf_refs=list(mrf_refs),
+        total=round(total, 2),
+        created_by=u.user_id,
+    )
+    po_doc = po.model_dump()
+    # items -> as dict
+    po_doc["items"] = [i.model_dump() if hasattr(i, "model_dump") else i for i in body.items]
+    await db.pos.insert_one(po_doc)
+
+    # Update MRF item qty_ordered and MRF status
+    for it in body.items:
+        mrf = await db.mrfs.find_one({"mrf_id": it.mrf_id}, {"_id": 0})
+        items = mrf["items"]
+        for mi in items:
+            if mi["item_line_id"] == it.item_line_id:
+                mi["qty_ordered"] = (mi.get("qty_ordered") or 0) + it.qty
+        all_ordered = all(
+            (mi.get("qty_ordered") or 0) >= (mi.get("qty_approved") or 0)
+            for mi in items if mi["status"] != "rejected"
+        )
+        any_ordered = any((mi.get("qty_ordered") or 0) > 0 for mi in items)
+        new_status = "fully_ordered" if all_ordered else ("partially_ordered" if any_ordered else mrf["status"])
+        await db.mrfs.update_one({"mrf_id": it.mrf_id},
+                                 {"$set": {"items": items, "status": new_status, "updated_at": now_utc()}})
+
+    await audit("po", po.po_id, "create", u, {"po_number": po.po_number, "total": total})
+    po_doc.pop("_id", None)
+    return po_doc
+
+@api.get("/po")
+async def list_pos(project_id: Optional[str] = None,
+                   authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    q: Dict[str, Any] = {"deleted": False}
+    if project_id:
+        q["project_id"] = project_id
+    docs = await db.pos.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+@api.get("/po/{po_id}")
+async def get_po(po_id: str, authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    d = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "PO not found")
+    return d
+
+@api.post("/po/{po_id}/received")
+async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO not found")
+    await db.pos.update_one({"po_id": po_id}, {"$set": {"status": "received"}})
+    # Update qty_received on MRF items
+    for it in po["items"]:
+        mrf = await db.mrfs.find_one({"mrf_id": it["mrf_id"]}, {"_id": 0})
+        if not mrf:
+            continue
+        items = mrf["items"]
+        for mi in items:
+            if mi["item_line_id"] == it["item_line_id"]:
+                mi["qty_received"] = (mi.get("qty_received") or 0) + it["qty"]
+        all_recv = all(
+            (mi.get("qty_received") or 0) >= (mi.get("qty_approved") or 0)
+            for mi in items if mi["status"] != "rejected"
+        )
+        await db.mrfs.update_one(
+            {"mrf_id": it["mrf_id"]},
+            {"$set": {"items": items, "status": "received" if all_recv else mrf["status"],
+                      "updated_at": now_utc()}}
+        )
+    await audit("po", po_id, "received", u)
+    return {"ok": True}
+
+# ---------------------- Billing ----------------------
+@api.get("/billing/items")
+async def billing_items(
+    filter: Optional[str] = None,  # not_billed / partially_billed / fully_billed / non_billable
+    project_id: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
+):
+    await get_current_user(authorization)
+    q: Dict[str, Any] = {"deleted": False}
+    if project_id:
+        q["project_id"] = project_id
+    mrfs = await db.mrfs.find(q, {"_id": 0}).to_list(500)
+    out = []
+    for m in mrfs:
+        for it in m["items"]:
+            if it["status"] == "rejected":
+                continue
+            bstat = it.get("billing_status", "not_billed")
+            if filter and bstat != filter:
+                continue
+            out.append({
+                "mrf_id": m["mrf_id"], "mrf_number": m["mrf_number"],
+                "project_id": m["project_id"], "site": m["site"],
+                "item_line_id": it["item_line_id"], "description": it["description"],
+                "unit": it["unit"], "qty_approved": it.get("qty_approved") or 0,
+                "qty_received": it.get("qty_received") or 0,
+                "qty_issued": it.get("qty_issued") or 0,
+                "qty_billed": it.get("qty_billed") or 0,
+                "billing_status": bstat, "billable": it.get("billable", True),
+                "client_bill_ref": it.get("client_bill_ref", ""),
+                "ra_bill_no": it.get("ra_bill_no", ""),
+                "billing_date": it.get("billing_date", ""),
+            })
+    return out
+
+@api.post("/billing/update")
+async def update_billing(body: BillingUpdate, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["billing", "admin"]:
+        raise HTTPException(403, "Only billing/admin")
+    mrf = await db.mrfs.find_one({"mrf_id": body.mrf_id}, {"_id": 0})
+    if not mrf:
+        raise HTTPException(404, "MRF not found")
+    items = mrf["items"]
+    for it in items:
+        if it["item_line_id"] == body.item_line_id:
+            if body.qty_received is not None:
+                it["qty_received"] = body.qty_received
+            if body.qty_issued is not None:
+                it["qty_issued"] = body.qty_issued
+            if body.qty_billed is not None:
+                it["qty_billed"] = body.qty_billed
+            if body.client_bill_ref is not None:
+                it["client_bill_ref"] = body.client_bill_ref
+            if body.ra_bill_no is not None:
+                it["ra_bill_no"] = body.ra_bill_no
+            if body.billing_date is not None:
+                it["billing_date"] = body.billing_date
+            if body.billing_remarks is not None:
+                it["billing_remarks"] = body.billing_remarks
+            # Auto-compute billing status
+            new_bstat = it.get("billing_status", "not_billed")
+            if body.billing_status:
+                if body.billing_status == "fully_billed":
+                    qa = it.get("qty_approved") or 0
+                    qr = it.get("qty_received") or qa
+                    qb = it.get("qty_billed") or 0
+                    if qb < qr and not body.override_reason:
+                        raise HTTPException(400, "Cannot mark fully billed: billed < received. Provide override_reason.")
+                new_bstat = body.billing_status
+            else:
+                qa = it.get("qty_approved") or 0
+                qb = it.get("qty_billed") or 0
+                if not it.get("billable", True):
+                    new_bstat = "non_billable"
+                elif qb <= 0:
+                    new_bstat = "not_billed"
+                elif qb >= qa:
+                    new_bstat = "fully_billed"
+                else:
+                    new_bstat = "partially_billed"
+            it["billing_status"] = new_bstat
+    await db.mrfs.update_one({"mrf_id": body.mrf_id}, {"$set": {"items": items, "updated_at": now_utc()}})
+    await audit("billing", body.item_line_id, "update", u, body.model_dump(exclude_none=True))
+    return {"ok": True}
+
+# ---------------------- Notifications ----------------------
+@api.get("/notifications")
+async def list_notifications(authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    docs = await db.notifications.find({"user_id": u.user_id}, {"_id": 0}).sort("created_at", -1).limit(50).to_list(50)
+    return docs
+
+@api.post("/notifications/{nid}/read")
+async def read_notif(nid: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    await db.notifications.update_one({"notification_id": nid, "user_id": u.user_id}, {"$set": {"read": True}})
+    return {"ok": True}
+
+# ---------------------- Reports / Dashboards ----------------------
+@api.get("/reports/dashboard")
+async def dashboard(authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    total_mrf = len(mrfs)
+    pending_pm = sum(1 for m in mrfs if m["status"] in ["pm_review", "submitted"])
+    pending_purchase = sum(1 for m in mrfs if m["status"] in ["approved", "sent_to_purchase", "partially_ordered"])
+    approved = sum(1 for m in mrfs if m["status"] == "approved")
+    total_po = len(pos)
+    po_value = sum(p.get("total", 0) for p in pos)
+
+    # billable vs non-billable
+    billable_value = 0
+    non_billable_value = 0
+    pending_billing_count = 0
+    fully_billed_count = 0
+    for m in mrfs:
+        for it in m["items"]:
+            if it.get("billable", True):
+                billable_value += (it.get("qty_approved") or 0)
+                if it.get("billing_status") in ["not_billed", "partially_billed"]:
+                    pending_billing_count += 1
+                if it.get("billing_status") == "fully_billed":
+                    fully_billed_count += 1
+            else:
+                non_billable_value += (it.get("qty_approved") or 0)
+
+    # ageing: draft/submitted older than 3 days
+    now = now_utc()
+    ageing_buckets = {"0-3": 0, "4-7": 0, "8-15": 0, "16+": 0}
+    for m in mrfs:
+        if m["status"] in ["approved", "closed", "received", "fully_ordered"]:
+            continue
+        created = m["created_at"]
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        days = (now - created).days
+        if days <= 3:
+            ageing_buckets["0-3"] += 1
+        elif days <= 7:
+            ageing_buckets["4-7"] += 1
+        elif days <= 15:
+            ageing_buckets["8-15"] += 1
+        else:
+            ageing_buckets["16+"] += 1
+
+    return {
+        "total_mrf": total_mrf,
+        "pending_pm": pending_pm,
+        "pending_purchase": pending_purchase,
+        "approved": approved,
+        "total_po": total_po,
+        "po_value": round(po_value, 2),
+        "billable_value": billable_value,
+        "non_billable_value": non_billable_value,
+        "pending_billing_count": pending_billing_count,
+        "fully_billed_count": fully_billed_count,
+        "ageing": ageing_buckets,
+    }
+
+@api.get("/reports/mrf-ageing")
+async def mrf_ageing(authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    now = now_utc()
+    out = []
+    for m in mrfs:
+        if m["status"] in ["closed", "received"]:
+            continue
+        created = m["created_at"]
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        days = (now - created).days
+        out.append({"mrf_id": m["mrf_id"], "mrf_number": m["mrf_number"],
+                    "status": m["status"], "days": days,
+                    "project_id": m["project_id"], "site": m["site"]})
+    out.sort(key=lambda x: -x["days"])
+    return out
+
+@api.get("/audit")
+async def audit_logs(entity_id: Optional[str] = None,
+                     authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    q = {}
+    if entity_id:
+        q["entity_id"] = entity_id
+    logs = await db.audit_logs.find(q, {"_id": 0}).sort("timestamp", -1).limit(200).to_list(200)
+    return logs
+
+# ---------------------- PDF ----------------------
+@api.get("/po/{po_id}/pdf")
+async def po_pdf(po_id: str, token: Optional[str] = None,
+                 authorization: Optional[str] = Header(None)):
+    # Allow token via query for browser download
+    auth = authorization or (f"Bearer {token}" if token else None)
+    await get_current_user(auth)
+    po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO not found")
+    vendor = await db.vendors.find_one({"vendor_id": po["vendor_id"]}, {"_id": 0}) or {}
+    project = await db.projects.find_one({"project_id": po["project_id"]}, {"_id": 0}) or {}
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                            leftMargin=15*mm, rightMargin=15*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('t', parent=styles['Title'], fontSize=18, textColor=colors.HexColor('#002FA7'))
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
+    story = []
+    story.append(Paragraph("VASU INFOSEC", title_style))
+    story.append(Paragraph("PURCHASE ORDER", styles['Heading2']))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(f"<b>PO Number:</b> {po['po_number']}   <b>Date:</b> {po['date'].strftime('%d-%b-%Y')}", small))
+    story.append(Paragraph(f"<b>MRF Ref:</b> {', '.join(po.get('mrf_refs', []))}", small))
+    story.append(Spacer(1, 6))
+    vendor_info = f"<b>Vendor:</b> {vendor.get('name','')}<br/>{vendor.get('address','')}<br/>GSTIN: {vendor.get('gstin','')}<br/>Contact: {vendor.get('contact','')}"
+    story.append(Paragraph(vendor_info, small))
+    story.append(Spacer(1, 4))
+    story.append(Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})<br/><b>Delivery:</b> {po['delivery_site']}", small))
+    story.append(Spacer(1, 8))
+
+    data = [["#", "Description", "Unit", "Qty", "Rate", "Disc", "GST%", "Total"]]
+    for idx, it in enumerate(po["items"], 1):
+        gross = it["qty"] * it["rate"]
+        after_disc = gross - (it.get("discount") or 0)
+        gst_amt = after_disc * (it.get("gst") or 0) / 100
+        total = after_disc + gst_amt
+        data.append([str(idx), it["description"][:40], it["unit"], f"{it['qty']}", f"{it['rate']}",
+                     f"{it.get('discount', 0)}", f"{it.get('gst', 0)}", f"{total:.2f}"])
+    tbl = Table(data, colWidths=[20, 180, 40, 40, 50, 40, 40, 60])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor('#002FA7')),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(f"<b>Freight:</b> {po.get('freight',0)}  <b>Other:</b> {po.get('other_charges',0)}  <b>Grand Total:</b> {po.get('total',0)}", small))
+    story.append(Spacer(1, 6))
+    story.append(Paragraph(f"<b>Delivery:</b> {po.get('delivery_schedule','')}", small))
+    story.append(Paragraph(f"<b>Payment:</b> {po.get('payment_terms','')}", small))
+    story.append(Paragraph(f"<b>Warranty:</b> {po.get('warranty_terms','')}", small))
+    story.append(Spacer(1, 20))
+    story.append(Paragraph(f"Authorised Signatory: {po.get('authorised_signatory','')}", small))
+    doc.build(story)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{po["po_number"].replace("/","_")}.pdf"'})
+
+# ---------------------- Excel ----------------------
+def _excel_response(wb, filename):
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+@api.get("/export/mrf")
+async def export_mrf(token: Optional[str] = None,
+                     authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    await get_current_user(auth)
+    mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "MRFs"
+    headers = ["MRF#", "Date", "Project", "Site", "Requester", "System", "Status", "Item", "Qty", "Approved", "Billing"]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+    for m in mrfs:
+        for it in m["items"]:
+            ws.append([m["mrf_number"], m["date"].strftime("%Y-%m-%d") if isinstance(m["date"], datetime) else str(m["date"]),
+                       m["project_id"], m["site"], m["requesting_person"], m["system_category"],
+                       m["status"], it["description"], it["qty_requested"],
+                       it.get("qty_approved") or 0, it.get("billing_status", "")])
+    return _excel_response(wb, "mrf_export.xlsx")
+
+@api.get("/export/po")
+async def export_po(token: Optional[str] = None,
+                    authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    await get_current_user(auth)
+    pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "POs"
+    ws.append(["PO#", "Date", "Vendor", "Project", "MRF Refs", "Total", "Status"])
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+    for p in pos:
+        ws.append([p["po_number"], p["date"].strftime("%Y-%m-%d") if isinstance(p["date"], datetime) else str(p["date"]),
+                   p.get("vendor_id"), p.get("project_id"), ", ".join(p.get("mrf_refs", [])),
+                   p.get("total", 0), p.get("status", "")])
+    return _excel_response(wb, "po_export.xlsx")
+
+# ---------------------- Seed ----------------------
+@api.post("/seed")
+async def seed_data():
+    """Idempotent seed of demo data."""
+    # Users
+    demo_users = [
+        {"email": "site@vasu.dev", "name": "Ravi (Site Engineer)", "role": "site_engineer"},
+        {"email": "pm@vasu.dev", "name": "Priya (Project Mgr)", "role": "project_manager"},
+        {"email": "purchase@vasu.dev", "name": "Kumar (Purchase)", "role": "purchase"},
+        {"email": "billing@vasu.dev", "name": "Anita (Billing)", "role": "billing"},
+        {"email": "admin@vasu.dev", "name": "Director", "role": "admin"},
+    ]
+    for u in demo_users:
+        existing = await db.users.find_one({"email": u["email"]}, {"_id": 0})
+        if not existing:
+            await db.users.insert_one({
+                "user_id": f"user_{uuid.uuid4().hex[:12]}",
+                "email": u["email"], "name": u["name"], "picture": "",
+                "role": u["role"], "is_active": True, "created_at": now_utc(),
+            })
+        else:
+            await db.users.update_one({"email": u["email"]}, {"$set": {"role": u["role"]}})
+
+    # Projects
+    projects = [
+        {"code": "VIS-101", "name": "ABC IT Park Fire Safety", "site": "Bangalore Whitefield", "client": "ABC Ltd"},
+        {"code": "VIS-102", "name": "XYZ Data Center CCTV", "site": "Hyderabad Gachibowli", "client": "XYZ Corp"},
+        {"code": "VIS-103", "name": "PQR Mall Access Control", "site": "Mumbai Andheri", "client": "PQR Group"},
+    ]
+    for p in projects:
+        existing = await db.projects.find_one({"code": p["code"]}, {"_id": 0})
+        if not existing:
+            await db.projects.insert_one({"project_id": gid("prj"), **p, "active": True})
+
+    # Vendors
+    vendors = [
+        {"name": "Honeywell India Pvt Ltd", "gstin": "29AAACH1234A1Z5", "contact": "9880012345", "address": "Bangalore"},
+        {"name": "Siemens Ltd", "gstin": "27AAACS4567B1Z6", "contact": "9820098765", "address": "Mumbai"},
+        {"name": "Bosch Security Systems", "gstin": "33AAACB7890C1Z7", "contact": "9840001122", "address": "Chennai"},
+        {"name": "Ravel Electronics", "gstin": "33AABCR2345D1Z8", "contact": "9840066001", "address": "Chennai"},
+        {"name": "Anixter India Cabling", "gstin": "06AAACA9988E1Z9", "contact": "9910044556", "address": "Gurgaon"},
+    ]
+    for v in vendors:
+        existing = await db.vendors.find_one({"name": v["name"]}, {"_id": 0})
+        if not existing:
+            await db.vendors.insert_one({"vendor_id": gid("vnd"), **v, "email": "", "active": True})
+
+    # Masters (units, brands)
+    masters = [
+        {"name": "Nos", "category": "unit"}, {"name": "Meter", "category": "unit"},
+        {"name": "Kg", "category": "unit"}, {"name": "Set", "category": "unit"},
+        {"name": "Roll", "category": "unit"},
+        {"name": "Honeywell", "category": "brand"}, {"name": "Siemens", "category": "brand"},
+        {"name": "Bosch", "category": "brand"}, {"name": "Hikvision", "category": "brand"},
+        {"name": "CP Plus", "category": "brand"},
+    ]
+    for m in masters:
+        existing = await db.masters.find_one({"name": m["name"], "category": m["category"]}, {"_id": 0})
+        if not existing:
+            await db.masters.insert_one({"item_id": gid("itm"), **m, "active": True})
+
+    # Materials
+    materials = [
+        "Smoke Detector Photoelectric", "Heat Detector Fixed 57°C", "Manual Call Point",
+        "Sounder Strobe Wall Mount", "Fire Extinguisher CO2 4.5kg",
+        "IP CCTV Camera 4MP Bullet", "Access Control Reader RFID",
+        "Cat6 UTP Cable 305m Box", "Fire Alarm Control Panel 4-Zone",
+        "FM200 Gas Cylinder 40L",
+    ]
+    for m in materials:
+        existing = await db.masters.find_one({"name": m, "category": "material"}, {"_id": 0})
+        if not existing:
+            await db.masters.insert_one({"item_id": gid("itm"), "name": m, "category": "material", "active": True})
+
+    return {"ok": True, "message": "Seed complete", "logins": [u["email"] for u in demo_users]}
+
+# ---------------------- Startup ----------------------
+@app.on_event("startup")
+async def startup():
+    await db.users.create_index("email", unique=True)
+    await db.users.create_index("user_id", unique=True)
+    await db.user_sessions.create_index("session_token", unique=True)
+    await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
+    await db.mrfs.create_index("mrf_id", unique=True)
+    await db.mrfs.create_index("mrf_number", unique=True)
+    await db.pos.create_index("po_id", unique=True)
+    await db.pos.create_index("po_number", unique=True)
+
+@app.on_event("shutdown")
+async def shutdown():
+    client.close()
+
+@api.get("/")
 async def root():
-    return {"message": "Hello World"}
+    return {"app": "Vasu Infosec MRF & PO", "ok": True}
 
-@api_router.post("/status", response_model=StatusCheck)
-async def create_status_check(input: StatusCheckCreate):
-    status_dict = input.dict()
-    status_obj = StatusCheck(**status_dict)
-    _ = await db.status_checks.insert_one(status_obj.dict())
-    return status_obj
-
-@api_router.get("/status", response_model=List[StatusCheck])
-async def get_status_checks():
-    status_checks = await db.status_checks.find().to_list(1000)
-    return [StatusCheck(**status_check) for status_check in status_checks]
-
-# Include the router in the main app
-app.include_router(api_router)
-
+app.include_router(api)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
@@ -63,13 +1102,4 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
-
-@app.on_event("shutdown")
-async def shutdown_db_client():
-    client.close()
+logging.basicConfig(level=logging.INFO)
