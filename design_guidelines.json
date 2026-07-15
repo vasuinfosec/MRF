@@ -1,0 +1,129 @@
+{
+  "theme": "light",
+  "typography": {
+    "headings": {
+      "font_family": "Manrope",
+      "weights": ["600", "800"],
+      "tracking": "tracking-tight",
+      "usage": "Use for all page titles, dashboard metrics, and card headers. Never use Inter or generic sans.",
+      "hierarchy": {
+        "h1": "text-3xl sm:text-4xl lg:text-5xl font-extrabold",
+        "h2": "text-2xl sm:text-3xl lg:text-4xl font-bold",
+        "h3": "text-xl sm:text-2xl font-bold",
+        "h4": "text-lg sm:text-xl font-semibold"
+      }
+    },
+    "body": {
+      "font_family": "IBM Plex Sans",
+      "weights": ["400", "500"],
+      "usage": "Use for all table data, forms, and secondary text. Provides a structural, technical feel suitable for construction data."
+    },
+    "labels": {
+      "styles": "text-xs font-bold uppercase tracking-[0.2em] text-slate-500",
+      "usage": "Use for overlines, status indicators, and form field labels."
+    }
+  },
+  "colors": {
+    "archetype": "Swiss & High-Contrast (Archetype 4) mixed with Structural Industrial",
+    "backgrounds": {
+      "primary": "#FFFFFF",
+      "secondary": "#F8FAFC",
+      "surface": "#F1F5F9"
+    },
+    "text": {
+      "primary": "#0F172A",
+      "secondary": "#475569",
+      "muted": "#64748B"
+    },
+    "brand_accents": {
+      "primary": "#002FA7",
+      "primary_hover": "#002480",
+      "action": "#F97316",
+      "action_hover": "#EA580C"
+    },
+    "status_colors": {
+      "approved": { "bg": "#D1FAE5", "text": "#065F46", "border": "#34D399" },
+      "pending": { "bg": "#FEF3C7", "text": "#92400E", "border": "#FBBF24" },
+      "rejected": { "bg": "#FEE2E2", "text": "#991B1B", "border": "#F87171" },
+      "returned": { "bg": "#E0E7FF", "text": "#3730A3", "border": "#818CF8" }
+    },
+    "rules": [
+      "No generic full-screen gradients.",
+      "Use purely solid colors with high contrast.",
+      "Buttons for site engineers must use the bright Action color (#F97316) for high visibility on site."
+    ]
+  },
+  "visual_enhancers": {
+    "surfaces": "Grid Borders (The Technical Look). Expose the skeleton. Data-heavy dashboards should use border-collapse style layout with subtle borders (border-border/40). Avoid soft, floaty glassmorphism here; it's a construction app.",
+    "borders": "1px solid borders on cards and inputs to ground the UI. Use rounded-md (not heavily rounded).",
+    "shadows": "Minimal. Use sharp, distinct shadows only on hover for clickable items."
+  },
+  "component_usage_rules": {
+    "forms": "Always use Shadcn components for inputs, selects, and dialogs. Must use large click areas (min-h-[48px]) for mobile field engineers.",
+    "tables": "Use Shadcn Table. Make them dense for desktop (Project Managers, Billing) but convert to Card-based list views for Mobile (Site Engineers).",
+    "buttons": "Large, rectangular with slight rounding (rounded-md). Always explicitly set text color on hover. Example: hover:bg-slate-900 hover:text-white.",
+    "status_tags": "Pill-shaped, uppercase, utilizing the status_colors with strong border definition."
+  },
+  "grids_and_spacing": {
+    "philosophy": "High Density Grid (For Dashboards / Analytics) combined with Mobile-First generous tap targets.",
+    "desktop": "Base Grid: grid-cols-1 md:grid-cols-3 lg:grid-cols-4. Gap Strategy: Tight (gap-4 or gap-6).",
+    "mobile": "Mobile-First: Always start with grid-cols-1. Ensure fields have generous padding (p-4 or p-6).",
+    "alignment": "Paragraphs, labels, inputs left-aligned. Status badges and action buttons right or left aligned depending on context."
+  },
+  "layouts": {
+    "navigation": "Sidebar for Desktop (Admin, PM, Purchase, Billing). Bottom Tab Bar or simple Hamburger menu for Mobile (Site Engineers). Navigation must be highly visible.",
+    "header": "Solid background with a hard bottom border. Sticky for quick access to actions.",
+    "dashboard": "Bento Grid style for high-level metrics (MRF Ageing, Pending Approvals) with clear hierarchy."
+  },
+  "motion_and_interactions": {
+    "rules": [
+      "Micro-interactions on all buttons and table rows (e.g., hover:bg-slate-50).",
+      "Use sonner for toast notifications (success/error).",
+      "Avoid heavy animations. Stick to simple opacity and subtle translations (e.g., -translate-y-0.5 on card hover)."
+    ]
+  },
+  "accessibility": {
+    "contrast": "Strict adherence to minimum 4.5:1 ratio. No light gray text on white background.",
+    "touch_targets": "Minimum 48x48px for all interactive elements to support users with limited computer experience using mobile devices on construction sites.",
+    "testing": "All interactive elements MUST include a data-testid attribute (e.g., data-testid='create-mrf-btn')."
+  },
+  "media": {
+    "icons": "lucide-react. Use large, legible icons (24px or 32px for mobile actions).",
+    "images": "Use for Auth pages, empty states, or profile avatars. Do not over-clutter the functional dashboard with images."
+  },
+  "3d_libraries": {
+    "usage": "Not recommended for this B2B enterprise tool unless visualizing a project site plan. Focus on functional clarity with D3.js or Recharts/Shadcn Charts for MRF Ageing and Billing reports."
+  },
+  "image_urls": {
+    "auth_background": {
+      "url": "https://images.pexels.com/photos/3818947/pexels-photo-3818947.jpeg",
+      "description": "Detailed view of a Japanese construction site showcasing steel beams and modern architecture. Great for the login screen background."
+    },
+    "hero_alternative": {
+      "url": "https://images.unsplash.com/photo-1599707254554-027aeb4deacd",
+      "description": "Yellow crane near building during daytime. Use for project placeholder images."
+    },
+    "team_placeholder": {
+      "url": "https://images.unsplash.com/photo-1774600166432-ba8ac640b318",
+      "description": "Two women in hard hats and uniforms. Use for user profile placeholders."
+    }
+  },
+  "instructions_to_main_agent": [
+    "Build the dashboard using React, Tailwind CSS, and Shadcn UI.",
+    "Implement the 5 role-based views using standard routing and conditional rendering.",
+    "Ensure the mobile view for Site Engineers is extremely simplified: large 'Create MRF' button, simple list of pending MRFs, and large tap targets.",
+    "Use Recharts (or Shadcn Charts) for the MRF Ageing and Billing Engineer dashboards.",
+    "Do not use generic Inter or Roboto fonts. Import and configure Manrope for headings and IBM Plex Sans for body.",
+    "Apply the 'Grid Borders (Technical Look)' surface strategy for tables and data cards."
+  ],
+  "UNIVERSAL_GUIDELINES_FOR_MAIN_AGENT": [
+    "Do not converge toward generic outputs. Use the defined Archetype 4 High-Contrast Swiss design.",
+    "Never apply universal transitions (transition: all).",
+    "Never center align the app container (.App { text-align: center; }).",
+    "Use modern button styles relevant to the app style (rectangular with rounded-md).",
+    "NEVER use AI assistant Emoji characters.",
+    "Every interaction needs micro-animations.",
+    "Use sonner for toasts, located in /app/src/components/ui/sonner.tsx or equivalent.",
+    "Ensure all components have data-testid attributes for testing."
+  ]
+}
