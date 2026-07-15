@@ -27,6 +27,7 @@ export const theme = {
     partially_ordered: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },
     fully_ordered: { bg: "#D1FAE5", text: "#065F46", border: "#34D399" },
     received: { bg: "#D1FAE5", text: "#065F46", border: "#34D399" },
+    partially_received: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },
     closed: { bg: "#F1F5F9", text: "#334155", border: "#94A3B8" },
     not_billed: { bg: "#FEE2E2", text: "#991B1B", border: "#F87171" },
     partially_billed: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },

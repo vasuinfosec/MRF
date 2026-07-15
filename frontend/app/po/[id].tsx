@@ -1,8 +1,8 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
-import { SafeAreaView } from "react-native-safe-area-context";
+import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { api, backendUrl, getToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
@@ -13,10 +13,15 @@ export default function PODetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const { user } = useAuth();
+  const insets = useSafeAreaInsets();
   const [po, setPo] = useState<any>(null);
   const [vendor, setVendor] = useState<any>(null);
   const [project, setProject] = useState<any>(null);
   const [busy, setBusy] = useState(false);
+  const [receiveOpen, setReceiveOpen] = useState(false);
+  const [receiveQty, setReceiveQty] = useState<Record<string, string>>({});
+  const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -41,13 +46,36 @@ export default function PODetail() {
   };
 
   const markReceived = async () => {
-    await api(`/po/${id}/received`, { method: "POST", body: {} });
-    load();
+    // Prefill remaining qty for each line
+    const initial: Record<string, string> = {};
+    (po.items || []).forEach((it: any) => {
+      const remaining = Math.max(0, (Number(it.qty) || 0) - (Number(it.qty_received) || 0));
+      initial[it.item_line_id] = String(remaining);
+    });
+    setReceiveQty(initial);
+    setErr("");
+    setReceiveOpen(true);
+  };
+
+  const submitReceipt = async () => {
+    setSaving(true); setErr("");
+    try {
+      const items = (po.items || []).map((it: any) => ({
+        mrf_id: it.mrf_id,
+        item_line_id: it.item_line_id,
+        qty: Number(receiveQty[it.item_line_id] || 0),
+      })).filter((r: any) => r.qty > 0);
+      if (!items.length) { setErr("Enter at least one quantity to receive."); setSaving(false); return; }
+      await api(`/po/${id}/received`, { method: "POST", body: { items } });
+      setReceiveOpen(false);
+      load();
+    } catch (e: any) { setErr(e.message || "Failed"); }
+    setSaving(false);
   };
 
   if (!po) return busy ? <Loader /> : null;
 
-  const canReceive = po.status === "issued" && (user?.role === "purchase" || user?.role === "billing" || user?.role === "admin");
+  const canReceive = (po.status === "issued" || po.status === "partially_received") && (user?.role === "purchase" || user?.role === "billing" || user?.role === "admin");
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
@@ -89,14 +117,22 @@ export default function PODetail() {
           const gross = it.qty * it.rate;
           const ad = gross - (it.discount || 0);
           const gst = ad * (it.gst || 0) / 100;
+          const received = Number(it.qty_received || 0);
+          const remaining = Math.max(0, Number(it.qty || 0) - received);
           return (
-            <Card key={i} style={{ marginBottom: 8 }}>
-              <Text style={{ fontWeight: "700" }}>{i + 1}. {it.description}</Text>
+            <Card key={i} style={{ marginBottom: 8 }} testID={`po-item-${i}`}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+                <Text style={{ fontWeight: "700", flex: 1 }}>{i + 1}. {it.description}</Text>
+                {received > 0 ? (
+                  <Pill status={remaining > 0 ? "partially_received" : "received"} />
+                ) : null}
+              </View>
               {it.specification ? <Muted>{it.specification}</Muted> : null}
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
-                <MiniStat label="Qty" value={`${it.qty} ${it.unit}`} />
+                <MiniStat label="Ordered" value={`${it.qty} ${it.unit}`} />
+                <MiniStat label="Received" value={`${received}`} />
+                <MiniStat label="Remaining" value={`${remaining}`} />
                 <MiniStat label="Rate" value={`₹${it.rate}`} />
-                <MiniStat label="Disc" value={`₹${it.discount || 0}`} />
                 <MiniStat label="GST" value={`${it.gst}%`} />
                 <MiniStat label="Total" value={`₹${(ad + gst).toFixed(2)}`} />
               </View>
@@ -129,9 +165,57 @@ export default function PODetail() {
 
         <View style={{ marginTop: 16, gap: 8 }}>
           <Btn testID="pdf-download-btn" title="Download PDF" variant="primary" onPress={downloadPDF} />
-          {canReceive ? <Btn testID="mark-received-btn" title="Mark as Received" variant="action" onPress={markReceived} /> : null}
+          {canReceive ? <Btn testID="mark-received-btn" title="Receive Items" variant="action" onPress={markReceived} /> : null}
         </View>
       </ScrollView>
+
+      {/* Per-line receipt modal */}
+      <Modal visible={receiveOpen} transparent animationType="fade" onRequestClose={() => setReceiveOpen(false)}>
+        <View style={styles.modalBg}>
+          <View style={[styles.modal, { paddingBottom: 16 + insets.bottom }]}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <Text style={{ fontWeight: "800", fontSize: 16 }}>Receive Items</Text>
+              <TouchableOpacity testID="close-receive-btn" onPress={() => setReceiveOpen(false)}>
+                <Ionicons name="close" size={22} />
+              </TouchableOpacity>
+            </View>
+            <Muted>Enter received quantity per line. Leave 0 to skip.</Muted>
+            <ScrollView style={{ marginTop: 10, maxHeight: 380 }}>
+              {(po.items || []).map((it: any, i: number) => {
+                const already = Number(it.qty_received || 0);
+                const remaining = Math.max(0, Number(it.qty || 0) - already);
+                return (
+                  <View key={it.item_line_id} style={styles.recvRow} testID={`recv-row-${i}`}>
+                    <View style={{ flex: 1, paddingRight: 8 }}>
+                      <Text style={{ fontWeight: "700", fontSize: 13 }} numberOfLines={2}>{it.description}</Text>
+                      <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+                        Ordered {it.qty} {it.unit} · Received {already} · Rem {remaining}
+                      </Text>
+                    </View>
+                    <TextInput
+                      testID={`recv-qty-${i}`}
+                      value={receiveQty[it.item_line_id] ?? ""}
+                      onChangeText={(v) => setReceiveQty((s) => ({ ...s, [it.item_line_id]: v }))}
+                      keyboardType="decimal-pad"
+                      editable={remaining > 0}
+                      style={[styles.recvInp, remaining <= 0 && { backgroundColor: theme.colors.surface2, opacity: 0.6 }]}
+                    />
+                  </View>
+                );
+              })}
+            </ScrollView>
+            {err ? <Text testID="recv-err" style={{ color: theme.colors.danger, marginTop: 6 }}>{err}</Text> : null}
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+              <View style={{ flex: 1 }}>
+                <Btn title="Cancel" variant="outline" onPress={() => setReceiveOpen(false)} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Btn testID="confirm-receive-btn" title={saving ? "Saving…" : "Confirm Receipt"} variant="action" onPress={submitReceipt} disabled={saving} />
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -147,4 +231,8 @@ function MiniStat({ label, value }: { label: string; value: string }) {
 const styles = StyleSheet.create({
   header: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 8, paddingVertical: 8, backgroundColor: theme.colors.bg, borderBottomWidth: 1, borderBottomColor: theme.colors.border },
   title: { fontSize: 16, fontWeight: "800", color: theme.colors.text },
+  modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
+  modal: { backgroundColor: "#fff", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 20 },
+  recvRow: { flexDirection: "row", alignItems: "center", paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: theme.colors.border },
+  recvInp: { width: 80, borderWidth: 1, borderColor: theme.colors.borderStrong, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8, textAlign: "right", fontSize: 14, backgroundColor: "#fff" },
 });

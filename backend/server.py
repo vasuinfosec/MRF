@@ -673,27 +673,69 @@ async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] 
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(404, "PO not found")
-    await db.pos.update_one({"po_id": po_id}, {"$set": {"status": "received"}})
-    # Update qty_received on MRF items
-    for it in po["items"]:
-        mrf = await db.mrfs.find_one({"mrf_id": it["mrf_id"]}, {"_id": 0})
+
+    # Body may include: {"items": [{"mrf_id": ..., "item_line_id": ..., "qty": <n>}]}
+    # If no per-line qty provided, receive full remaining qty of every PO line.
+    per_line = {}
+    if body and isinstance(body.get("items"), list):
+        for row in body["items"]:
+            key = (row.get("mrf_id"), row.get("item_line_id"))
+            try:
+                per_line[key] = float(row.get("qty") or 0)
+            except (TypeError, ValueError):
+                per_line[key] = 0
+
+    # Track per-line received qty on the PO itself
+    po_items = po["items"]
+    any_received = False
+    for pit in po_items:
+        prev = float(pit.get("qty_received") or 0)
+        ordered = float(pit.get("qty") or 0)
+        remaining = max(ordered - prev, 0)
+        if per_line:
+            receive_now = per_line.get((pit["mrf_id"], pit["item_line_id"]), 0)
+        else:
+            receive_now = remaining
+        # Clamp to what's still outstanding on this PO line
+        receive_now = max(0.0, min(receive_now, remaining))
+        if receive_now <= 0:
+            continue
+        pit["qty_received"] = prev + receive_now
+        any_received = True
+
+        # Roll up to MRF item qty_received
+        mrf = await db.mrfs.find_one({"mrf_id": pit["mrf_id"]}, {"_id": 0})
         if not mrf:
             continue
         items = mrf["items"]
         for mi in items:
-            if mi["item_line_id"] == it["item_line_id"]:
-                mi["qty_received"] = (mi.get("qty_received") or 0) + it["qty"]
+            if mi["item_line_id"] == pit["item_line_id"]:
+                mi["qty_received"] = (mi.get("qty_received") or 0) + receive_now
         all_recv = all(
             (mi.get("qty_received") or 0) >= (mi.get("qty_approved") or 0)
             for mi in items if mi["status"] != "rejected"
         )
         await db.mrfs.update_one(
-            {"mrf_id": it["mrf_id"]},
-            {"$set": {"items": items, "status": "received" if all_recv else mrf["status"],
+            {"mrf_id": pit["mrf_id"]},
+            {"$set": {"items": items,
+                      "status": "received" if all_recv else mrf["status"],
                       "updated_at": now_utc()}}
         )
-    await audit("po", po_id, "received", u)
-    return {"ok": True}
+
+    # Roll up PO status: fully vs partially received
+    fully = all(
+        float(pi.get("qty_received") or 0) >= float(pi.get("qty") or 0)
+        for pi in po_items
+    )
+    new_status = "received" if fully else ("partially_received" if any_received else po.get("status", "issued"))
+    await db.pos.update_one(
+        {"po_id": po_id},
+        {"$set": {"items": po_items, "status": new_status}}
+    )
+    await audit("po", po_id, "received", u, {"status": new_status, "per_line": [
+        {"item_line_id": k[1], "qty": v} for k, v in per_line.items()
+    ]})
+    return {"ok": True, "status": new_status}
 
 # ---------------------- Billing ----------------------
 @api.get("/billing/items")
