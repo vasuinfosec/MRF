@@ -4,6 +4,7 @@ Backend: FastAPI + MongoDB + Emergent Google Auth
 """
 import os
 import io
+import re
 import uuid
 import logging
 from pathlib import Path
@@ -117,7 +118,8 @@ class Project(BaseModel):
     code: str
     name: str
     site: str
-    client: Optional[str] = None
+    client: Optional[str] = None                 # legacy free-text client name (kept for backwards compat)
+    customer_id: Optional[str] = None            # FK to Customer.customer_id (permanent, alphanumeric)
     active: bool = True
     site_engineers: List[str] = []      # user_ids at project level
     project_managers: List[str] = []    # user_ids
@@ -136,8 +138,40 @@ class Vendor(BaseModel):
 class MasterItem(BaseModel):
     item_id: str = Field(default_factory=lambda: gid("itm"))
     name: str
-    category: str  # unit/system/brand/material
+    category: str  # unit/system/brand/material/model/gst/department
+    parent_id: Optional[str] = None   # e.g. Model.parent_id -> Brand.item_id
+    value: Optional[str] = None       # generic extra (e.g. GST rate "18", HSN code, dept code)
     active: bool = True
+
+# ---------------------- Customer & Customer PO ----------------------
+CUSTOMER_ID_REGEX = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$")
+
+class CustomerPO(BaseModel):
+    """A customer-side PO issued to Vasu — anchors project billing/collection."""
+    cpo_id: str = Field(default_factory=lambda: gid("cpo"))
+    customer_id: Optional[str] = ""      # populated from URL path; client may omit
+    po_number: str
+    po_date: Optional[str] = None        # ISO date "YYYY-MM-DD"
+    value: float = 0.0
+    validity_till: Optional[str] = None  # ISO date
+    attachment_name: Optional[str] = None
+    attachment_b64: Optional[str] = None  # base64 (small files only)
+    remarks: Optional[str] = ""
+    active: bool = True
+
+class Customer(BaseModel):
+    customer_id: str                     # PERMANENT, admin-typed alphanumeric (e.g. "VASU-CUST-001")
+    name: str
+    gstin: Optional[str] = ""
+    pan: Optional[str] = ""
+    billing_address: Optional[str] = ""
+    shipping_address: Optional[str] = ""
+    contact_person: Optional[str] = ""
+    phone: Optional[str] = ""
+    email: Optional[str] = ""
+    remarks: Optional[str] = ""
+    active: bool = True
+    created_at: datetime = Field(default_factory=now_utc)
 
 class MRFItemIn(BaseModel):
     description: str
@@ -409,6 +443,51 @@ async def audit(entity: str, entity_id: str, action: str, user: UserOut, details
         "timestamp": now_utc(),
     })
 
+def _strip_oids(o):
+    """Recursively strip `_id` keys and convert ObjectId/datetime to JSON-safe primitives."""
+    from bson import ObjectId
+    if isinstance(o, ObjectId):
+        return str(o)
+    if isinstance(o, dict):
+        return {k: _strip_oids(v) for k, v in o.items() if k != "_id"}
+    if isinstance(o, list):
+        return [_strip_oids(v) for v in o]
+    if isinstance(o, datetime):
+        return o.isoformat()
+    return o
+
+async def master_audit(entity: str, entity_id: str, action: str, user: UserOut,
+                       reason: str, old_value: Any = None, new_value: Any = None):
+    """Master-data change log — captures WHO, WHEN, WHY, and BEFORE/AFTER values."""
+    old_value = _strip_oids(old_value)
+    new_value = _strip_oids(new_value)
+    ts = now_utc()
+    await db.master_audit_logs.insert_one({
+        "audit_id": gid("maud"),
+        "entity": entity,
+        "entity_id": entity_id,
+        "action": action,
+        "user_id": user.user_id,
+        "user_name": user.name,
+        "user_role": user.role,
+        "reason": reason or "",
+        "old_value": old_value,
+        "new_value": new_value,
+        "timestamp": ts,
+    })
+    # Mirror into the main audit log too so /api/audit sees it
+    await db.audit_logs.insert_one({
+        "audit_id": gid("aud"),
+        "entity": entity,
+        "entity_id": entity_id,
+        "action": action,
+        "user_id": user.user_id,
+        "user_name": user.name,
+        "user_role": user.role,
+        "details": {"reason": reason, "old": old_value, "new": new_value},
+        "timestamp": ts,
+    })
+
 async def notify(user_ids: List[str], title: str, body_text: str, link: str = ""):
     for uid in user_ids:
         await db.notifications.insert_one({
@@ -545,8 +624,16 @@ async def add_project(p: Project, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
     if u.role not in ["admin"]:
         raise HTTPException(403, "Only admin")
+    # If customer_id provided, verify it exists
+    if p.customer_id:
+        cust = await db.customers.find_one({"customer_id": p.customer_id}, {"_id": 0})
+        if not cust:
+            raise HTTPException(400, f"Customer '{p.customer_id}' not found — create the Customer master first")
+        # Auto-fill legacy client text with customer name for backwards compat
+        if not p.client:
+            p.client = cust.get("name") or ""
     await db.projects.insert_one(p.model_dump())
-    await audit("project", p.project_id, "create", u, p.model_dump())
+    await master_audit("project", p.project_id, "create", u, "Initial creation", None, p.model_dump())
     return p
 
 @api.put("/projects/{project_id}")
@@ -555,24 +642,34 @@ async def update_project(project_id: str, body: dict,
     u = await get_current_user(authorization)
     if u.role != "admin":
         raise HTTPException(403, "Only admin")
+    existing = await db.projects.find_one({"project_id": project_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Project not found")
+    reason = (body.pop("reason", "") or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required for master-data changes")
     updates: Dict[str, Any] = {}
-    for k in ("code", "name", "site", "client"):
+    for k in ("code", "name", "site", "client", "customer_id"):
         if k in body:
-            updates[k] = str(body[k] or "").strip()
+            updates[k] = str(body[k] or "").strip() or None
     if "system_categories" in body and isinstance(body["system_categories"], list):
         updates["system_categories"] = [str(x) for x in body["system_categories"]]
     if "active" in body:
         updates["active"] = bool(body["active"])
     if not updates:
         raise HTTPException(400, "Nothing to update")
-    r = await db.projects.update_one({"project_id": project_id}, {"$set": updates})
-    if r.matched_count == 0:
-        raise HTTPException(404, "Project not found")
-    await audit("project", project_id, "update", u, updates)
+    # Validate customer_id if changed
+    if updates.get("customer_id"):
+        cust = await db.customers.find_one({"customer_id": updates["customer_id"]}, {"_id": 0})
+        if not cust:
+            raise HTTPException(400, f"Customer '{updates['customer_id']}' not found")
+    await db.projects.update_one({"project_id": project_id}, {"$set": updates})
+    old_snap = {k: existing.get(k) for k in updates}
+    await master_audit("project", project_id, "update", u, reason, old_snap, updates)
     return await db.projects.find_one({"project_id": project_id}, {"_id": 0})
 
 @api.delete("/projects/{project_id}")
-async def deactivate_project(project_id: str,
+async def deactivate_project(project_id: str, reason: str = "Deactivated",
                              authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
     if u.role != "admin":
@@ -581,7 +678,8 @@ async def deactivate_project(project_id: str,
                                      {"$set": {"active": False}})
     if r.matched_count == 0:
         raise HTTPException(404, "Project not found")
-    await audit("project", project_id, "deactivate", u)
+    await master_audit("project", project_id, "deactivate", u, reason,
+                       {"active": True}, {"active": False})
     return {"ok": True}
 
 @api.put("/vendors/{vendor_id}")
@@ -590,6 +688,12 @@ async def update_vendor(vendor_id: str, body: dict,
     u = await get_current_user(authorization)
     if u.role not in ("admin", "purchase", "director"):
         raise HTTPException(403, "Not allowed")
+    existing = await db.vendors.find_one({"vendor_id": vendor_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Vendor not found")
+    reason = (body.pop("reason", "") or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required for master-data changes")
     updates: Dict[str, Any] = {}
     for k in ("name", "address", "gstin", "contact", "email"):
         if k in body:
@@ -598,14 +702,13 @@ async def update_vendor(vendor_id: str, body: dict,
         updates["active"] = bool(body["active"])
     if not updates:
         raise HTTPException(400, "Nothing to update")
-    r = await db.vendors.update_one({"vendor_id": vendor_id}, {"$set": updates})
-    if r.matched_count == 0:
-        raise HTTPException(404, "Vendor not found")
-    await audit("vendor", vendor_id, "update", u, updates)
+    await db.vendors.update_one({"vendor_id": vendor_id}, {"$set": updates})
+    old_snap = {k: existing.get(k) for k in updates}
+    await master_audit("vendor", vendor_id, "update", u, reason, old_snap, updates)
     return await db.vendors.find_one({"vendor_id": vendor_id}, {"_id": 0})
 
 @api.delete("/vendors/{vendor_id}")
-async def deactivate_vendor(vendor_id: str,
+async def deactivate_vendor(vendor_id: str, reason: str = "Deactivated",
                             authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
     if u.role not in ("admin", "purchase", "director"):
@@ -614,8 +717,199 @@ async def deactivate_vendor(vendor_id: str,
                                     {"$set": {"active": False}})
     if r.matched_count == 0:
         raise HTTPException(404, "Vendor not found")
-    await audit("vendor", vendor_id, "deactivate", u)
+    await master_audit("vendor", vendor_id, "deactivate", u, reason,
+                       {"active": True}, {"active": False})
     return {"ok": True}
+
+# ---------------------- Customers ----------------------
+def _validate_customer_id(cid: str) -> str:
+    cid = (cid or "").strip()
+    if not cid:
+        raise HTTPException(400, "Customer ID is required")
+    if not CUSTOMER_ID_REGEX.match(cid):
+        raise HTTPException(400, "Customer ID must be alphanumeric (letters, digits, - or _, max 32 chars, must start with a letter or digit)")
+    return cid
+
+@api.get("/customers")
+async def list_customers(include_inactive: bool = False,
+                         authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    q: Dict[str, Any] = {} if include_inactive else {"active": True}
+    docs = await db.customers.find(q, {"_id": 0}).sort("name", 1).to_list(1000)
+    # Attach cpo count per customer for UI hint
+    for c in docs:
+        c["po_count"] = await db.customer_pos.count_documents({"customer_id": c["customer_id"], "active": True})
+    return docs
+
+@api.get("/customers/{customer_id}")
+async def get_customer(customer_id: str, authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    c = await db.customers.find_one({"customer_id": customer_id}, {"_id": 0})
+    if not c:
+        raise HTTPException(404, "Customer not found")
+    c["customer_pos"] = await db.customer_pos.find(
+        {"customer_id": customer_id}, {"_id": 0, "attachment_b64": 0}
+    ).to_list(200)
+    return c
+
+@api.post("/customers")
+async def create_customer(body: Customer, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director can manage customers")
+    cid = _validate_customer_id(body.customer_id)
+    body.customer_id = cid
+    # Uniqueness (case-insensitive on both ID and name)
+    if await db.customers.find_one({"customer_id": {"$regex": f"^{re.escape(cid)}$", "$options": "i"}}):
+        raise HTTPException(400, f"Customer ID '{cid}' already exists")
+    if body.name.strip() and await db.customers.find_one({
+        "name": {"$regex": f"^{re.escape(body.name.strip())}$", "$options": "i"}
+    }):
+        raise HTTPException(400, f"Customer name '{body.name}' already exists — edit the existing record instead.")
+    doc = body.model_dump()
+    doc["name"] = body.name.strip()
+    doc["customer_id"] = cid
+    await db.customers.insert_one(doc)
+    doc.pop("_id", None)
+    await master_audit("customer", cid, "create", u, "Initial creation", None, doc)
+    return doc
+
+@api.put("/customers/{customer_id}")
+async def update_customer(customer_id: str, body: dict,
+                          authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director")
+    existing = await db.customers.find_one({"customer_id": customer_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Customer not found")
+    reason = (body.pop("reason", "") or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required for master-data changes")
+
+    # Handle Customer ID change with CASCADE update to all references
+    new_cid = body.pop("customer_id", None)
+    if new_cid and new_cid != customer_id:
+        new_cid = _validate_customer_id(new_cid)
+        if await db.customers.find_one({"customer_id": {"$regex": f"^{re.escape(new_cid)}$", "$options": "i"}}):
+            raise HTTPException(400, f"Customer ID '{new_cid}' already exists")
+        # Cascade update
+        await db.customers.update_one({"customer_id": customer_id}, {"$set": {"customer_id": new_cid}})
+        await db.customer_pos.update_many({"customer_id": customer_id}, {"$set": {"customer_id": new_cid}})
+        await db.projects.update_many({"customer_id": customer_id}, {"$set": {"customer_id": new_cid}})
+        await db.mrfs.update_many({"customer_id": customer_id}, {"$set": {"customer_id": new_cid}})
+        await db.pos.update_many({"customer_id": customer_id}, {"$set": {"customer_id": new_cid}})
+        await db.invoices.update_many({"customer_id": customer_id}, {"$set": {"customer_id": new_cid}})
+        await master_audit("customer", new_cid, "rename_id", u, reason,
+                           {"customer_id": customer_id}, {"customer_id": new_cid})
+        customer_id = new_cid
+
+    updates: Dict[str, Any] = {}
+    for k in ("name", "gstin", "pan", "billing_address", "shipping_address",
+              "contact_person", "phone", "email", "remarks"):
+        if k in body:
+            updates[k] = str(body[k] or "").strip()
+    if "active" in body:
+        updates["active"] = bool(body["active"])
+    if updates:
+        # Name uniqueness check on rename
+        if "name" in updates and updates["name"] and updates["name"].lower() != (existing.get("name") or "").lower():
+            dup = await db.customers.find_one({
+                "customer_id": {"$ne": customer_id},
+                "name": {"$regex": f"^{re.escape(updates['name'])}$", "$options": "i"}
+            })
+            if dup:
+                raise HTTPException(400, f"Another customer already has the name '{updates['name']}'")
+        await db.customers.update_one({"customer_id": customer_id}, {"$set": updates})
+        old_snapshot = {k: existing.get(k) for k in updates}
+        await master_audit("customer", customer_id, "update", u, reason, old_snapshot, updates)
+    return await db.customers.find_one({"customer_id": customer_id}, {"_id": 0})
+
+@api.delete("/customers/{customer_id}")
+async def deactivate_customer(customer_id: str, reason: str = "Deactivated by admin",
+                              authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director")
+    r = await db.customers.update_one({"customer_id": customer_id},
+                                      {"$set": {"active": False}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Customer not found")
+    await master_audit("customer", customer_id, "deactivate", u, reason,
+                       {"active": True}, {"active": False})
+    return {"ok": True}
+
+# ---- Customer POs (nested under Customer) ----
+@api.post("/customers/{customer_id}/pos")
+async def add_customer_po(customer_id: str, body: CustomerPO,
+                          authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director", "purchase"):
+        raise HTTPException(403, "Not allowed")
+    cust = await db.customers.find_one({"customer_id": customer_id}, {"_id": 0, "customer_id": 1})
+    if not cust:
+        raise HTTPException(404, "Customer not found")
+    body.customer_id = customer_id
+    doc = body.model_dump()
+    await db.customer_pos.insert_one(doc)
+    doc.pop("_id", None)
+    await master_audit("customer_po", body.cpo_id, "create", u,
+                       "Added customer PO", None,
+                       {k: v for k, v in doc.items() if k != "attachment_b64"})
+    return {k: v for k, v in doc.items() if k != "attachment_b64"}
+
+@api.put("/customers/{customer_id}/pos/{cpo_id}")
+async def update_customer_po(customer_id: str, cpo_id: str, body: dict,
+                             authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director", "purchase"):
+        raise HTTPException(403, "Not allowed")
+    reason = (body.pop("reason", "") or "").strip() or "Update customer PO"
+    existing = await db.customer_pos.find_one({"cpo_id": cpo_id, "customer_id": customer_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Customer PO not found")
+    updates: Dict[str, Any] = {}
+    for k in ("po_number", "po_date", "validity_till", "remarks", "attachment_name", "attachment_b64"):
+        if k in body:
+            updates[k] = body[k]
+    if "value" in body:
+        try:
+            updates["value"] = float(body["value"])
+        except Exception:
+            raise HTTPException(400, "Invalid value")
+    if "active" in body:
+        updates["active"] = bool(body["active"])
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    await db.customer_pos.update_one({"cpo_id": cpo_id}, {"$set": updates})
+    redacted_old = {k: (existing.get(k) if k != "attachment_b64" else "[file]") for k in updates}
+    redacted_new = {k: (updates.get(k) if k != "attachment_b64" else "[file]") for k in updates}
+    await master_audit("customer_po", cpo_id, "update", u, reason, redacted_old, redacted_new)
+    return await db.customer_pos.find_one({"cpo_id": cpo_id}, {"_id": 0, "attachment_b64": 0})
+
+@api.get("/customers/{customer_id}/pos/{cpo_id}/attachment")
+async def get_customer_po_attachment(customer_id: str, cpo_id: str,
+                                     authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    d = await db.customer_pos.find_one({"cpo_id": cpo_id, "customer_id": customer_id}, {"_id": 0})
+    if not d or not d.get("attachment_b64"):
+        raise HTTPException(404, "Attachment not found")
+    return {"filename": d.get("attachment_name") or "customer_po", "content_b64": d["attachment_b64"]}
+
+# ---------------------- Master-data audit log (view) ----------------------
+@api.get("/master-audit")
+async def master_audit_list(entity: Optional[str] = None,
+                            entity_id: Optional[str] = None,
+                            authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director")
+    q: Dict[str, Any] = {}
+    if entity: q["entity"] = entity
+    if entity_id: q["entity_id"] = entity_id
+    docs = await db.master_audit_logs.find(q, {"_id": 0}).sort("timestamp", -1).limit(500).to_list(500)
+    # Defensive: strip any stray ObjectIds/datetimes deep in old_value/new_value
+    return [_strip_oids(d) for d in docs]
 
 @api.get("/systems")
 async def list_systems(authorization: Optional[str] = Header(None)):
@@ -639,8 +933,9 @@ async def add_vendor(v: Vendor, authorization: Optional[str] = Header(None)):
 @api.get("/masters")
 async def list_masters(authorization: Optional[str] = Header(None)):
     await get_current_user(authorization)
-    items = await db.masters.find({"active": True}, {"_id": 0}).to_list(1000)
-    grouped: Dict[str, List] = {"unit": [], "brand": [], "system": [], "material": []}
+    items = await db.masters.find({"active": True}, {"_id": 0}).to_list(2000)
+    grouped: Dict[str, List] = {"unit": [], "brand": [], "system": [], "material": [],
+                                "model": [], "gst": [], "department": []}
     for it in items:
         grouped.setdefault(it["category"], []).append(it)
     grouped["system"] = grouped.get("system") or [{"name": s} for s in SYSTEMS]
@@ -649,11 +944,71 @@ async def list_masters(authorization: Optional[str] = Header(None)):
 @api.post("/masters")
 async def add_master(m: MasterItem, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role != "admin":
-        raise HTTPException(403, "Only admin")
-    await db.masters.insert_one(m.model_dump())
-    await audit("master", m.item_id, "create", u, m.model_dump())
-    return m
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director")
+    doc = m.model_dump()
+    doc["name"] = doc["name"].strip()
+    if not doc["name"]:
+        raise HTTPException(400, "Name required")
+    # Category-specific validation
+    if doc["category"] == "gst":
+        try:
+            float(doc.get("value") or "0")
+        except Exception:
+            raise HTTPException(400, "GST value must be a numeric percentage (e.g. 18)")
+    # Prevent duplicate within same category (case-insensitive)
+    dup = await db.masters.find_one({
+        "category": doc["category"],
+        "name": {"$regex": f"^{re.escape(doc['name'])}$", "$options": "i"},
+        "active": True,
+    })
+    if dup:
+        raise HTTPException(400, f"'{doc['name']}' already exists in {doc['category']}")
+    await db.masters.insert_one(doc)
+    doc.pop("_id", None)
+    await master_audit(f"master.{doc['category']}", doc["item_id"], "create", u,
+                       "Initial creation", None, doc)
+    return doc
+
+@api.put("/masters/{item_id}")
+async def update_master(item_id: str, body: dict,
+                        authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director")
+    reason = (body.pop("reason", "") or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required for master-data changes")
+    existing = await db.masters.find_one({"item_id": item_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Not found")
+    updates: Dict[str, Any] = {}
+    for k in ("name", "parent_id", "value"):
+        if k in body:
+            updates[k] = str(body[k] or "").strip() or None
+    if "active" in body:
+        updates["active"] = bool(body["active"])
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    await db.masters.update_one({"item_id": item_id}, {"$set": updates})
+    old_snap = {k: existing.get(k) for k in updates}
+    await master_audit(f"master.{existing['category']}", item_id, "update", u,
+                       reason, old_snap, updates)
+    return await db.masters.find_one({"item_id": item_id}, {"_id": 0})
+
+@api.delete("/masters/{item_id}")
+async def deactivate_master(item_id: str, reason: str = "Deactivated",
+                            authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director")
+    existing = await db.masters.find_one({"item_id": item_id}, {"_id": 0})
+    if not existing:
+        raise HTTPException(404, "Not found")
+    await db.masters.update_one({"item_id": item_id}, {"$set": {"active": False}})
+    await master_audit(f"master.{existing['category']}", item_id, "deactivate", u,
+                       reason, {"active": True}, {"active": False})
+    return {"ok": True}
 
 # ---------------------- MRF ----------------------
 async def next_mrf_number() -> str:
@@ -2103,6 +2458,14 @@ async def seed_data(authorization: Optional[str] = Header(None)):
         {"email": "balkrishna@vasuinfosec.com", "name": "Balkrishna (GM)", "role": "gm"},
         {"email": "saket.iyer@vasuinfosec.com", "name": "Saket Iyer (PM · Pune)", "role": "pm"},
         {"email": "himanshu@vasuinfosec.com", "name": "Himanshu (PM · Delhi)", "role": "pm"},
+        {"email": "wasim@vasuinfosec.com", "name": "Wasim (Purchase · Pune)", "role": "purchase"},
+        {"email": "sanjeev@vasuinfosec.com", "name": "Sanjeev (Purchase · Delhi)", "role": "purchase"},
+        {"email": "pundlik@vasuinfosec.com", "name": "Pundlik (Admin)", "role": "admin"},
+        {"email": "chand@vasuinfosec.com", "name": "Chand (Site Engineer)", "role": "site_engineer"},
+        {"email": "saurabh@vasuinfosec.com", "name": "Saurabh (Site Engineer)", "role": "site_engineer"},
+        {"email": "abhishek.yadav@vasuinfosec.com", "name": "Abhishek Yadav (Site Engineer)", "role": "site_engineer"},
+        {"email": "shivsaran@vasuinfosec.com", "name": "Shiv Saran (Site Engineer)", "role": "site_engineer"},
+        {"email": "abhishek@vasuinfosec.com", "name": "Abhishek (Stores)", "role": "store"},
     ]
     for u in demo_users:
         existing = await db.users.find_one({"email": u["email"]}, {"_id": 0})
@@ -2198,6 +2561,59 @@ async def seed_data(authorization: Optional[str] = Header(None)):
         if not existing:
             await db.masters.insert_one({"item_id": gid("itm"), "name": m, "category": "material", "active": True})
 
+    # GST rates (standard Indian slabs)
+    gst_rates = [("Nil", "0"), ("5%", "5"), ("12%", "12"), ("18%", "18"), ("28%", "28")]
+    for name, val in gst_rates:
+        existing = await db.masters.find_one({"name": name, "category": "gst"}, {"_id": 0})
+        if not existing:
+            await db.masters.insert_one({"item_id": gid("itm"), "name": name, "category": "gst",
+                                         "value": val, "active": True})
+
+    # Departments
+    departments = ["Fire Safety", "IT & Networking", "Operations", "Projects", "Purchase", "Accounts"]
+    for d in departments:
+        existing = await db.masters.find_one({"name": d, "category": "department"}, {"_id": 0})
+        if not existing:
+            await db.masters.insert_one({"item_id": gid("itm"), "name": d, "category": "department",
+                                         "active": True})
+
+    # Migrate legacy project.client strings -> Customer records (permanent Customer IDs).
+    # Any project without a customer_id but with a non-empty client string gets a matching Customer.
+    legacy_projects = await db.projects.find(
+        {"$and": [{"client": {"$nin": [None, ""]}},
+                  {"$or": [{"customer_id": None}, {"customer_id": {"$exists": False}}]}]},
+        {"_id": 0, "project_id": 1, "client": 1}
+    ).to_list(500)
+    for lp in legacy_projects:
+        client_name = (lp.get("client") or "").strip()
+        if not client_name:
+            continue
+        # See if a Customer already exists with that name (case-insensitive)
+        cust = await db.customers.find_one(
+            {"name": {"$regex": f"^{re.escape(client_name)}$", "$options": "i"}}, {"_id": 0}
+        )
+        if not cust:
+            # Generate a safe alphanumeric customer_id from the name (fallback if collision)
+            base = re.sub(r"[^A-Za-z0-9]+", "", client_name).upper()[:10] or "CUST"
+            candidate = f"CUST-{base}"
+            suffix = 1
+            while await db.customers.find_one({"customer_id": candidate}, {"_id": 0}):
+                candidate = f"CUST-{base}-{suffix:02d}"; suffix += 1
+            cust = {
+                "customer_id": candidate,
+                "name": client_name, "gstin": "", "pan": "",
+                "billing_address": "", "shipping_address": "",
+                "contact_person": "", "phone": "", "email": "",
+                "remarks": "Auto-created from legacy project.client string",
+                "active": True, "created_at": now_utc(),
+            }
+            await db.customers.insert_one(cust)
+        # Link project -> customer
+        await db.projects.update_one(
+            {"project_id": lp["project_id"]},
+            {"$set": {"customer_id": cust["customer_id"]}},
+        )
+
     return {"ok": True, "message": "Seed complete", "logins": [u["email"] for u in demo_users]}
 
 # ---------------------- Startup ----------------------
@@ -2211,6 +2627,8 @@ async def startup():
     await db.mrfs.create_index("mrf_number", unique=True)
     await db.pos.create_index("po_id", unique=True)
     await db.pos.create_index("po_number", unique=True)
+    await db.customers.create_index("customer_id", unique=True)
+    await db.customer_pos.create_index("cpo_id", unique=True)
 
 @app.on_event("shutdown")
 async def shutdown():

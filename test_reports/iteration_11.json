@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 11 — Admin Master Module backend regression. 32/32 in-scope tests PASSED (100%) on first run; no code fixes required. All 30 review-request cases verified end-to-end: Customer CRUD (1-9) including case-insensitive dup checks, regex validation (`^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$`), reason enforcement on PUT, ID-rename with CASCADE across customer_pos/projects/mrfs/pos/invoices; Cascade test (10) — project.customer_id rewrites from CAS-1 to CAS-2 after customer rename; Customer POs (11-15) — admin/purchase can create/update, site_engineer blocked (403), GET attachment 404 when absent; Masters (16-23) — GST numeric validation, duplicate-name-per-category 400, model.parent_id -> brand, reason mandatory on PUT, SE POST 403, audit rows created; Project/Vendor reason enforcement (24-26) — 400 without reason, 400 on unknown customer_id 'GHOST'; Master audit (27-30) — role gating (admin/director 200, site_engineer 403) and entity=customer filter works correctly. Legacy pre-existing stale suites (test_phase1_role_reshuffle, test_security_hardening, test_sec002_pdf_scoping, test_mrf_po_workflow) were NOT re-run per review-request rule (they depend on retired role names and are documented pre-existing issues).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_admin_master_module.py",
+    "/app/test_reports/pytest/admin_master_iter11.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:725-731 `_validate_customer_id` correctly enforces the spec regex `^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$` (2-32 chars, starts with alnum). Verified 'has spaces' -> 400.",
+    "server.py:763-768 uses `$regex` with `re.escape` and `$options:'i'` for case-insensitive uniqueness on both customer_id and name — correctly rejects 'acme-01' when 'ACME-01' exists.",
+    "server.py:791-805 CASCADE update is atomic-per-collection across customers/customer_pos/projects/mrfs/pos/invoices with a rename_id audit entry recorded under the NEW id. Verified project.customer_id updates after rename.",
+    "server.py:849-852 correctly overwrites body.customer_id with the URL path value on customer PO create (so client-omitted or wrong body value is safe).",
+    "server.py:867 uses `... or 'Update customer PO'` fallback for reason — matches spec 'reason optional (defaults)'.",
+    "server.py:894-897 returns 404 when attachment_b64 is missing OR empty — matches spec test case 15.",
+    "server.py:954-958 GST value validation uses float() on `value or '0'` — non-numeric 'eighteen' -> 400 as expected. Note: an empty/missing `value` for gst quietly defaults to 0 which passes; spec says GST 'must have numeric value' — consider tightening to require value != None/'' for gst category if that's a concern (out of current test scope; no case failed).",
+    "server.py:900-912 /master-audit correctly gates on admin/director and applies both `entity` and `entity_id` filters. `_strip_oids` prevents ObjectId serialization leaks.",
+    "server.py:648-650, 694-696, 979-981 uniformly raise 400 'A reason is required for master-data changes' when reason is missing/blank across customers/vendors/projects/masters PUT. Consistent phrasing helps a single frontend toast handler.",
+    "server.py:662-665 PUT /projects validates `customer_id` change against existence — 'GHOST' -> 400 as expected. On POST /projects (line 628-631) same check runs.",
+    "Potential edge case (not in review scope): DELETE /customers does NOT check for existing active projects/customer_pos referencing the customer before soft-delete. If the product expects a 'cannot delete customer with active POs/projects' guard, add it. Currently a soft-delete succeeds silently and orphaned references remain (they still point to the now-inactive customer). Not a bug per current spec."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (32/32 admin-master-module tests; covers all 30 review cases)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "No seed reset. All test data uses uuid-suffixed unique IDs (ACME-XXXXXX, CAS-XXXXXX, DIR-CUST-XXXXXX, TEST GST 18%..., TEST Brand..., TEST Purchase Dept..., TEST Vendor...). Existing RIL-DIG / seeded customers/projects untouched. Soft-deleted rows remain in DB with active=false (no cleanup needed for regression re-runs since IDs are unique per-run).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `EXPO_BACKEND_URL=https://purchase-workflow-10.preview.emergentagent.com python -m pytest /app/backend/tests/test_admin_master_module.py -v` — expect 32/32 in ~6s. Suite is idempotent: each run generates fresh UUID-suffixed customer/master IDs so re-running does not conflict with previous run's data. Prereq: ENABLE_DEV_LOGIN=1 in /app/backend/.env. As documented in iteration_10.json, do NOT run test_phase1_role_reshuffle.py / test_security_hardening.py / test_sec002_pdf_scoping.py / test_mrf_po_workflow.py — those are pre-existing stale suites.",
+  "rca_of_issue": "N/A — no bugs found. All 30 spec cases pass first try."
+}

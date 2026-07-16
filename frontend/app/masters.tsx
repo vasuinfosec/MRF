@@ -10,15 +10,19 @@ import { Btn, Card, H1, H2, Label, Muted, Empty } from "@/src/components/ui";
 import { theme } from "@/src/theme";
 import ProjectTeamModal from "@/src/components/ProjectTeamModal";
 
-type Tab = "projects" | "vendors" | "sites" | "units" | "brands" | "materials" | "thresholds";
+type Tab = "projects" | "vendors" | "sites" | "units" | "brands" | "materials" | "models" | "gst" | "departments" | "thresholds" | "audit";
 const TABS: { key: Tab; label: string; roles?: string[] }[] = [
   { key: "projects", label: "Projects" },
   { key: "vendors", label: "Vendors" },
   { key: "sites", label: "Sites" },
   { key: "units", label: "Units" },
-  { key: "brands", label: "Brands" },
+  { key: "brands", label: "Brands/Makes" },
+  { key: "models", label: "Models" },
   { key: "materials", label: "Materials" },
+  { key: "gst", label: "GST Rates" },
+  { key: "departments", label: "Departments" },
   { key: "thresholds", label: "PO Thresholds", roles: ["director", "admin"] },
+  { key: "audit", label: "Master Audit", roles: ["director", "admin"] },
 ];
 
 // System category shorthand map
@@ -41,14 +45,14 @@ export default function Masters() {
   const [tab, setTab] = useState<Tab>("projects");
   const [projects, setProjects] = useState<any[]>([]);
   const [vendors, setVendors] = useState<any[]>([]);
-  const [masters, setMasters] = useState<any>({ unit: [], brand: [], material: [] });
+  const [masters, setMasters] = useState<any>({ unit: [], brand: [], material: [], model: [], gst: [], department: [] });
   const [systems, setSystems] = useState<string[]>([]);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
   const [teamPid, setTeamPid] = useState<string | null>(null);
 
   // Add-Project form
-  const [pf, setPf] = useState({ code: "", name: "", site: "", client: "", system_categories: [] as string[] });
+  const [pf, setPf] = useState({ code: "", name: "", site: "", client: "", customer_id: "", system_categories: [] as string[] });
   // Edit-Project modal
   const [pEdit, setPEdit] = useState<any>(null);
   // Add-Vendor form
@@ -119,26 +123,32 @@ export default function Masters() {
     try {
       await api("/projects", { method: "POST", body: {
         code: pf.code.trim(), name: pf.name.trim(), site: pf.site.trim(),
-        client: pf.client.trim(), system_categories: pf.system_categories,
+        client: pf.client.trim(),
+        customer_id: pf.customer_id?.trim() || null,
+        system_categories: pf.system_categories,
       } });
-      setPf({ code: "", name: "", site: "", client: "", system_categories: [] });
+      setPf({ code: "", name: "", site: "", client: "", customer_id: "", system_categories: [] });
       load();
     } catch (e: any) { setErr(e.message); }
   };
 
   const saveProjectEdit = async () => {
     if (!pEdit) return;
+    const reason = pEdit._reason?.trim();
+    if (!reason) { setErr("Please enter a reason for this change (required)."); return; }
     try {
       await api(`/projects/${pEdit.project_id}`, { method: "PUT", body: {
         code: pEdit.code, name: pEdit.name, site: pEdit.site,
-        client: pEdit.client, system_categories: pEdit.system_categories || [],
+        client: pEdit.client, customer_id: pEdit.customer_id || null,
+        system_categories: pEdit.system_categories || [],
+        reason,
       } });
       setPEdit(null); load();
     } catch (e: any) { setErr(e.message); }
   };
 
   const deactivateProject = async (project_id: string) => {
-    await api(`/projects/${project_id}`, { method: "DELETE" });
+    await api(`/projects/${project_id}?reason=Deactivated%20via%20UI`, { method: "DELETE" });
     load();
   };
 
@@ -157,31 +167,43 @@ export default function Masters() {
 
   const saveVendorEdit = async () => {
     if (!vEdit) return;
+    const reason = vEdit._reason?.trim();
+    if (!reason) { setErr("Please enter a reason for this change (required)."); return; }
     try {
       await api(`/vendors/${vEdit.vendor_id}`, { method: "PUT", body: {
         name: vEdit.name, address: vEdit.address, gstin: vEdit.gstin,
-        contact: vEdit.contact, email: vEdit.email,
+        contact: vEdit.contact, email: vEdit.email, reason,
       } });
       setVEdit(null); load();
     } catch (e: any) { setErr(e.message); }
   };
 
   const deactivateVendor = async (vendor_id: string) => {
-    await api(`/vendors/${vendor_id}`, { method: "DELETE" });
+    await api(`/vendors/${vendor_id}?reason=Deactivated%20via%20UI`, { method: "DELETE" });
     load();
   };
 
-  const addMaster = async (category: "unit" | "brand" | "material") => {
+  const [mfValue, setMfValue] = useState("");   // used for GST rate (percentage)
+
+  const addMaster = async (category: string) => {
     setErr("");
     if (!mf.trim()) { setErr("Name required."); return; }
     try {
-      await api("/masters", { method: "POST", body: { name: mf.trim(), category } });
-      setMf(""); load();
+      const body: any = { name: mf.trim(), category };
+      if (category === "gst" && mfValue.trim()) body.value = mfValue.trim();
+      await api("/masters", { method: "POST", body });
+      setMf(""); setMfValue(""); load();
     } catch (e: any) { setErr(e.message); }
   };
 
-  const currentMasterKey: "unit" | "brand" | "material" | null =
-    tab === "units" ? "unit" : tab === "brands" ? "brand" : tab === "materials" ? "material" : null;
+  const currentMasterKey: "unit" | "brand" | "material" | "model" | "gst" | "department" | null =
+    tab === "units" ? "unit"
+    : tab === "brands" ? "brand"
+    : tab === "materials" ? "material"
+    : tab === "models" ? "model"
+    : tab === "gst" ? "gst"
+    : tab === "departments" ? "department"
+    : null;
   const masterList = currentMasterKey ? (masters[currentMasterKey] || []) : [];
 
   const filteredProjects = q ? projects.filter((p) =>
@@ -209,7 +231,21 @@ export default function Masters() {
       </View>
       <ScrollView contentContainerStyle={{ padding: 16, paddingBottom: 80 }}>
         <H1>Masters</H1>
-        <Muted>Create and manage projects, vendors, sub-sites, units, brands and materials.</Muted>
+        <Muted>Customers · Projects · Vendors · Materials · GST · Departments · Users · Thresholds.</Muted>
+
+        {/* Customer master CTA */}
+        <TouchableOpacity
+          testID="open-customers"
+          onPress={() => router.push("/customers")}
+          style={styles.cta}
+          activeOpacity={0.85}
+        >
+          <View style={{ flex: 1 }}>
+            <Text style={styles.ctaTitle}>Customer Master →</Text>
+            <Text style={styles.ctaSub}>Permanent Customer ID, GSTIN, Customer POs. Used everywhere.</Text>
+          </View>
+          <Ionicons name="people-outline" size={26} color={theme.colors.primary} />
+        </TouchableOpacity>
 
         <ScrollView horizontal showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipRow} style={{ marginTop: 14, marginHorizontal: -16, paddingHorizontal: 16 }}>
@@ -260,8 +296,16 @@ export default function Masters() {
                   <Label>DEFAULT SITE</Label>
                   <TextInput testID="proj-site" value={pf.site} onChangeText={(v) => setPf({ ...pf, site: v })} placeholder="e.g. Pune Hinjewadi" style={styles.inp} />
                   <View style={{ height: 10 }} />
-                  <Label>CLIENT (OPTIONAL)</Label>
-                  <TextInput testID="proj-client" value={pf.client} onChangeText={(v) => setPf({ ...pf, client: v })} placeholder="e.g. LMN Corp" style={styles.inp} />
+                  <Label>CLIENT NAME (legacy)</Label>
+                  <TextInput testID="proj-client" value={pf.client} onChangeText={(v) => setPf({ ...pf, client: v })} placeholder="e.g. LMN Corp (kept for display; prefer Customer ID below)" style={styles.inp} />
+                  <View style={{ height: 10 }} />
+                  <Label>CUSTOMER ID (link to Customer master)</Label>
+                  <TextInput testID="proj-customer-id" value={pf.customer_id}
+                    onChangeText={(v) => setPf({ ...pf, customer_id: v.replace(/[^A-Za-z0-9_-]/g, "") })}
+                    autoCapitalize="characters"
+                    placeholder="e.g. VASU-CUST-001 (create Customer first)"
+                    style={styles.inp} />
+                  <TouchableOpacity onPress={() => router.push("/customers")} testID="proj-open-cust"><Text style={{ color: theme.colors.primary, fontSize: 12, marginTop: 4 }}>+ Open Customer Master →</Text></TouchableOpacity>
                   <View style={{ height: 12 }} />
                   <Label>SYSTEM CATEGORIES</Label>
                   <Muted style={{ marginBottom: 6 }}>Which systems does this project cover? Tap to toggle.</Muted>
@@ -290,7 +334,7 @@ export default function Masters() {
                   <View style={{ flex: 1 }}>
                     <Text style={{ fontWeight: "700", color: theme.colors.primary }}>{p.code}{p.active === false ? " (inactive)" : ""}</Text>
                     <Text style={{ marginTop: 2 }}>{p.name}</Text>
-                    <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>{p.site}{p.client ? ` · ${p.client}` : ""}</Text>
+                    <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>{p.site}{p.customer_id ? ` · Customer: ${p.customer_id}` : (p.client ? ` · ${p.client}` : "")}</Text>
                     <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
                       {(p.site_engineers || []).length} engineer(s) · {(p.project_managers || []).length} PM(s) · {(p.sites || []).filter((x: any) => x.active !== false).length} sub-site(s)
                     </Text>
@@ -446,11 +490,11 @@ export default function Masters() {
           </>
         ) : null}
 
-        {/* MASTERS: UNITS/BRANDS/MATERIALS */}
+        {/* MASTERS: UNITS/BRANDS/MATERIALS/MODELS/GST/DEPARTMENTS */}
         {currentMasterKey ? (          <>
             {isAdmin ? (
               <Card style={{ marginTop: 12 }} testID={`add-${currentMasterKey}-card`}>
-                <H2>Add {TABS.find((t) => t.key === tab)?.label.slice(0, -1)}</H2>
+                <H2>Add {TABS.find((t) => t.key === tab)?.label.replace(/s$/, "")}</H2>
                 <View style={{ flexDirection: "row", gap: 8, marginTop: 10, alignItems: "flex-end" }}>
                   <View style={{ flex: 1 }}>
                     <Label>NAME</Label>
@@ -458,10 +502,20 @@ export default function Masters() {
                       placeholder={
                         currentMasterKey === "unit" ? "e.g. Meter, Kg, Box" :
                         currentMasterKey === "brand" ? "e.g. Legrand, Schneider" :
+                        currentMasterKey === "model" ? "e.g. XC-500 (specify brand in name)" :
+                        currentMasterKey === "gst" ? "e.g. GST 18% Standard" :
+                        currentMasterKey === "department" ? "e.g. Purchase, Accounts" :
                         "e.g. Emergency Light 3W"
                       }
                       style={styles.inp} />
                   </View>
+                  {currentMasterKey === "gst" ? (
+                    <View style={{ width: 100 }}>
+                      <Label>RATE %</Label>
+                      <TextInput testID="m-input-gst-val" value={mfValue} onChangeText={setMfValue}
+                        placeholder="18" keyboardType="numeric" style={styles.inp} />
+                    </View>
+                  ) : null}
                   <Btn testID={`m-add-${currentMasterKey}`} title="+ Add" variant="action" onPress={() => addMaster(currentMasterKey)} />
                 </View>
               </Card>
@@ -471,11 +525,19 @@ export default function Masters() {
             <Card style={{ marginTop: 8 }}>
               {filteredMasters.length ? filteredMasters.map((it: any, i: number) => (
                 <View key={it.item_id || i} style={styles.masterRow} testID={`m-item-${it.name}`}>
-                  <Text style={{ flex: 1, fontWeight: "500" }}>{it.name}</Text>
+                  <Text style={{ flex: 1, fontWeight: "500" }}>
+                    {it.name}
+                    {it.value ? <Text style={{ color: theme.colors.textMuted, fontWeight: "400" }}>  ·  {it.value}{currentMasterKey === "gst" ? "%" : ""}</Text> : null}
+                  </Text>
                 </View>
               )) : <Muted>None match.</Muted>}
             </Card>
           </>
+        ) : null}
+
+        {/* MASTER AUDIT */}
+        {tab === "audit" && isDirectorOrAdmin ? (
+          <MasterAuditSection />
         ) : null}
       </ScrollView>
 
@@ -503,8 +565,15 @@ export default function Masters() {
                 <Label>DEFAULT SITE</Label>
                 <TextInput testID="pe-site" value={pEdit.site || ""} onChangeText={(v) => setPEdit({ ...pEdit, site: v })} style={styles.inp} />
                 <View style={{ height: 8 }} />
-                <Label>CLIENT</Label>
+                <Label>CLIENT (legacy free-text)</Label>
                 <TextInput testID="pe-client" value={pEdit.client || ""} onChangeText={(v) => setPEdit({ ...pEdit, client: v })} style={styles.inp} />
+                <View style={{ height: 8 }} />
+                <Label>CUSTOMER ID (from Customer master)</Label>
+                <TextInput testID="pe-customer-id" value={pEdit.customer_id || ""}
+                  onChangeText={(v) => setPEdit({ ...pEdit, customer_id: v.replace(/[^A-Za-z0-9_-]/g, "") })}
+                  autoCapitalize="characters"
+                  placeholder="e.g. VASU-CUST-001 · leave blank if not linked"
+                  style={styles.inp} />
                 <View style={{ height: 10 }} />
                 <Label>SYSTEM CATEGORIES</Label>
                 <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
@@ -525,6 +594,13 @@ export default function Masters() {
                     );
                   })}
                 </View>
+                <View style={{ height: 12 }} />
+                <Label>REASON FOR CHANGE * (mandatory audit)</Label>
+                <TextInput testID="pe-reason" value={pEdit._reason || ""}
+                  onChangeText={(v) => setPEdit({ ...pEdit, _reason: v })}
+                  placeholder="e.g. Correct client name per contract"
+                  style={[styles.inp, { backgroundColor: "#fffbea", minHeight: 60 }]}
+                  multiline />
               </ScrollView>
             ) : null}
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
@@ -559,6 +635,13 @@ export default function Masters() {
                 <View style={{ height: 8 }} />
                 <Label>EMAIL</Label>
                 <TextInput testID="ve-email" value={vEdit.email || ""} onChangeText={(v) => setVEdit({ ...vEdit, email: v })} style={styles.inp} autoCapitalize="none" />
+                <View style={{ height: 12 }} />
+                <Label>REASON FOR CHANGE * (mandatory audit)</Label>
+                <TextInput testID="ve-reason" value={vEdit._reason || ""}
+                  onChangeText={(v) => setVEdit({ ...vEdit, _reason: v })}
+                  placeholder="e.g. Update GSTIN after re-registration"
+                  style={[styles.inp, { backgroundColor: "#fffbea", minHeight: 60 }]}
+                  multiline />
               </ScrollView>
             ) : null}
             <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
@@ -585,4 +668,90 @@ const styles = StyleSheet.create({
   sysTag: { backgroundColor: "rgba(0,47,167,0.08)", paddingHorizontal: 6, paddingVertical: 3, borderRadius: 3 },
   modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
   modal: { backgroundColor: "#fff", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 20 },
+  cta: {
+    marginTop: 14, flexDirection: "row", alignItems: "center", gap: 12,
+    backgroundColor: "rgba(0,47,167,0.06)",
+    borderWidth: 1, borderColor: "rgba(0,47,167,0.25)",
+    borderRadius: 12, padding: 14,
+  },
+  ctaTitle: { fontSize: 15, fontWeight: "700", color: theme.colors.primary },
+  ctaSub: { fontSize: 12, color: theme.colors.textMuted, marginTop: 2 },
+  auditRow: {
+    paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: theme.colors.border,
+  },
 });
+
+function MasterAuditSection() {
+  const [rows, setRows] = React.useState<any[]>([]);
+  const [entity, setEntity] = React.useState<string>("");
+  const [loading, setLoading] = React.useState(false);
+
+  const load = React.useCallback(async () => {
+    setLoading(true);
+    try {
+      const q = entity ? `?entity=${encodeURIComponent(entity)}` : "";
+      const d = await api<any[]>(`/master-audit${q}`);
+      setRows(d);
+    } catch { setRows([]); }
+    setLoading(false);
+  }, [entity]);
+
+  React.useEffect(() => { load(); }, [load]);
+
+  const filters = [
+    { key: "", label: "All" },
+    { key: "customer", label: "Customer" },
+    { key: "customer_po", label: "Customer PO" },
+    { key: "project", label: "Project" },
+    { key: "vendor", label: "Vendor" },
+    { key: "master.gst", label: "GST" },
+    { key: "master.department", label: "Dept" },
+    { key: "master.brand", label: "Brand" },
+    { key: "master.model", label: "Model" },
+    { key: "master.material", label: "Material" },
+    { key: "master.unit", label: "Unit" },
+  ];
+
+  return (
+    <>
+      <H2 style={{ marginTop: 20 }}>Master Data Audit Log</H2>
+      <Muted>Every master-data change (who, when, why, before/after).</Muted>
+
+      <ScrollView horizontal showsHorizontalScrollIndicator={false}
+        contentContainerStyle={{ gap: 6, marginTop: 10 }}>
+        {filters.map((f) => {
+          const active = entity === f.key;
+          return (
+            <TouchableOpacity key={f.key || "all"} onPress={() => setEntity(f.key)}
+              testID={`audit-filter-${f.key || "all"}`}
+              style={[styles.chip, {
+                borderColor: active ? theme.colors.primary : theme.colors.border,
+                backgroundColor: active ? theme.colors.primary : "#fff",
+                height: 30, paddingHorizontal: 10,
+              }]}>
+              <Text style={{ color: active ? "#fff" : theme.colors.text, fontSize: 12 }}>{f.label}</Text>
+            </TouchableOpacity>
+          );
+        })}
+      </ScrollView>
+
+      <Card style={{ marginTop: 10 }}>
+        {loading ? <Muted>Loading…</Muted> : rows.length === 0 ? (
+          <Muted>No audit entries yet.</Muted>
+        ) : rows.map((r) => (
+          <View key={r.audit_id} style={styles.auditRow} testID={`audit-${r.audit_id}`}>
+            <Text style={{ fontWeight: "700", color: theme.colors.text }}>
+              {r.entity} · {r.entity_id}
+            </Text>
+            <Text style={{ color: theme.colors.textMuted, fontSize: 12, marginTop: 2 }}>
+              {String(r.timestamp || "").slice(0, 19).replace("T", " ")} · {r.user_name} ({r.user_role}) · {r.action}
+            </Text>
+            {r.reason ? <Text style={{ fontSize: 13, marginTop: 4 }}>💬 {r.reason}</Text> : null}
+            {r.old_value ? <Text style={{ fontSize: 11, color: "#b45309", marginTop: 4 }} numberOfLines={2}>OLD: {JSON.stringify(r.old_value)}</Text> : null}
+            {r.new_value ? <Text style={{ fontSize: 11, color: "#166534", marginTop: 2 }} numberOfLines={2}>NEW: {JSON.stringify(r.new_value)}</Text> : null}
+          </View>
+        ))}
+      </Card>
+    </>
+  );
+}

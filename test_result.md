@@ -201,3 +201,100 @@ test_plan:
 agent_communication:
     -agent: "main"
     -message: "Phase 2 (approval chain + thresholds) implemented. Backend RBAC completely reshuffled: site_engineer is now a first-class role, PO creation goes through threshold gates, GM/Director approve high-value POs. Please run comprehensive RBAC regression tests across all six roles (site_engineer, pm, purchase, gm, director, admin) covering: MRF create/submit/approve/reject/return, PO create with three threshold tiers, GM approve of GM-tier PO, GM reject of Director-tier PO, Director approve of both tiers, GRN receipt by site_engineer/purchase, and Threshold PUT restricted to director/admin. Dev-login endpoint is available at /api/auth/dev-login (ENABLE_DEV_LOGIN=1). See /app/memory/test_credentials.md for seeded users."
+
+## Phase 2b — Admin Master Module (Customers + GST + Departments + Models + Master Audit)
+
+backend:
+  - task: "Customer Master with editable alphanumeric IDs + cascade"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New /api/customers CRUD. Customer ID is admin-typed alphanumeric (^[A-Za-z0-9][A-Za-z0-9_-]{1,31}$). Editable via PUT with reason required. On ID change, cascades to customers, customer_pos, projects.customer_id, mrfs.customer_id, pos.customer_id, invoices.customer_id. Duplicate ID and duplicate name blocked (case-insensitive). Only admin/director. Migration on /api/seed auto-creates Customer records for legacy project.client strings."
+  - task: "Customer PO with attachment (base64)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "POST /api/customers/{cid}/pos, PUT /api/customers/{cid}/pos/{cpo_id}, GET /api/customers/{cid}/pos/{cpo_id}/attachment. Fields: po_number, po_date, value, validity_till, attachment_name, attachment_b64. admin/director/purchase only."
+  - task: "Model, GST, Department masters (extend masters collection)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New /api/masters PUT + DELETE with mandatory reason. Categories extended to unit/brand/material/model/gst/department. GST accepts numeric `value` (percent). Case-insensitive duplicate prevention per category. Master edits go through master_audit."
+  - task: "master_audit trail (WHO, WHEN, WHY, OLD, NEW)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New master_audit_logs collection. helper master_audit(entity, id, action, user, reason, old, new) strips ObjectIds/datetimes deep. Reasons mandatory on all master edits (customer, project, vendor, master). GET /api/master-audit lists entries (director/admin only). Also mirrors into audit_logs so existing audit UI sees them."
+  - task: "Seed full Vasu Infosec roster (12 real users)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Added wasim@, sanjeev@, pundlik@, chand@, saurabh@, abhishek.yadav@, shivsaran@, abhishek@ (stores). All @vasuinfosec.com, editable via /users/role."
+
+frontend:
+  - task: "Customers screen — dedicated CRUD"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/customers.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New /customers route. Create form with all fields; list rows with Edit/PO/Deactivate icons; Edit modal has toggle to unlock Customer ID (cascade update). Mandatory reason field."
+  - task: "Masters screen — new tabs (Models, GST, Departments, Master Audit) + Customer CTA + reason on edits"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/masters.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Extended Tab type. Add-Project form has CUSTOMER ID field. Project/Vendor edit modals now require a reason (audit). New MasterAuditSection filterable by entity."
+
+test_plan:
+  current_focus:
+    - "Customer Master with editable alphanumeric IDs + cascade"
+    - "Customer PO with attachment (base64)"
+    - "master_audit trail (WHO, WHEN, WHY, OLD, NEW)"
+    - "Model, GST, Department masters (extend masters collection)"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: "Phase 2b (Admin Master Module) implemented. Manual smoke test passed for: customer create/duplicate/invalid-ID/rename-with-cascade/deactivate, customer PO add, master reason enforcement, master_audit list, non-admin denial. Please run full RBAC & integrity regression: customer CRUD (admin/director allowed, others 403), CID rename cascade to projects/mrfs/pos/invoices, GST/Department/Model CRUD via masters endpoint, reason-required on customer/vendor/project/master PUT (400 without), master_audit list filtered by entity, duplicate customer name/ID rejected, project.customer_id validation (400 if unknown). Do NOT test PDF generation or Tally export (deferred to Phase 3)."
