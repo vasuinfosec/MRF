@@ -77,6 +77,8 @@ class Project(BaseModel):
     site: str
     client: Optional[str] = None
     active: bool = True
+    site_engineers: List[str] = []      # user_ids
+    project_managers: List[str] = []    # user_ids
 
 class Vendor(BaseModel):
     vendor_id: str = Field(default_factory=lambda: gid("vnd"))
@@ -361,9 +363,43 @@ async def notify(user_ids: List[str], title: str, body_text: str, link: str = ""
 
 # ---------------------- Master Data ----------------------
 @api.get("/projects")
-async def list_projects(authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
-    return await db.projects.find({"active": True}, {"_id": 0}).to_list(500)
+async def list_projects(all: Optional[bool] = False,
+                        authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    q: Dict[str, Any] = {"active": True}
+    docs = await db.projects.find(q, {"_id": 0}).to_list(500)
+    # Purchase/billing/admin see all. Site engineer + PM see only assigned unless all=1 (admin only).
+    if all and u.role == "admin":
+        return docs
+    if u.role == "site_engineer":
+        docs = [p for p in docs if u.user_id in (p.get("site_engineers") or [])]
+    elif u.role == "project_manager":
+        docs = [p for p in docs if u.user_id in (p.get("project_managers") or [])]
+    return docs
+
+@api.post("/projects/{project_id}/team")
+async def update_project_team(
+    project_id: str,
+    body: dict,
+    authorization: Optional[str] = Header(None),
+):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin")
+    site_engineers = body.get("site_engineers")
+    project_managers = body.get("project_managers")
+    update: Dict[str, Any] = {}
+    if isinstance(site_engineers, list):
+        update["site_engineers"] = [str(x) for x in site_engineers]
+    if isinstance(project_managers, list):
+        update["project_managers"] = [str(x) for x in project_managers]
+    if not update:
+        raise HTTPException(400, "Nothing to update")
+    r = await db.projects.update_one({"project_id": project_id}, {"$set": update})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Project not found")
+    await audit("project", project_id, "team_update", u, update)
+    return await db.projects.find_one({"project_id": project_id}, {"_id": 0})
 
 @api.post("/projects")
 async def add_project(p: Project, authorization: Optional[str] = Header(None)):
@@ -451,6 +487,13 @@ async def next_invoice_number() -> str:
 @api.post("/mrf")
 async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
+    if u.role in ["site_engineer", "project_manager"]:
+        p = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
+        if not p:
+            raise HTTPException(404, "Project not found")
+        team = p.get("site_engineers") or [] if u.role == "site_engineer" else p.get("project_managers") or []
+        if u.user_id not in team:
+            raise HTTPException(403, "You are not assigned to this project")
     items = []
     for i in body.items:
         d = i.model_dump()
@@ -489,9 +532,14 @@ async def list_mrfs(
         q["project_id"] = project_id
     if system_category:
         q["system_category"] = system_category
-    # Site engineers only see their own
+    # Site engineers only see their own; PMs only see MRFs from their assigned projects
     if u.role == "site_engineer":
         q["created_by"] = u.user_id
+    elif u.role == "project_manager":
+        prjs = await db.projects.find(
+            {"project_managers": u.user_id}, {"_id": 0, "project_id": 1}
+        ).to_list(500)
+        q["project_id"] = {"$in": [p["project_id"] for p in prjs]}
     docs = await db.mrfs.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
     return docs
 
@@ -530,6 +578,10 @@ async def approve_mrf(mrf_id: str, body: ApprovalAction, authorization: Optional
     d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "MRF not found")
+    if u.role == "project_manager":
+        proj = await db.projects.find_one({"project_id": d["project_id"]}, {"_id": 0})
+        if not proj or u.user_id not in (proj.get("project_managers") or []):
+            raise HTTPException(403, "You are not the PM for this project")
 
     if body.action == "return":
         await db.mrfs.update_one(
@@ -1580,7 +1632,20 @@ async def seed_data():
     for p in projects:
         existing = await db.projects.find_one({"code": p["code"]}, {"_id": 0})
         if not existing:
-            await db.projects.insert_one({"project_id": gid("prj"), **p, "active": True})
+            await db.projects.insert_one({"project_id": gid("prj"), **p, "active": True,
+                                          "site_engineers": [], "project_managers": []})
+
+    # Seed team: assign seeded site engineer and PM to all seeded projects (idempotent)
+    site_user = await db.users.find_one({"email": "site@vasu.dev"}, {"_id": 0, "user_id": 1})
+    pm_user = await db.users.find_one({"email": "pm@vasu.dev"}, {"_id": 0, "user_id": 1})
+    if site_user and pm_user:
+        await db.projects.update_many(
+            {"code": {"$in": [p["code"] for p in projects]}},
+            {"$addToSet": {
+                "site_engineers": site_user["user_id"],
+                "project_managers": pm_user["user_id"],
+            }},
+        )
 
     # Vendors
     vendors = [
