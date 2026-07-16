@@ -65,7 +65,7 @@ export default function ImportScreen() {
   };
 
   if (!user) return null;
-  const canImport = user.role === "admin" || user.role === "purchase" || user.role === "site_engineer";
+  const canImport = user.role === "admin" || user.role === "purchase" || user.role === "pm";
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>

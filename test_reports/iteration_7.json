@@ -1,0 +1,47 @@
+{
+  "summary": "Phase 1 role-reshuffle backend tests: 27/28 PASSED. Roles director/pm/gm/purchase/admin all work through /auth/dev-login + /auth/me. Legacy role auto-migration (site_engineer->pm, project_manager->pm, billing->purchase) verified end-to-end via direct DB seeding and persisted correctly on /auth/me read. MRF approve authorisation matrix correct: PM-on-project 200, PM-off-project 403, GM/Director/Admin 200 globally, Purchase 403. /audit is admin-only (director/pm/gm/purchase all 403). /users returns full emails only to admin; pm/gm/purchase/director get emails=''. Seeded pm@vasu.dev is present in project_managers[] on VIS-101/102/103. Seed idempotent. ONE FAILURE: POST /api/po/{po_id}/received returns 403 for director; spec requires 200 for purchase/director/admin. Root cause: server.py:974 gate is `('purchase','purchase','admin')` (director missing, and 'purchase' duplicated). Code also has several dead legacy-role branches from the rename that need cleanup (see critical_code_review_comments).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/po/{po_id}/received",
+        "issue": "Director gets 403 but Phase 1 spec says purchase/director/admin should all be allowed. Fix: change `if u.role not in ('purchase','purchase','admin')` to `if u.role not in ('purchase','director','admin')` at server.py:974. Also update the error string 'Only purchase/billing/admin can record receipt' to drop 'billing'.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "POST /api/mrf/{id}/submit",
+        "issue": "server.py:782 notifies users with role='project_manager' — legacy role name that no longer exists after Phase 1. Should be role='pm'. Currently the PM-review notification silently reaches nobody."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase1_role_reshuffle.py",
+    "/app/test_reports/pytest/phase1_role_reshuffle.xml"
+  ],
+  "action_items": [
+    "Fix POST /api/po/{po_id}/received role gate at server.py:974 to include 'director' (spec requirement).",
+    "Fix legacy notification query at server.py:782 — role='project_manager' should be role='pm'.",
+    "Clean up dead legacy-role branches from the role rename: server.py has multiple `if u.role == 'pm': ... elif u.role == 'pm':` patterns (e.g. lines 405/412, 715/717, 729/738, 748/752) — the elif branches are unreachable dead code. Similarly, tuples like `('purchase','purchase','admin')` appear at lines 727, 746, 947, 974, 1086, 1361, 1388, 1420, 1435 — the second 'purchase' is a stale duplicate (probably meant 'billing' pre-migration). Consolidate.",
+    "Consider whether MRF list scoping for PM currently uses `created_by == u.user_id` (server.py:716) — for PMs this may hide MRFs they didn't create but are the approver of; verify against product intent (Phase 1 not blocking)."
+  ],
+  "critical_code_review_comments": [
+    "server.py has duplicated role labels from an incomplete rename: `('purchase','purchase','admin')` appears 8+ times; the second 'purchase' should be 'director' or was previously 'billing'. This has already caused the director/PO-received bug and is likely to cause more.",
+    "Duplicated `if u.role == 'pm': ... elif u.role == 'pm':` blocks (dead code) — sign that a mechanical find/replace of 'site_engineer' -> 'pm' collided with the existing pm branch. Recommend splitting logic explicitly per canonical role.",
+    "server.py is 2010 lines — should be split (auth, master data, MRF, PO, GRN, invoice, exports, seed) into modules. Not blocking but growing brittle.",
+    "list_projects has an `all` query param that overloads Python builtin `all`; harmless but noisy."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "96.4%", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Called POST /api/seed as admin (idempotent) — creates director/pm/gm/purchase/admin @vasu.dev users, VIS-101/102/103 projects with pm@vasu.dev in project_managers, 5 vendors, master units/brands. Test class TestLegacyMigration inserts TEST_legacy_* users directly into MongoDB (users + user_sessions) and cleans them up after each test.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Backend tests live at /app/backend/tests/test_phase1_role_reshuffle.py. Run with: EXPO_BACKEND_URL=http://localhost:8001 MONGO_URL=mongodb://localhost:27017 DB_NAME=test_database python -m pytest tests/test_phase1_role_reshuffle.py -v. ENABLE_DEV_LOGIN=1 must be set in backend/.env. TestLegacyMigration uses pymongo (installed) to seed legacy-role users because /auth/dev-login intentionally rejects legacy role names. Frontend testing not performed — original request was testing_type=backend. Frontend regression items (demo-{role}-btn testIDs, login screen) still need a separate frontend testing pass.",
+  "rca_of_issue": "PO /received director-forbidden bug: at server.py line 974, the role check is `if u.role not in ('purchase', 'purchase', 'admin')`. The tuple has 'purchase' duplicated where 'director' (or historically 'billing') should be, and director is not in the allowed set. This is a leftover from the site_engineer/billing -> pm/purchase rename where the LEGACY_ROLE_MAP consolidated 'billing' -> 'purchase' at the read layer but the code was blindly rewritten producing duplicate 'purchase' entries. Fix: replace the second 'purchase' with 'director' at line 974 (and consider adding 'director' everywhere the pattern appears for consistent director-override semantics). Reproduction: dev-login director@vasu.dev role=director; create an MRF, approve as admin, create PO as purchase; POST /api/po/{po_id}/received as director -> 403 (should be 200)."
+}

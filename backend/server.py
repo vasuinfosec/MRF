@@ -40,7 +40,18 @@ app = FastAPI(title="Vasu Infosec MRF & PO System")
 api = APIRouter(prefix="/api")
 
 # ---------------------- Constants ----------------------
-ROLES = ["site_engineer", "project_manager", "purchase", "billing", "admin"]
+# Roles: Director/PM/GM/Purchase/Admin. Legacy roles auto-migrated.
+ROLES = ["director", "pm", "gm", "purchase", "admin"]
+LEGACY_ROLE_MAP = {
+    "site_engineer": "pm",
+    "project_manager": "pm",
+    "billing": "purchase",
+}
+def _canon_role(r: str) -> str:
+    return LEGACY_ROLE_MAP.get(r, r) if r in LEGACY_ROLE_MAP else r
+
+MRF_APPROVERS = {"pm", "gm", "director", "admin"}
+MRF_EDITORS = {"pm", "gm", "purchase", "director", "admin"}
 SYSTEMS = ["Fire Alarm", "Fire Fighting", "Gas Suppression", "Water Mist",
            "CCTV", "Access Control", "Structured Cabling", "Electrical", "Other"]
 MRF_STATUS = ["draft", "submitted", "pm_review", "approved", "rejected",
@@ -60,7 +71,7 @@ class UserOut(BaseModel):
     email: str
     name: str
     picture: Optional[str] = None
-    role: str = "site_engineer"
+    role: str = "pm"
     is_active: bool = True
 
 class RoleUpdate(BaseModel):
@@ -230,6 +241,11 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> UserO
     user = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=401, detail="User not found")
+    # Auto-migrate legacy roles on read
+    if user.get("role") in LEGACY_ROLE_MAP:
+        canon = LEGACY_ROLE_MAP[user["role"]]
+        await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": canon}})
+        user["role"] = canon
     return UserOut(**user)
 
 def require_roles(*allowed):
@@ -255,12 +271,12 @@ async def create_session(body: SessionRequest):
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
         user_id = existing["user_id"]
-        role = existing.get("role", "site_engineer")
+        role = existing.get("role", "pm")
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         # First user becomes admin
         count = await db.users.count_documents({})
-        role = "admin" if count == 0 else "site_engineer"
+        role = "admin" if count == 0 else "pm"
         await db.users.insert_one({
             "user_id": user_id,
             "email": email,
@@ -302,7 +318,7 @@ async def dev_login(body: dict):
     if os.environ.get("ENABLE_DEV_LOGIN", "0") != "1":
         raise HTTPException(404, "Not found")
     email = body.get("email")
-    role = body.get("role", "site_engineer")
+    role = body.get("role", "pm")
     name = body.get("name", email.split("@")[0] if email else "Dev User")
     if not email:
         raise HTTPException(400, "email required")
@@ -386,14 +402,14 @@ async def list_projects(all: Optional[bool] = False,
     # Purchase/billing/admin see all. Site engineer + PM see only assigned unless all=1 (admin only).
     if all and u.role == "admin":
         return docs
-    if u.role == "site_engineer":
+    if u.role == "pm":
         docs = [
             p for p in docs
             if u.user_id in (p.get("site_engineers") or [])
             or any(u.user_id in (s.get("site_engineers") or [])
                    for s in (p.get("sites") or []) if s.get("active", True))
         ]
-    elif u.role == "project_manager":
+    elif u.role == "pm":
         docs = [p for p in docs if u.user_id in (p.get("project_managers") or [])]
     return docs
 
@@ -644,11 +660,11 @@ async def next_invoice_number() -> str:
 @api.post("/mrf")
 async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role in ["site_engineer", "project_manager"]:
+    if u.role in ["pm", "pm"]:
         p = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
         if not p:
             raise HTTPException(404, "Project not found")
-        if u.role == "site_engineer":
+        if u.role == "pm":
             in_project = u.user_id in (p.get("site_engineers") or [])
             in_any_site = any(u.user_id in (s.get("site_engineers") or [])
                               for s in (p.get("sites") or []) if s.get("active", True))
@@ -696,9 +712,9 @@ async def list_mrfs(
     if system_category:
         q["system_category"] = system_category
     # Site engineers only see their own; PMs only see MRFs from their assigned projects
-    if u.role == "site_engineer":
+    if u.role == "pm":
         q["created_by"] = u.user_id
-    elif u.role == "project_manager":
+    elif u.role == "pm":
         prjs = await db.projects.find(
             {"project_managers": u.user_id}, {"_id": 0, "project_id": 1}
         ).to_list(500)
@@ -708,9 +724,9 @@ async def list_mrfs(
 
 async def _check_mrf_access(u: UserOut, mrf: dict):
     """Raise 403 if user cannot see this MRF."""
-    if u.role in ("admin", "purchase", "billing"):
+    if u.role in ("admin", "purchase", "purchase"):
         return
-    if u.role == "site_engineer":
+    if u.role == "pm":
         if mrf.get("created_by") == u.user_id:
             return
         p = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0})
@@ -719,7 +735,7 @@ async def _check_mrf_access(u: UserOut, mrf: dict):
                       for s in (p.get("sites") or []) if s.get("active", True))):
             return
         raise HTTPException(403, "Not allowed")
-    if u.role == "project_manager":
+    if u.role == "pm":
         p = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0})
         if p and u.user_id in (p.get("project_managers") or []):
             return
@@ -727,13 +743,13 @@ async def _check_mrf_access(u: UserOut, mrf: dict):
     raise HTTPException(403, "Not allowed")
 
 async def _check_po_access(u: UserOut, po: dict):
-    if u.role in ("admin", "purchase", "billing"):
+    if u.role in ("admin", "purchase", "purchase"):
         return
-    if u.role == "project_manager":
+    if u.role == "pm":
         p = await db.projects.find_one({"project_id": po.get("project_id")}, {"_id": 0})
         if p and u.user_id in (p.get("project_managers") or []):
             return
-    if u.role == "site_engineer":
+    if u.role == "pm":
         for mid in po.get("mrf_refs") or []:
             m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "created_by": 1})
             if m and m.get("created_by") == u.user_id:
@@ -771,15 +787,16 @@ async def submit_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
 @api.post("/mrf/{mrf_id}/approve")
 async def approve_mrf(mrf_id: str, body: ApprovalAction, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["project_manager", "admin"]:
-        raise HTTPException(403, "Only PM/admin")
+    if u.role not in ("pm", "gm", "director", "admin"):
+        raise HTTPException(403, "Only PM/GM/Director/admin can authorise")
     d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "MRF not found")
-    if u.role == "project_manager":
+    if u.role == "pm":
         proj = await db.projects.find_one({"project_id": d["project_id"]}, {"_id": 0})
         if not proj or u.user_id not in (proj.get("project_managers") or []):
             raise HTTPException(403, "You are not the PM for this project")
+    # GM and Director have global authorise rights (no project team check)
 
     if body.action == "return":
         await db.mrfs.update_one(
@@ -832,7 +849,7 @@ async def approve_mrf(mrf_id: str, body: ApprovalAction, authorization: Optional
 @api.post("/mrf/{mrf_id}/send-to-purchase")
 async def send_to_purchase(mrf_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["project_manager", "admin"]:
+    if u.role not in ["pm", "admin"]:
         raise HTTPException(403, "Not allowed")
     d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not d or d["status"] != "approved":
@@ -927,14 +944,14 @@ async def list_pos(project_id: Optional[str] = None,
     if project_id:
         q["project_id"] = project_id
     docs = await db.pos.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
-    if u.role in ("admin", "purchase", "billing"):
+    if u.role in ("admin", "purchase", "purchase"):
         return docs
-    if u.role == "project_manager":
+    if u.role == "pm":
         prjs = await db.projects.find({"project_managers": u.user_id},
                                       {"_id": 0, "project_id": 1}).to_list(500)
         allowed = {p["project_id"] for p in prjs}
         return [p for p in docs if p.get("project_id") in allowed]
-    if u.role == "site_engineer":
+    if u.role == "pm":
         # Only POs whose mrf_refs include an MRF created by this user
         my = await db.mrfs.find({"created_by": u.user_id},
                                 {"_id": 0, "mrf_id": 1}).to_list(2000)
@@ -954,7 +971,7 @@ async def get_po(po_id: str, authorization: Optional[str] = Header(None)):
 @api.post("/po/{po_id}/received")
 async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "billing", "admin"):
+    if u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin can record receipt")
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
@@ -1066,7 +1083,7 @@ async def billing_items(
     authorization: Optional[str] = Header(None),
 ):
     u = await get_current_user(authorization)
-    if u.role not in ("billing", "admin", "purchase"):
+    if u.role not in ("purchase", "admin", "purchase"):
         raise HTTPException(403, "Only billing/purchase/admin")
     q: Dict[str, Any] = {"deleted": False}
     if project_id:
@@ -1098,7 +1115,7 @@ async def billing_items(
 @api.post("/billing/update")
 async def update_billing(body: BillingUpdate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["billing", "admin"]:
+    if u.role not in ["purchase", "admin"]:
         raise HTTPException(403, "Only billing/admin")
     mrf = await db.mrfs.find_one({"mrf_id": body.mrf_id}, {"_id": 0})
     if not mrf:
@@ -1341,7 +1358,7 @@ async def export_mrf(token: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "billing", "admin", "project_manager"):
+    if u.role not in ("purchase", "purchase", "admin", "pm"):
         raise HTTPException(403, "Not allowed")
     mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
     wb = openpyxl.Workbook()
@@ -1368,7 +1385,7 @@ async def export_po(token: Optional[str] = None,
                     authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "billing", "admin"):
+    if u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Not allowed")
     pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(1000)
     wb = openpyxl.Workbook()
@@ -1400,7 +1417,7 @@ async def list_grns_for_po(po_id: str, authorization: Optional[str] = Header(Non
 @api.get("/grns")
 async def list_all_grns(authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "billing", "admin"):
+    if u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     return await db.grns.find({}, {"_id": 0}).sort("date", -1).to_list(500)
 
@@ -1415,7 +1432,7 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
     po = await db.pos.find_one({"po_id": grn.get("po_id")}, {"_id": 0})
     if po:
         await _check_po_access(u, po)
-    elif u.role not in ("purchase", "billing", "admin"):
+    elif u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Not allowed")
     vendor = await db.vendors.find_one({"vendor_id": grn.get("vendor_id")}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": grn.get("project_id")}, {"_id": 0}) or {}
@@ -1547,7 +1564,7 @@ async def import_vendors(file: UploadFile = File(...), authorization: Optional[s
 @api.post("/import/mrf")
 async def import_mrf(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["admin", "site_engineer", "project_manager"]:
+    if u.role not in ["admin", "pm", "pm"]:
         raise HTTPException(403, "Only admin/site engineer/project manager can import MRFs")
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
@@ -1645,7 +1662,7 @@ class InvoiceCreate(BaseModel):
 @api.post("/invoice")
 async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["purchase", "billing", "admin"]:
+    if u.role not in ["purchase", "purchase", "admin"]:
         raise HTTPException(403, "Only purchase/billing/admin")
     po = await db.pos.find_one({"po_id": body.po_id}, {"_id": 0})
     if not po:
@@ -1711,7 +1728,7 @@ async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Hea
 async def list_invoices(po_id: Optional[str] = None,
                         authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "billing", "admin"):
+    if u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     q = {}
     if po_id:
@@ -1722,7 +1739,7 @@ async def list_invoices(po_id: Optional[str] = None,
 @api.get("/invoice/{inv_id}")
 async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "billing", "admin"):
+    if u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     d = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
     if not d:
@@ -1732,7 +1749,7 @@ async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
 @api.get("/po/{po_id}/invoices")
 async def list_po_invoices(po_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "billing", "admin"):
+    if u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     return await db.invoices.find({"po_id": po_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
 
@@ -1741,7 +1758,7 @@ async def invoice_pdf(inv_id: str, token: Optional[str] = None,
                       authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "billing", "admin"):
+    if u.role not in ("purchase", "purchase", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     inv = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
     if not inv:
@@ -1878,11 +1895,11 @@ async def seed_data(authorization: Optional[str] = Header(None)):
     # (Otherwise: no users yet, allow unauthenticated bootstrap.)
     # Users
     demo_users = [
-        {"email": "site@vasu.dev", "name": "Ravi (Site Engineer)", "role": "site_engineer"},
-        {"email": "pm@vasu.dev", "name": "Priya (Project Mgr)", "role": "project_manager"},
+        {"email": "director@vasu.dev", "name": "Vishal (Director)", "role": "director"},
+        {"email": "pm@vasu.dev", "name": "Priya (PM)", "role": "pm"},
+        {"email": "gm@vasu.dev", "name": "Girish (GM)", "role": "gm"},
         {"email": "purchase@vasu.dev", "name": "Kumar (Purchase)", "role": "purchase"},
-        {"email": "billing@vasu.dev", "name": "Anita (Billing)", "role": "billing"},
-        {"email": "admin@vasu.dev", "name": "Director", "role": "admin"},
+        {"email": "admin@vasu.dev", "name": "Master Admin", "role": "admin"},
     ]
     for u in demo_users:
         existing = await db.users.find_one({"email": u["email"]}, {"_id": 0})
@@ -1907,14 +1924,13 @@ async def seed_data(authorization: Optional[str] = Header(None)):
             await db.projects.insert_one({"project_id": gid("prj"), **p, "active": True,
                                           "site_engineers": [], "project_managers": []})
 
-    # Seed team: assign seeded site engineer and PM to all seeded projects (idempotent)
-    site_user = await db.users.find_one({"email": "site@vasu.dev"}, {"_id": 0, "user_id": 1})
+    # Seed team: assign seeded PM (site engineer role removed) to all seeded projects (idempotent)
     pm_user = await db.users.find_one({"email": "pm@vasu.dev"}, {"_id": 0, "user_id": 1})
-    if site_user and pm_user:
+    if pm_user:
         await db.projects.update_many(
             {"code": {"$in": [p["code"] for p in projects]}},
             {"$addToSet": {
-                "site_engineers": site_user["user_id"],
+                "site_engineers": pm_user["user_id"],
                 "project_managers": pm_user["user_id"],
             }},
         )

@@ -39,7 +39,7 @@ export default function MRFDetail() {
   useEffect(() => { load(); }, [load]);
 
   const project = projects.find((p) => p.project_id === mrf?.project_id);
-  const isPM = user?.role === "project_manager" || user?.role === "admin";
+  const isPM = user?.role === "pm" || user?.role === "gm" || user?.role === "director" || user?.role === "admin";
   const canSubmit = mrf && (mrf.status === "draft" || mrf.status === "returned") && (user?.user_id === mrf.created_by || user?.role === "admin");
   const canReview = mrf && mrf.status === "pm_review" && isPM;
   const canSendPurchase = mrf && mrf.status === "approved" && isPM;

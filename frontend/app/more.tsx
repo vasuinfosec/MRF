@@ -12,10 +12,10 @@ import { theme } from "@/src/theme";
 import ProjectTeamModal from "@/src/components/ProjectTeamModal";
 
 const ROLES = [
-  { key: "site_engineer", label: "Site Engineer" },
-  { key: "project_manager", label: "Project Manager" },
+  { key: "director", label: "Director" },
+  { key: "pm", label: "Project Manager" },
+  { key: "gm", label: "General Manager" },
   { key: "purchase", label: "Purchase" },
-  { key: "billing", label: "Billing" },
   { key: "admin", label: "Admin" },
 ];
 

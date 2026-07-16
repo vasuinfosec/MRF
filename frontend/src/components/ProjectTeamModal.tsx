@@ -39,8 +39,8 @@ export default function ProjectTeamModal({ projectId, onClose, onChanged }: Prop
 
   useEffect(() => { load(); }, [load]);
 
-  const engineers = users.filter((u) => u.role === "site_engineer" || u.role === "admin");
-  const pms = users.filter((u) => u.role === "project_manager" || u.role === "admin");
+  const engineers = users.filter((u) => u.role === "pm" || u.role === "director" || u.role === "admin");
+  const pms = users.filter((u) => u.role === "pm" || u.role === "gm" || u.role === "director" || u.role === "admin");
 
   const toggle = (list: string[], setList: (v: string[]) => void, uid: string) => {
     setList(list.includes(uid) ? list.filter((x) => x !== uid) : [...list, uid]);

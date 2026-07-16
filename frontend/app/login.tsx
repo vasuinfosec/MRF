@@ -11,11 +11,11 @@ import { Btn, Card, H1, Muted, Label, Input, Body } from "@/src/components/ui";
 import { api } from "@/src/api";
 
 const DEMO = [
-  { email: "site@vasu.dev", role: "site_engineer", label: "Site Engineer" },
-  { email: "pm@vasu.dev", role: "project_manager", label: "Project Manager" },
+  { email: "pm@vasu.dev", role: "pm", label: "Project Manager" },
+  { email: "gm@vasu.dev", role: "gm", label: "General Manager" },
   { email: "purchase@vasu.dev", role: "purchase", label: "Purchase Dept." },
-  { email: "billing@vasu.dev", role: "billing", label: "Billing Engineer" },
-  { email: "admin@vasu.dev", role: "admin", label: "Director / Admin" },
+  { email: "director@vasu.dev", role: "director", label: "Director" },
+  { email: "admin@vasu.dev", role: "admin", label: "Admin (Masters)" },
 ];
 
 export default function Login() {
@@ -62,7 +62,7 @@ export default function Login() {
 
   const customLogin = async () => {
     if (!customEmail.trim()) return;
-    await seedAndLogin(customEmail.trim(), "site_engineer", "Site Engineer");
+    await seedAndLogin(customEmail.trim(), "pm", "Project Manager");
   };
 
   return (
@@ -128,11 +128,11 @@ export default function Login() {
         <Card style={{ marginTop: 16, backgroundColor: theme.colors.surface }} testID="roles-info">
           <Label>ROLES IN THIS APP</Label>
           <Body style={{ marginTop: 6 }}>
-            • Site Engineer — creates MRFs{"\n"}
-            • Project Manager — approves MRFs{"\n"}
-            • Purchase — converts MRFs to POs{"\n"}
-            • Billing Engineer — manages billing{"\n"}
-            • Director / Admin — full control
+            • PM — creates & authorises MRFs{"\n"}
+            • GM — approves Material Library changes{"\n"}
+            • Purchase — processes POs from authorised MRFs{"\n"}
+            • Director — full override & authority{"\n"}
+            • Admin — master data & user management
           </Body>
         </Card>
       </ScrollView>

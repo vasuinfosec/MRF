@@ -34,7 +34,7 @@ export default function MRFList() {
 
   const projName = (id: string) => projects.find((p) => p.project_id === id)?.code || "—";
 
-  const canCreate = user?.role === "site_engineer" || user?.role === "admin";
+  const canCreate = user?.role === "pm" || user?.role === "director" || user?.role === "admin";
 
   const exportExcel = async () => {
     const t = await getToken();

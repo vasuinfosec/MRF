@@ -166,7 +166,7 @@ export default function PODetail() {
 
   if (!po) return busy ? <Loader /> : null;
 
-  const canReceive = (po.status === "issued" || po.status === "partially_received") && (user?.role === "purchase" || user?.role === "billing" || user?.role === "admin");
+  const canReceive = (po.status === "issued" || po.status === "partially_received") && (user?.role === "purchase" || user?.role === "director" || user?.role === "admin");
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
@@ -271,7 +271,7 @@ export default function PODetail() {
         <View style={{ marginTop: 16, gap: 8 }}>
           <Btn testID="pdf-download-btn" title="Download PDF" variant="primary" onPress={downloadPDF} />
           {canReceive ? <Btn testID="mark-received-btn" title="Receive Items" variant="action" onPress={markReceived} /> : null}
-          {(user?.role === "purchase" || user?.role === "billing" || user?.role === "admin") ? (
+          {(user?.role === "purchase" || user?.role === "director" || user?.role === "admin") ? (
             <Btn testID="record-invoice-btn" title="Record Vendor Invoice" variant="outline" onPress={openInvoice} />
           ) : null}
         </View>

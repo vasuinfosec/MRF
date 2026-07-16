@@ -9,11 +9,11 @@ import { useAuth } from "@/src/auth";
 
 type Tab = { key: string; label: string; icon: keyof typeof Ionicons.glyphMap; path: string; roles: string[] };
 const TABS: Tab[] = [
-  { key: "home", label: "Home", icon: "grid-outline", path: "/home", roles: ["site_engineer","project_manager","purchase","billing","admin"] },
-  { key: "mrf", label: "MRF", icon: "document-text-outline", path: "/mrf", roles: ["site_engineer","project_manager","purchase","billing","admin"] },
-  { key: "po", label: "PO", icon: "cart-outline", path: "/po", roles: ["purchase","admin","project_manager","billing"] },
-  { key: "billing", label: "Billing", icon: "cash-outline", path: "/billing", roles: ["billing","admin","project_manager"] },
-  { key: "more", label: "More", icon: "menu-outline", path: "/more", roles: ["site_engineer","project_manager","purchase","billing","admin"] },
+  { key: "home", label: "Home", icon: "grid-outline", path: "/home", roles: ["director","pm","gm","purchase","admin"] },
+  { key: "mrf", label: "MRF", icon: "document-text-outline", path: "/mrf", roles: ["director","pm","gm","purchase","admin"] },
+  { key: "po", label: "PO", icon: "cart-outline", path: "/po", roles: ["director","pm","gm","purchase","admin"] },
+  { key: "billing", label: "Billing", icon: "cash-outline", path: "/billing", roles: ["director","purchase","admin","gm"] },
+  { key: "more", label: "More", icon: "menu-outline", path: "/more", roles: ["director","pm","gm","purchase","admin"] },
 ];
 
 export function AppShell({ children, title, right, testID }: { children: React.ReactNode; title: string; right?: React.ReactNode; testID?: string }) {
@@ -71,11 +71,15 @@ export function AppShell({ children, title, right, testID }: { children: React.R
 
 export function roleLabel(role: string) {
   return ({
-    site_engineer: "Site Engineer",
-    project_manager: "Project Manager",
+    director: "Director",
+    pm: "Project Manager",
+    gm: "General Manager",
     purchase: "Purchase",
-    billing: "Billing",
     admin: "Admin",
+    // legacy fallbacks
+    site_engineer: "Project Manager",
+    project_manager: "Project Manager",
+    billing: "Purchase",
   } as Record<string, string>)[role] || role;
 }
 
