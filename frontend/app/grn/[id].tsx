@@ -8,6 +8,8 @@ import { api } from "@/src/api";
 import { Card, H2, Muted, Loader, Label } from "@/src/components/ui";
 import ExportMenu from "@/src/components/ExportMenu";
 import AuditTrail from "@/src/components/AuditTrail";
+import ApprovalPanel from "@/src/components/ApprovalPanel";
+import { useAuth } from "@/src/auth";
 import { theme } from "@/src/theme";
 
 interface GRN {
@@ -17,11 +19,13 @@ interface GRN {
   mrf_refs: string[]; items: any[];
   received_by_name: string; remarks?: string; status?: string;
   vehicle_no?: string; driver_name?: string; vendor_dc_ref?: string;
+  approval_history?: any[];
 }
 
 export default function GRNDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const { user } = useAuth();
   const [grn, setGRN] = useState<GRN | null>(null);
   const [loading, setLoading] = useState(true);
   const [exportOpen, setExportOpen] = useState(false);
@@ -29,8 +33,14 @@ export default function GRNDetail() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const rows = await api<GRN[]>("/grns");
-      const one = (rows || []).find((r) => r.grn_id === id) || null;
+      // Prefer dedicated single-GRN endpoint for speed; fallback to list scan.
+      let one: GRN | null = null;
+      try {
+        one = await api<GRN>(`/grn/${id}`);
+      } catch {
+        const rows = await api<GRN[]>("/grns");
+        one = (rows || []).find((r) => r.grn_id === id) || null;
+      }
       setGRN(one);
     } catch {
       setGRN(null);
@@ -96,6 +106,16 @@ export default function GRNDetail() {
             <Card><Text>{grn.remarks}</Text></Card>
           </>
         ) : null}
+
+        <ApprovalPanel
+          entity="grn"
+          id={String(id || "")}
+          currentStatus={grn.status || "pending_approval"}
+          canAct={["admin", "director"].includes(user?.role || "")}
+          onDone={load}
+          history={grn.approval_history}
+          approverLabel="Accounts / Director"
+        />
 
         <View style={{ marginTop: 20 }}>
           <AuditTrail entityId={String(id || "")} title="Audit Trail" limit={100} />

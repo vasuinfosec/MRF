@@ -91,6 +91,7 @@ export default function Home() {
           <Btn testID="quick-grn" title="Goods Received Notes" variant="outline" onPress={() => router.push("/grn")} />
           <Btn testID="quick-dc" title="Delivery Challans" variant="outline" onPress={() => router.push("/dc")} />
           <Btn testID="quick-cs" title="Comparative Statements" variant="outline" onPress={() => router.push("/comparative-statement")} />
+          <Btn testID="quick-assistant" title="🤖 AI Co-pilot" variant="action" onPress={() => router.push("/assistant")} />
         </View>
       </Card>
 

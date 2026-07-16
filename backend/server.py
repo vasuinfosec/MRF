@@ -9,7 +9,7 @@ import uuid
 import logging
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional, Literal, Dict, Any
+from typing import List, Optional, Literal, Dict, Any, Tuple
 
 import httpx
 from fastapi import FastAPI, APIRouter, HTTPException, Header, Request, Response, UploadFile, File, Body
@@ -57,7 +57,12 @@ def _canon_role(r: str) -> str:
 MRF_APPROVERS = {"pm", "gm", "director", "admin"}
 MRF_EDITORS = {"site_engineer", "pm", "gm", "purchase", "director", "admin"}
 MRF_CREATORS = {"site_engineer", "pm", "director", "admin"}
-GRN_ROLES = {"site_engineer", "store", "purchase", "pm", "director", "admin"}
+GRN_ROLES = {"purchase", "admin"}  # Only Purchase creates GRN; Admin (Accounts) can also.
+GRN_APPROVER_ROLES = {"admin", "director"}  # Accounts / Director approve GRN
+DC_ROLES = {"purchase", "admin"}
+DC_APPROVER_ROLES = {"admin", "director"}
+CS_ROLES_UPLOAD_DEFERRED_ROLES = {"purchase", "admin"}
+CS_APPROVER_ROLES = {"pm", "gm", "director"}
 
 # --- Purchase approval thresholds (INR). Editable via /api/settings/thresholds ---
 DEFAULT_THRESHOLD_GM = 50000.0        # PO value above this needs GM approval
@@ -365,7 +370,8 @@ class DC(DCCreate):
     dc_id: str = Field(default_factory=lambda: gid("dc"))
     dc_number: str
     date: datetime = Field(default_factory=now_utc)
-    status: str = "issued"  # issued | in_transit | delivered | cancelled
+    status: str = "pending_approval"  # pending_approval | approved | rejected | cancelled | in_transit | delivered
+    approval_history: List[Dict[str, Any]] = []
     customer_name: Optional[str] = ""
     vendor_name: Optional[str] = ""
     created_by: str
@@ -409,7 +415,8 @@ class ComparativeStatement(ComparativeStatementCreate):
     uploaded_by_name: Optional[str] = ""
     uploaded_at: datetime = Field(default_factory=now_utc)
     file_size: int = 0
-    status: str = "active"  # active | superseded | cancelled
+    status: str = "pending_approval"  # pending_approval | approved | rejected | superseded | cancelled
+    approval_history: List[Dict[str, Any]] = []
     deleted: bool = False
 
 # ---------------------- Auth ----------------------
@@ -2301,12 +2308,23 @@ async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] 
             "mrf_refs": po.get("mrf_refs", []),
             "vendor_id": po.get("vendor_id"),
             "project_id": po.get("project_id"),
+            "customer_id": po.get("customer_id"),
             "date": now_utc(),
             "items": grn_items,
             "received_by": u.user_id,
             "received_by_name": u.name,
             "remarks": (body or {}).get("remarks", ""),
+            "status": "pending_approval",  # awaits admin/accounts approval
+            "approval_history": [],
         })
+        await audit("grn", grn_id, "create", u,
+                    {"grn_number": grn_number,
+                     "old_value": None,
+                     "new_value": {"status": "pending_approval",
+                                   "po_number": po["po_number"],
+                                   "item_count": len(grn_items)},
+                     "record_number": grn_number,
+                     "reason": (body or {}).get("remarks", "")})
 
     await audit("po", po_id, "received", u,
                 {"old_value": {"status": po.get("status")},
@@ -3704,6 +3722,54 @@ async def list_all_grns(authorization: Optional[str] = Header(None)):
         raise HTTPException(403, "Only purchase/pm/gm/director/admin")
     return await db.grns.find({}, {"_id": 0}).sort("date", -1).to_list(500)
 
+@api.post("/grn/{grn_id}/approve")
+async def approve_grn(grn_id: str, body: Dict[str, Any] = Body(default={}),
+                      authorization: Optional[str] = Header(None)):
+    """Admin/Accounts (or Director) approves or rejects a GRN."""
+    u = await get_current_user(authorization)
+    if u.role not in GRN_APPROVER_ROLES:
+        raise HTTPException(403, "Only admin/accounts or director can approve GRN")
+    grn = await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
+    if not grn: raise HTTPException(404, "GRN not found")
+    action = (body.get("action") or "approve").lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(400, "action must be 'approve' or 'reject'")
+    current = grn.get("status") or "pending_approval"
+    if current not in ("pending_approval", "rejected"):
+        raise HTTPException(400, f"Cannot {action}: GRN is '{current}'")
+    new_status = "approved" if action == "approve" else "rejected"
+    hist = {
+        "user_id": u.user_id, "user_name": u.name, "user_role": u.role,
+        "action": action, "comment": body.get("comment") or "",
+        "timestamp": now_utc().isoformat(),
+    }
+    await db.grns.update_one(
+        {"grn_id": grn_id},
+        {"$set": {"status": new_status},
+         "$push": {"approval_history": hist}},
+    )
+    await audit("grn", grn_id, f"grn_{action}", u,
+                {"grn_number": grn.get("grn_number"),
+                 "record_number": grn.get("grn_number"),
+                 "old_value": {"status": current},
+                 "new_value": {"status": new_status},
+                 "reason": body.get("comment") or ""})
+    return await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
+
+
+@api.get("/grn/{grn_id}")
+async def get_grn(grn_id: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    grn = await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
+    if not grn: raise HTTPException(404, "GRN not found")
+    po = await db.pos.find_one({"po_id": grn.get("po_id")}, {"_id": 0})
+    if po:
+        await _check_po_access(u, po)
+    elif u.role not in ("purchase", "director", "admin", "store", "gm"):
+        raise HTTPException(403, "Not allowed")
+    return grn
+
+
 @api.get("/grn/{grn_id}/pdf")
 async def grn_pdf(grn_id: str, token: Optional[str] = None,
                   force: Optional[int] = 0,
@@ -4087,7 +4153,9 @@ def _validate_dc_for_export(dc: dict, project: Optional[dict], fmt: str) -> tupl
     return missing, warnings
 
 
-DC_ROLES = {"purchase", "store", "pm", "director", "admin", "gm"}
+DC_ROLES_LEGACY_ORDER = {"purchase", "admin"}  # kept for reference
+
+# Reset the primary DC_ROLES set (was rebuilt above; keeping single source of truth).
 
 
 async def _check_dc_access(u: UserOut, dc: dict):
@@ -4194,6 +4262,9 @@ async def update_dc(dc_id: str, body: Dict[str, Any] = Body(...),
     await _check_dc_access(u, dc)
     if u.role not in DC_ROLES:
         raise HTTPException(403, "Not allowed")
+    # Lock edits once approved (except Admin/Director can override via cancel)
+    if dc.get("status") == "approved" and u.role not in ("admin", "director"):
+        raise HTTPException(400, "DC is approved and locked; only admin/director can override")
     ALLOWED = {
         "status", "dispatch_date", "vehicle_no", "driver_name", "driver_contact",
         "transporter", "e_way_bill_no", "e_way_bill_date", "remarks",
@@ -4202,6 +4273,10 @@ async def update_dc(dc_id: str, body: Dict[str, Any] = Body(...),
     updates = {k: v for k, v in body.items() if k in ALLOWED and k != "reason"}
     if not updates:
         raise HTTPException(400, "Nothing to update")
+    # Prevent direct status manipulation via PUT; force use of /approve or /cancel
+    if "status" in updates and updates["status"] in ("approved", "rejected", "cancelled"):
+        if u.role not in ("admin", "director"):
+            raise HTTPException(403, "Use /approve or /cancel to change protected status")
     old_snap = {k: dc.get(k) for k in updates.keys()}
     updates["updated_at"] = now_utc()
     await db.dcs.update_one({"dc_id": dc_id}, {"$set": updates})
@@ -4209,6 +4284,40 @@ async def update_dc(dc_id: str, body: Dict[str, Any] = Body(...),
                 {"dc_number": dc.get("dc_number"),
                  "old_value": old_snap, "new_value": {k: v for k, v in updates.items() if k != "updated_at"},
                  "reason": body.get("reason") or ""})
+    return await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+
+
+@api.post("/dc/{dc_id}/approve")
+async def approve_dc(dc_id: str, body: Dict[str, Any] = Body(default={}),
+                     authorization: Optional[str] = Header(None)):
+    """Admin/Accounts (or Director) approves or rejects a Delivery Challan."""
+    u = await get_current_user(authorization)
+    if u.role not in DC_APPROVER_ROLES:
+        raise HTTPException(403, "Only admin/accounts or director can approve DC")
+    dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+    if not dc: raise HTTPException(404, "DC not found")
+    action = (body.get("action") or "approve").lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(400, "action must be 'approve' or 'reject'")
+    if dc.get("status") not in ("pending_approval", "rejected", "issued"):
+        raise HTTPException(400, f"Cannot {action}: DC is '{dc.get('status')}'")
+    new_status = "approved" if action == "approve" else "rejected"
+    hist = {
+        "user_id": u.user_id, "user_name": u.name, "user_role": u.role,
+        "action": action, "comment": body.get("comment") or "",
+        "timestamp": now_utc().isoformat(),
+    }
+    await db.dcs.update_one(
+        {"dc_id": dc_id},
+        {"$set": {"status": new_status, "updated_at": now_utc()},
+         "$push": {"approval_history": hist}},
+    )
+    await audit("dc", dc_id, f"dc_{action}", u,
+                {"dc_number": dc.get("dc_number"),
+                 "record_number": dc.get("dc_number"),
+                 "old_value": {"status": dc.get("status")},
+                 "new_value": {"status": new_status},
+                 "reason": body.get("comment") or ""})
     return await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
 
 
@@ -4297,7 +4406,7 @@ async def export_dc(token: Optional[str] = None,
 
 
 # ---------------------- Comparative Statement (import-only) ----------------------
-CS_ROLES_UPLOAD = {"purchase", "pm", "gm", "director", "admin"}
+CS_ROLES_UPLOAD = {"purchase", "admin"}  # only Purchase (and Admin/Accounts) can upload/edit CS
 CS_ROLES_VIEW = {"purchase", "pm", "gm", "director", "admin", "site_engineer"}
 
 
@@ -4438,8 +4547,11 @@ async def update_cs(cs_id: str, body: Dict[str, Any] = Body(...),
         raise HTTPException(403, "Not allowed")
     cs = await db.comparative_statements.find_one({"cs_id": cs_id}, {"_id": 0, "file_base64": 0})
     if not cs: raise HTTPException(404, "CS not found")
+    # Lock edits after approval — Admin/Director can still override
+    if cs.get("status") == "approved" and u.role not in ("admin", "director"):
+        raise HTTPException(400, "CS is approved and locked")
     ALLOWED = {"title", "remarks", "vendors", "l1_vendor", "l1_amount",
-               "selected_vendor", "selection_reason", "status"}
+               "selected_vendor", "selection_reason"}  # Note: `status` no longer editable directly
     updates = {k: v for k, v in body.items() if k in ALLOWED}
     if not updates:
         raise HTTPException(400, "Nothing to update")
@@ -4450,6 +4562,42 @@ async def update_cs(cs_id: str, body: Dict[str, Any] = Body(...),
                  "old_value": old_snap,
                  "new_value": updates,
                  "reason": body.get("reason") or ""})
+    return await db.comparative_statements.find_one({"cs_id": cs_id},
+                                                     {"_id": 0, "file_base64": 0})
+
+
+@api.post("/comparative-statement/{cs_id}/approve")
+async def approve_cs(cs_id: str, body: Dict[str, Any] = Body(default={}),
+                     authorization: Optional[str] = Header(None)):
+    """PM/GM/Director approves or rejects a Comparative Statement."""
+    u = await get_current_user(authorization)
+    if u.role not in CS_APPROVER_ROLES:
+        raise HTTPException(403, "Only pm/gm/director can approve Comparative Statement")
+    cs = await db.comparative_statements.find_one({"cs_id": cs_id}, {"_id": 0, "file_base64": 0})
+    if not cs: raise HTTPException(404, "CS not found")
+    action = (body.get("action") or "approve").lower()
+    if action not in ("approve", "reject"):
+        raise HTTPException(400, "action must be 'approve' or 'reject'")
+    current = cs.get("status") or "pending_approval"
+    if current not in ("pending_approval", "rejected", "active"):
+        raise HTTPException(400, f"Cannot {action}: CS is '{current}'")
+    new_status = "approved" if action == "approve" else "rejected"
+    hist = {
+        "user_id": u.user_id, "user_name": u.name, "user_role": u.role,
+        "action": action, "comment": body.get("comment") or "",
+        "timestamp": now_utc().isoformat(),
+    }
+    await db.comparative_statements.update_one(
+        {"cs_id": cs_id},
+        {"$set": {"status": new_status},
+         "$push": {"approval_history": hist}},
+    )
+    await audit("comparative_statement", cs_id, f"cs_{action}", u,
+                {"cs_number": cs.get("cs_number"),
+                 "record_number": cs.get("cs_number"),
+                 "old_value": {"status": current},
+                 "new_value": {"status": new_status},
+                 "reason": body.get("comment") or ""})
     return await db.comparative_statements.find_one({"cs_id": cs_id},
                                                      {"_id": 0, "file_base64": 0})
 
@@ -4472,7 +4620,448 @@ async def delete_cs(cs_id: str, reason: Optional[str] = None,
     return {"ok": True}
 
 
-# ---------------------- Excel Bulk Import ----------------------
+# ---------------------- LLM Co-pilot (Suggestions Only) ----------------------
+# Two-tier model routing:
+#   Cheap tier   → Claude Haiku 4.5  (item standardisation, doc classification, drafting)
+#   Premium tier → Claude Sonnet 4.5 (quotation comparison, PO-GRN-Invoice reconciliation)
+#
+# CRITICAL SAFETY CONTRACT
+# ------------------------
+# The LLM produces suggestions ONLY. Every suggestion is stored in
+# `llm_suggestions` with status='pending_review'. The LLM code path MUST NOT
+# mutate any workflow collection (mrf, po, grn, dc, invoices, materials, variants,
+# customers, vendors, projects, thresholds, comparative_statements). All writes
+# to those collections happen via existing human-authorised endpoints only.
+# A human accept/reject POST to /api/llm/suggestions/{id}/decide is required
+# before any write; the write itself uses the pre-existing role-gated endpoints
+# (this file does NOT introduce a "commit suggestion" write path that bypasses
+# RBAC).
+
+from emergentintegrations.llm.chat import LlmChat, UserMessage
+import hashlib as _hashlib
+import json as _json
+
+EMERGENT_LLM_KEY = os.getenv("EMERGENT_LLM_KEY", "")
+
+# Tier → model name
+_LLM_MODELS = {
+    "cheap": ("anthropic", "claude-haiku-4-5-20251001"),
+    "premium": ("anthropic", "claude-sonnet-4-5-20250929"),
+}
+
+# Roles allowed to invoke each LLM feature.
+LLM_ROLES_STD = {"purchase", "admin", "pm", "gm", "director"}
+LLM_ROLES_COMPARE = {"purchase", "admin", "pm", "gm", "director"}
+LLM_ROLES_RECONCILE = {"purchase", "admin", "gm", "director"}
+LLM_ROLES_DECIDE = {"purchase", "admin", "pm", "gm", "director"}
+
+
+def _payload_hash(payload: Any) -> str:
+    return _hashlib.sha256(_json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _extract_json(txt: str) -> Any:
+    """LLMs sometimes wrap JSON in ```json blocks — this pulls it out."""
+    if not txt:
+        return None
+    t = txt.strip()
+    if t.startswith("```"):
+        t = t.strip("`").strip()
+        if t.startswith("json\n"):
+            t = t[5:]
+        # locate first { or [
+        for i, c in enumerate(t):
+            if c in "{[":
+                t = t[i:]
+                break
+    # try full then progressively trim trailing
+    try:
+        return _json.loads(t)
+    except Exception:
+        # find last balanced brace
+        last = max(t.rfind("}"), t.rfind("]"))
+        if last > 0:
+            try:
+                return _json.loads(t[:last + 1])
+            except Exception:
+                pass
+    return None
+
+
+async def _call_llm(tier: str, system: str, user_text: str,
+                    user: UserOut, kind: str,
+                    entity: str, entity_id: str,
+                    input_payload: dict) -> Tuple[str, dict]:
+    """Call the LLM with the given prompt and audit-log the invocation.
+
+    Returns: (raw_text, audit_extras).
+    Raises HTTPException(500) if the key is missing.
+    """
+    if not EMERGENT_LLM_KEY:
+        raise HTTPException(500, "EMERGENT_LLM_KEY not configured on server")
+    provider, model = _LLM_MODELS.get(tier, _LLM_MODELS["cheap"])
+    # Simple content-hash-based cache to avoid burning credits on identical prompts
+    h = _payload_hash({"tier": tier, "sys": system, "user": user_text})
+    cached = await db.llm_cache.find_one({"_id": h}, {"_id": 0, "response": 1})
+    if cached and cached.get("response"):
+        return cached["response"], {"cached": True, "tier": tier, "model": model, "hash": h}
+
+    session_id = f"vasu_{kind}_{gid('sess')[:16]}"
+    chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id,
+                   system_message=system).with_model(provider, model)
+    try:
+        resp = await chat.send_message(UserMessage(text=user_text))
+    except Exception as e:
+        # Fail closed — do not fabricate suggestions
+        raise HTTPException(502, f"LLM call failed: {e}")
+    text = str(resp or "")
+    await db.llm_cache.update_one(
+        {"_id": h},
+        {"$set": {"response": text, "created_at": now_utc(),
+                  "tier": tier, "model": model, "kind": kind}},
+        upsert=True,
+    )
+    extras = {
+        "tier": tier, "model": model, "kind": kind, "hash": h,
+        "chars_in": len(user_text) + len(system),
+        "chars_out": len(text),
+    }
+    await audit("llm", entity_id or "n/a", f"llm_call_{kind}", user,
+                {"tier": tier, "model": model, "entity": entity,
+                 "record_number": input_payload.get("record_number", ""),
+                 "chars_in": extras["chars_in"], "chars_out": extras["chars_out"]})
+    return text, extras
+
+
+async def _save_suggestion(kind: str, entity: str, entity_id: str,
+                           user: UserOut, input_payload: dict,
+                           parsed: Any, raw: str, tier: str, model: str,
+                           extras: dict) -> dict:
+    sid = gid("sug")
+    doc = {
+        "suggestion_id": sid,
+        "kind": kind,
+        "entity": entity,
+        "entity_id": entity_id or "",
+        "status": "pending_review",
+        "tier": tier,
+        "model": model,
+        "created_by": user.user_id,
+        "created_by_name": user.name,
+        "created_by_role": user.role,
+        "created_at": now_utc(),
+        "input_hash": extras.get("hash"),
+        "input_summary": {k: v for k, v in input_payload.items() if k != "long_text"},
+        "output_raw": raw,
+        "output_parsed": parsed,
+        "decision": None,
+        "decided_by": None,
+        "decided_at": None,
+        "decision_reason": "",
+    }
+    await db.llm_suggestions.insert_one(dict(doc))
+    doc.pop("_id", None)
+    return _strip_oids(doc)
+
+
+# ---- 1) Item Standardisation (Haiku / cheap) --------------------------------
+
+class ItemStandardiseIn(BaseModel):
+    description: str
+    make: Optional[str] = ""
+    model: Optional[str] = ""
+    unit: Optional[str] = ""
+    context: Optional[str] = ""  # e.g. "MRF Fire Safety Camera"
+
+
+@api.post("/llm/item-standardise")
+async def llm_item_standardise(body: ItemStandardiseIn,
+                                authorization: Optional[str] = Header(None)):
+    """Suggest MAT-/VAR- UIDs and closest Material-Master matches for a
+    free-text line item. Returns top-3 candidates with a confidence score.
+    NOTE: LLM DOES NOT create, edit or approve the master data — the caller
+    (Purchase/PM) explicitly accepts a suggestion via /api/llm/suggestions/{id}/decide.
+    """
+    u = await get_current_user(authorization)
+    if u.role not in LLM_ROLES_STD:
+        raise HTTPException(403, "Not allowed")
+    if not (body.description or "").strip():
+        raise HTTPException(400, "description is required")
+    # Fetch approved masters (limit to keep prompt small)
+    approved = await db.materials.find(
+        {"status": "approved"},
+        {"_id": 0, "material_uid": 1, "description": 1, "category": 1,
+         "unit": 1, "hsn_code": 1}
+    ).limit(200).to_list(200)
+    variants = await db.variants.find(
+        {},
+        {"_id": 0, "variant_uid": 1, "material_uid": 1, "make": 1, "model": 1}
+    ).limit(600).to_list(600)
+    system = (
+        "You are a procurement item-standardisation assistant for Vasu Infosec. "
+        "You are given a free-text material description plus a catalogue of approved "
+        "materials (MAT-####) and variants (VAR-####). "
+        "Return top 3 best matches with confidence 0..1. "
+        "You DO NOT approve, create, or modify masters. Output STRICT JSON only, "
+        "no prose."
+    )
+    prompt = _json.dumps({
+        "input": body.model_dump(),
+        "catalogue_materials": approved[:200],
+        "catalogue_variants": variants[:600],
+        "instructions": (
+            "Return JSON: {suggestions: [{material_uid, variant_uid (nullable), "
+            "matched_description, category, hsn_code, confidence, reasoning}]} — "
+            "sorted by confidence desc, at most 3 items. If no plausible match, "
+            "return {suggestions: [], notes: 'no match'}. "
+            "Never invent material_uid values not present in the catalogue."
+        ),
+    })
+    raw, extras = await _call_llm("cheap", system, prompt, u,
+                                   kind="item_standardise",
+                                   entity="material", entity_id="",
+                                   input_payload={"description": body.description})
+    parsed = _extract_json(raw) or {"suggestions": [], "notes": "unparseable"}
+    # Defensive: strip any suggestion that references an unknown MAT-#### UID
+    known_muid = {m["material_uid"] for m in approved}
+    parsed_suggestions = []
+    for s in (parsed.get("suggestions") or []):
+        if not isinstance(s, dict): continue
+        muid = s.get("material_uid")
+        if muid and muid not in known_muid:
+            continue  # LLM hallucinated a UID — drop it
+        parsed_suggestions.append(s)
+    parsed["suggestions"] = parsed_suggestions[:3]
+    doc = await _save_suggestion(
+        "item_standardise", "material", "", u,
+        input_payload=body.model_dump(), parsed=parsed, raw=raw,
+        tier="cheap", model=extras["model"], extras=extras,
+    )
+    return doc
+
+
+# ---- 2) Quotation Comparison (Sonnet / premium) -----------------------------
+
+class QuotationCompareIn(BaseModel):
+    mrf_id: Optional[str] = ""
+    po_id: Optional[str] = ""
+    context: Optional[str] = ""
+    quotes: List[Dict[str, Any]]  # [{vendor_name, currency, items:[{description,qty,unit,rate,gst}]}]
+
+
+@api.post("/llm/quotation-compare")
+async def llm_quotation_compare(body: QuotationCompareIn,
+                                 authorization: Optional[str] = Header(None)):
+    """Produce an L1/L2/L3 side-by-side comparison with delta % and
+    recommendations. Suggestions only — Purchase / PM must accept/reject."""
+    u = await get_current_user(authorization)
+    if u.role not in LLM_ROLES_COMPARE:
+        raise HTTPException(403, "Not allowed")
+    if not body.quotes or len(body.quotes) < 2:
+        raise HTTPException(400, "At least 2 vendor quotes required")
+    if len(body.quotes) > 6:
+        raise HTTPException(400, "Max 6 vendor quotes per comparison")
+
+    system = (
+        "You are a senior procurement analyst for Vasu Infosec. Compare vendor "
+        "quotations line-by-line and produce a decision-ready side-by-side. "
+        "Rank vendors L1 (lowest total) → Ln, compute per-item delta% vs L1, and "
+        "flag anomalies (rate outliers, missing items, unit mismatches, "
+        "unusually low bids). You DO NOT issue POs or authorise vendors. "
+        "Output STRICT JSON only."
+    )
+    prompt = _json.dumps({
+        "quotes": body.quotes,
+        "context": body.context or "",
+        "instructions": (
+            "Return JSON: {ranking:[{rank,vendor_name,total_taxable,total_with_tax,"
+            "delta_pct_vs_L1}], line_comparison:[{description,l1_vendor,l1_rate,"
+            "vendors:[{vendor_name,rate,delta_pct}], notes}], anomalies:[{severity,"
+            "vendor_name,description,reason}], summary, recommendation}."
+        ),
+    })
+    raw, extras = await _call_llm("premium", system, prompt, u,
+                                   kind="quotation_compare",
+                                   entity=("po" if body.po_id else "mrf"),
+                                   entity_id=(body.po_id or body.mrf_id or ""),
+                                   input_payload={"quote_count": len(body.quotes),
+                                                  "record_number": body.po_id or body.mrf_id})
+    parsed = _extract_json(raw) or {"error": "unparseable", "raw_excerpt": raw[:600]}
+    doc = await _save_suggestion(
+        "quotation_compare",
+        entity=("po" if body.po_id else "mrf"),
+        entity_id=body.po_id or body.mrf_id or "",
+        user=u,
+        input_payload=body.model_dump(),
+        parsed=parsed, raw=raw,
+        tier="premium", model=extras["model"], extras=extras,
+    )
+    return doc
+
+
+# ---- 3) PO-GRN-Invoice Mismatch Detection (Sonnet / premium) ----------------
+
+class ReconcileIn(BaseModel):
+    po_id: str
+
+
+@api.post("/llm/reconcile")
+async def llm_reconcile(body: ReconcileIn,
+                        authorization: Optional[str] = Header(None)):
+    """3-way reconciliation of a PO's line items against its GRNs and vendor
+    invoices. Flags qty / rate / total mismatches. Read-only — no PO / GRN /
+    invoice mutation. Purchase / GM / Director must accept exceptions."""
+    u = await get_current_user(authorization)
+    if u.role not in LLM_ROLES_RECONCILE:
+        raise HTTPException(403, "Not allowed")
+    po = await db.pos.find_one({"po_id": body.po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO not found")
+    await _check_po_access(u, po)
+    grns = await db.grns.find({"po_id": body.po_id}, {"_id": 0}).to_list(100)
+    invs = await db.invoices.find({"po_id": body.po_id}, {"_id": 0}).to_list(100)
+    # Minimise payload so we don't burn premium tokens
+    po_slim = {
+        "po_number": po.get("po_number"),
+        "vendor_name": (po.get("vendor_name") or ""),
+        "items": [
+            {"line": i + 1, "description": it.get("description"),
+             "qty": it.get("qty"), "unit": it.get("unit"),
+             "rate": it.get("rate"), "gst": it.get("gst"),
+             "hsn_code": it.get("hsn_code"),
+             "qty_received": it.get("qty_received"),
+             "material_uid": it.get("material_uid"),
+             "variant_uid": it.get("variant_uid")}
+            for i, it in enumerate(po.get("items") or [])
+        ],
+    }
+    grn_slim = [{
+        "grn_number": g.get("grn_number"), "date": str(g.get("date"))[:10],
+        "status": g.get("status"),
+        "items": [{"description": it.get("description"), "qty": it.get("qty"),
+                   "unit": it.get("unit")} for it in (g.get("items") or [])],
+    } for g in grns]
+    inv_slim = [{
+        "invoice_number": i.get("invoice_number"),
+        "vendor_invoice_number": i.get("vendor_invoice_number"),
+        "invoice_date": str(i.get("invoice_date"))[:10],
+        "total": i.get("total"),
+        "items": [{"description": it.get("description"), "qty": it.get("qty"),
+                   "rate": it.get("rate"), "gst": it.get("gst")}
+                  for it in (i.get("items") or [])],
+    } for i in invs]
+
+    system = (
+        "You are a 3-way match auditor for Vasu Infosec accounts. Given a PO, "
+        "its GRNs and vendor invoices, produce a per-line reconciliation and "
+        "flag qty / rate / GST / total mismatches. Read-only. "
+        "You DO NOT approve invoices, release payment, or update stock. "
+        "Output STRICT JSON only."
+    )
+    prompt = _json.dumps({
+        "po": po_slim, "grns": grn_slim, "invoices": inv_slim,
+        "instructions": (
+            "Return JSON: {po_number, per_line:[{line, description, po_qty, "
+            "grn_qty, invoice_qty, po_rate, invoice_rate, qty_variance, "
+            "rate_variance_pct, status:'match'|'over_delivered'|'under_delivered'"
+            "|'rate_mismatch'|'gst_mismatch'|'not_invoiced'}], "
+            "aggregate:{po_total, grn_total_est, invoice_total, delta}, "
+            "exceptions:[{severity:'critical'|'warning'|'info', reason}], "
+            "summary}. Be conservative — flag rather than assume."
+        ),
+    })
+    raw, extras = await _call_llm("premium", system, prompt, u,
+                                   kind="reconcile",
+                                   entity="po", entity_id=body.po_id,
+                                   input_payload={"po_number": po.get("po_number"),
+                                                  "record_number": po.get("po_number"),
+                                                  "grn_count": len(grns),
+                                                  "invoice_count": len(invs)})
+    parsed = _extract_json(raw) or {"error": "unparseable", "raw_excerpt": raw[:600]}
+    doc = await _save_suggestion(
+        "reconcile", "po", body.po_id, u,
+        input_payload={"po_number": po.get("po_number"),
+                       "grn_count": len(grns), "invoice_count": len(invs)},
+        parsed=parsed, raw=raw,
+        tier="premium", model=extras["model"], extras=extras,
+    )
+    return doc
+
+
+# ---- Suggestions read / decide ---------------------------------------------
+
+@api.get("/llm/suggestions")
+async def list_suggestions(entity: Optional[str] = None,
+                            entity_id: Optional[str] = None,
+                            kind: Optional[str] = None,
+                            status: Optional[str] = None,
+                            limit: int = 100,
+                            authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in LLM_ROLES_DECIDE:
+        raise HTTPException(403, "Not allowed")
+    q: Dict[str, Any] = {}
+    if entity: q["entity"] = entity
+    if entity_id: q["entity_id"] = entity_id
+    if kind: q["kind"] = kind
+    if status: q["status"] = status
+    limit = max(1, min(int(limit or 100), 500))
+    rows = await db.llm_suggestions.find(q, {"_id": 0}).sort("created_at", -1).limit(limit).to_list(limit)
+    return [_strip_oids(r) for r in rows]
+
+
+@api.get("/llm/suggestions/{sug_id}")
+async def get_suggestion(sug_id: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in LLM_ROLES_DECIDE:
+        raise HTTPException(403, "Not allowed")
+    r = await db.llm_suggestions.find_one({"suggestion_id": sug_id}, {"_id": 0})
+    if not r: raise HTTPException(404, "Suggestion not found")
+    return _strip_oids(r)
+
+
+@api.post("/llm/suggestions/{sug_id}/decide")
+async def decide_suggestion(sug_id: str, body: Dict[str, Any] = Body(...),
+                             authorization: Optional[str] = Header(None)):
+    """Accept or reject an LLM suggestion.
+
+    Accepting DOES NOT auto-mutate any workflow collection — it simply records
+    the human decision in audit + suggestion row. The user must then act on
+    the workflow via existing role-gated endpoints (e.g. use MAT-#### suggestion
+    to fill in the MRF line via the existing MRF edit endpoint).
+    """
+    u = await get_current_user(authorization)
+    if u.role not in LLM_ROLES_DECIDE:
+        raise HTTPException(403, "Not allowed")
+    action = (body.get("action") or "").lower()
+    if action not in ("accept", "reject"):
+        raise HTTPException(400, "action must be 'accept' or 'reject'")
+    r = await db.llm_suggestions.find_one({"suggestion_id": sug_id}, {"_id": 0})
+    if not r: raise HTTPException(404, "Suggestion not found")
+    if r.get("status") != "pending_review":
+        raise HTTPException(400, f"Cannot {action}: suggestion is '{r.get('status')}'")
+    new_status = "accepted" if action == "accept" else "rejected"
+    await db.llm_suggestions.update_one(
+        {"suggestion_id": sug_id},
+        {"$set": {"status": new_status,
+                  "decision": action,
+                  "decided_by": u.user_id,
+                  "decided_by_name": u.name,
+                  "decided_at": now_utc(),
+                  "decision_reason": body.get("reason") or ""}},
+    )
+    await audit("llm_suggestion", sug_id, f"llm_{action}", u,
+                {"kind": r.get("kind"),
+                 "record_number": r.get("input_summary", {}).get("record_number", ""),
+                 "old_value": {"status": "pending_review"},
+                 "new_value": {"status": new_status},
+                 "reason": body.get("reason") or ""})
+    return await db.llm_suggestions.find_one({"suggestion_id": sug_id}, {"_id": 0})
+
+
+# ---------------------- End LLM Co-pilot ----------------------
+
+
 @api.get("/import/vendors/template")
 async def vendor_template(token: Optional[str] = None, authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)

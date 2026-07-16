@@ -8,11 +8,14 @@ import { api } from "@/src/api";
 import { Card, H2, Muted, Loader, Label, Pill } from "@/src/components/ui";
 import ExportMenu from "@/src/components/ExportMenu";
 import AuditTrail from "@/src/components/AuditTrail";
+import ApprovalPanel from "@/src/components/ApprovalPanel";
+import { useAuth } from "@/src/auth";
 import { theme } from "@/src/theme";
 
 export default function DCDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const { user } = useAuth();
   const [dc, setDC] = useState<any | null>(null);
   const [loading, setLoading] = useState(true);
   const [exportOpen, setExportOpen] = useState(false);
@@ -75,6 +78,16 @@ export default function DCDetail() {
         ))}
 
         {dc.remarks ? (<><H2 style={{ marginTop: 16 }}>Remarks</H2><Card><Text>{dc.remarks}</Text></Card></>) : null}
+
+        <ApprovalPanel
+          entity="dc"
+          id={String(id || "")}
+          currentStatus={dc.status || "pending_approval"}
+          canAct={["admin", "director"].includes(user?.role || "")}
+          onDone={load}
+          history={dc.approval_history}
+          approverLabel="Accounts / Director"
+        />
 
         <View style={{ marginTop: 20 }}>
           <AuditTrail entityId={String(id || "")} title="Audit Trail" limit={100} />

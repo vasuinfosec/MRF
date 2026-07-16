@@ -8,6 +8,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { api, backendUrl, getToken } from "@/src/api";
 import { Btn, Card, H2, Label, Muted, Loader, Pill } from "@/src/components/ui";
 import AuditTrail from "@/src/components/AuditTrail";
+import ApprovalPanel from "@/src/components/ApprovalPanel";
 import { theme } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 
@@ -21,13 +22,15 @@ interface CS {
   selected_vendor?: string; selection_reason?: string;
   uploaded_by: string; uploaded_by_name?: string; uploaded_at: string;
   status: string;
+  approval_history?: any[];
 }
 
 export default function ComparativeStatement() {
   const router = useRouter();
   const params = useLocalSearchParams<{ mrf_id?: string; po_id?: string }>();
   const { user } = useAuth();
-  const canWrite = ["purchase", "pm", "gm", "director", "admin"].includes(user?.role || "");
+  const canWrite = ["purchase", "admin"].includes(user?.role || "");
+  const canApprove = ["pm", "gm", "director"].includes(user?.role || "");
   const [rows, setRows] = useState<CS[]>([]);
   const [loading, setLoading] = useState(true);
   const [showUpload, setShowUpload] = useState(false);
@@ -130,6 +133,16 @@ export default function ComparativeStatement() {
                     {cs.selection_reason ? <Muted>{cs.selection_reason}</Muted> : null}
                   </View>
                 ) : null}
+
+                <ApprovalPanel
+                  entity="comparative_statement"
+                  id={cs.cs_id}
+                  currentStatus={cs.status || "pending_approval"}
+                  canAct={canApprove}
+                  onDone={load}
+                  history={(cs as any).approval_history || []}
+                  approverLabel="PM / GM / Director"
+                />
               </View>
               <View style={{ gap: 6 }}>
                 <TouchableOpacity onPress={() => download(cs)} style={styles.iconBtn} testID={`cs-dl-${cs.cs_id}`}>
