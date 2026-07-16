@@ -120,8 +120,9 @@ class TestPOReceivedRoles:
         assert r.status_code == 200, r.text
 
     def test_pm_403(self, tokens, po_id):
+        # Phase 2: PM (assigned to project) CAN record GRN.
         r = self._received(tokens["pm"], po_id)
-        assert r.status_code == 403, f"pm expected 403, got {r.status_code}"
+        assert r.status_code == 200, f"pm expected 200 (Phase 2), got {r.status_code}"
 
     def test_gm_403(self, tokens, po_id):
         r = self._received(tokens["gm"], po_id)

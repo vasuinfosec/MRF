@@ -78,8 +78,9 @@ class TestNewRoles:
         assert me.json()["role"] == "gm"
 
     def test_invalid_role_rejected(self):
-        r = dev_login(f"bogus_{uuid.uuid4().hex[:6]}@vasu.dev", "site_engineer", "Bogus")
-        # dev_login validates role against ROLES = pm/gm/director/purchase/admin
+        # Phase 2: site_engineer is now a VALID canonical role. Use a truly invalid one.
+        r = dev_login(f"bogus_{uuid.uuid4().hex[:6]}@vasu.dev", "not_a_real_role", "Bogus")
+        # dev_login validates role against ROLES
         assert r.status_code == 400, r.text
 
 
@@ -127,14 +128,15 @@ class TestLegacyMigration:
         })
         return uid, email, token
 
-    def test_site_engineer_migrates_to_pm(self, mongo):
+    def test_site_engineer_stays_site_engineer(self, mongo):
+        # Phase 2: site_engineer is now a FIRST-CLASS role. It is NOT migrated to pm.
         uid, email, tok = self._create_legacy_user(mongo, "site_engineer")
         me = requests.get(f"{API}/auth/me", headers=h(tok))
         assert me.status_code == 200, me.text
-        assert me.json()["role"] == "pm"
+        assert me.json()["role"] == "site_engineer"
         # persisted
         u = mongo.users.find_one({"user_id": uid})
-        assert u["role"] == "pm"
+        assert u["role"] == "site_engineer"
         mongo.users.delete_one({"user_id": uid})
         mongo.user_sessions.delete_one({"session_token": tok})
 
@@ -327,8 +329,9 @@ class TestPOReceived:
                              headers=h(token), json={})
 
     def test_pm_forbidden(self, tokens, po_id):
+        # Phase 2: PM assigned to the project CAN record GRN (spec includes PM in GRN_ROLES).
         r = self._received(tokens["pm"], po_id)
-        assert r.status_code == 403, f"pm got {r.status_code}: {r.text}"
+        assert r.status_code == 200, f"pm got {r.status_code}: {r.text}"
 
     def test_gm_forbidden(self, tokens, po_id):
         r = self._received(tokens["gm"], po_id)
