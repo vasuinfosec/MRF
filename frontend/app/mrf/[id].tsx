@@ -4,9 +4,10 @@ import { useRouter, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { api, backendUrl, getToken } from "@/src/api";
+import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Body, Loader } from "@/src/components/ui";
+import ExportMenu from "@/src/components/ExportMenu";
 import { theme, statusLabel, canonicalStatus } from "@/src/theme";
 
 function ownerRoleForStatus(status: string): string {
@@ -44,6 +45,7 @@ export default function MRFDetail() {
   const [action, setAction] = useState<null | "approve" | "reject" | "return">(null);
   const [comment, setComment] = useState("");
   const [itemActions, setItemActions] = useState<Record<string, { action?: string; qty_approved?: number; reason?: string }>>({});
+  const [exportOpen, setExportOpen] = useState(false);
 
   const load = useCallback(async () => {
     if (!id) return;
@@ -152,11 +154,8 @@ export default function MRFDetail() {
     if (Platform.OS === "web" && typeof window !== "undefined") window.print();
   };
 
-  // Export MRF as PDF via backend? MRF PDF endpoint isn't present — export Excel row.
-  const doExport = async () => {
-    const t = await getToken();
-    if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/mrf?token=${t}`, "_blank");
-  };
+  // Export MRF via unified menu (PDF/Excel)
+  const doExport = () => setExportOpen(true);
 
   // ---- Render states ----
   if (busy && !mrf && !loadErr) {
@@ -363,7 +362,7 @@ export default function MRFDetail() {
             {Platform.OS === "web" ? (
               <View style={{ flex: 1 }}><Btn testID="print-btn" title="🖨 Print" variant="outline" onPress={doPrint} /></View>
             ) : null}
-            <View style={{ flex: 1 }}><Btn testID="export-btn" title="⬇ Export (Excel)" variant="outline" onPress={doExport} /></View>
+            <View style={{ flex: 1 }}><Btn testID="export-btn" title="⬇ Export / Download" variant="outline" onPress={doExport} /></View>
           </View>
         </View>
 
@@ -411,6 +410,14 @@ export default function MRFDetail() {
           </View>
         </View>
       </Modal>
+
+      <ExportMenu
+        visible={exportOpen}
+        onClose={() => setExportOpen(false)}
+        entity="mrf"
+        id={String(id || "")}
+        recordNumber={mrf?.mrf_number}
+      />
     </SafeAreaView>
   );
 }

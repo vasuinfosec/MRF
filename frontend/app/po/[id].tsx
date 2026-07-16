@@ -7,6 +7,7 @@ import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context"
 import { api, backendUrl, getToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Loader } from "@/src/components/ui";
+import ExportMenu from "@/src/components/ExportMenu";
 import { theme } from "@/src/theme";
 
 export default function PODetail() {
@@ -35,6 +36,7 @@ export default function PODetail() {
   const [receiveRemarks, setReceiveRemarks] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const [exportOpen, setExportOpen] = useState(false);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -62,10 +64,11 @@ export default function PODetail() {
   useEffect(() => { load(); }, [load]);
 
   const downloadPDF = async () => {
-    const t = await getToken();
-    const url = `${backendUrl}/api/po/${id}/pdf?token=${t}`;
-    if (typeof window !== "undefined") window.open(url, "_blank");
+    // Kept for backward-compat: opens the unified Export menu.
+    setExportOpen(true);
   };
+
+  const openExport = () => setExportOpen(true);
 
   const markReceived = async () => {
     // Prefill remaining qty for each line
@@ -189,8 +192,8 @@ export default function PODetail() {
           <Ionicons name="arrow-back" size={22} color={theme.colors.text} />
         </TouchableOpacity>
         <Text style={styles.title}>{po.po_number}</Text>
-        <TouchableOpacity testID="download-pdf-btn" onPress={downloadPDF} style={{ padding: 8 }}>
-          <Ionicons name="document-outline" size={22} color={theme.colors.primary} />
+        <TouchableOpacity testID="download-pdf-btn" onPress={openExport} style={{ padding: 8 }}>
+          <Ionicons name="download-outline" size={22} color={theme.colors.primary} />
         </TouchableOpacity>
       </View>
 
@@ -289,7 +292,7 @@ export default function PODetail() {
         </Card>
 
         <View style={{ marginTop: 16, gap: 8 }}>
-          <Btn testID="pdf-download-btn" title="Download PDF" variant="primary" onPress={downloadPDF} />
+          <Btn testID="pdf-download-btn" title="Export / Download" variant="primary" onPress={openExport} />
           {canApprovePO ? (
             <>
               <Btn testID="po-approve-btn" title={`Approve PO (₹${new Intl.NumberFormat("en-IN").format(po.total || 0)})`} variant="action" onPress={() => doApprovePO("approve")} />
@@ -483,6 +486,14 @@ export default function PODetail() {
           </View>
         </View>
       </Modal>
+
+      <ExportMenu
+        visible={exportOpen}
+        onClose={() => setExportOpen(false)}
+        entity="po"
+        id={String(id || "")}
+        recordNumber={po?.po_number}
+      />
     </SafeAreaView>
   );
 }

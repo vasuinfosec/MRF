@@ -70,14 +70,15 @@ export default function Reports() {
           </View>
         ) : null}
 
-        <H2 style={{ marginTop: 20 }}>Excel Export</H2>
+        <H2 style={{ marginTop: 20 }}>Bulk Export</H2>
+        <Muted>Line-item level exports with Customer ID, MAT/VAR UIDs, taxes and audit-logged downloads.</Muted>
         <View style={{ marginTop: 8, gap: 8 }}>
-          <Btn testID="export-mrf-btn" title="Export MRFs to Excel" variant="primary" onPress={() => exp("mrf")} />
-          <Btn testID="export-po-btn" title="Export POs to Excel" variant="primary" onPress={() => exp("po")} />
+          <Btn testID="export-mrf-btn" title="⬇ Export All MRFs (Excel)" variant="primary" onPress={() => exp("mrf")} />
+          <Btn testID="export-po-btn" title="⬇ Export All POs (Excel)" variant="primary" onPress={() => exp("po")} />
         </View>
 
         <H2 style={{ marginTop: 20 }}>Tally-Compatible Voucher Export</H2>
-        <Muted>Purchase-voucher rows with Customer ID, Party GSTIN, HSN, CGST/SGST/IGST split — ready for Tally XML import.</Muted>
+        <Muted>Purchase-voucher rows with Vasu GSTIN, Customer ID, MAT/VAR UIDs, HSN, and CGST/SGST/IGST split — ready for Tally XML import.</Muted>
         <View style={{ marginTop: 8, gap: 8 }}>
           <Btn testID="export-tally-purchase-btn" title="Tally: Purchase Voucher (from POs)" variant="action" onPress={() => expTally("purchase")} />
           <Btn testID="export-tally-invoice-btn" title="Tally: Purchase Voucher (from Vendor Invoices)" variant="action" onPress={() => expTally("invoice")} />

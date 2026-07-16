@@ -595,12 +595,87 @@ frontend:
         -agent: "main"
         -comment: "Materials loaded from /materials?status=approved instead of /masters. material_id now stores MAT-#### UID. Unapproved materials cannot appear in MRF picker."
 
+  - task: "Unified Export/Download menu (PDF, Excel, Tally) — Phase 5"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/ExportMenu.tsx, /app/frontend/app/po/[id].tsx, /app/frontend/app/mrf/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New ExportMenu bottom-sheet component with three tiles (PDF/Excel/Tally). Wired into PO detail (all three) and MRF detail (PDF+Excel). Preflight fetch surfaces HTTP 422 validation with a warning banner listing missing mandatory fields + optional warnings; user can 'Force Download (audit-logged)' to bypass. Every download opens in a new tab (web) / Linking (native)."
+
+  - task: "Enhanced PO PDF — Vasu GSTIN/PAN header, MAT/VAR/HSN/Make/Model, per-line taxable+CGST/SGST/IGST, authorised signatories from approval history"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py (po_pdf)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Rewrote po_pdf endpoint. Added Vasu identity strip (legal name, GSTIN, PAN, state code) below the banner. Enriched items table now shows MAT/VAR UIDs, Make/Model, HSN, Unit, Qty, Rate, Disc, Taxable, GST%, Total. Grand total block shows CGST/SGST vs IGST split. References line shows MRF numbers, latest Customer PO reference (from Customer master), Vendor Quote. Authorisation block pulls approver names/roles/timestamps from po.approval_history + explicit signatory. Advisory row printed if optional fields missing. Validation returns 422 with missing_mandatory + warnings when mandatory fields absent; ?force=1 bypass logged in audit."
+
+  - task: "Enhanced PO Excel (single & bulk) with line-item detail (Customer, MAT/VAR, HSN, GST split)"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py (_po_excel_workbook, /api/export/po, /api/po/{po_id}/export)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New _po_excel_workbook helper produces 40-column per-line workbook — PO#, Date, Status, Customer ID/Name/GSTIN, Project/Site, Vendor Name/GSTIN/Address, MRF Refs, Customer PO Ref, Vendor Quote, Line#, MAT/VAR UIDs, Description, Make, Model, HSN, Unit, Qty, Rate, Discount, Taxable, GST%, CGST, SGST, IGST, Line Total, Freight, Other, Grand Total, Delivery/Payment/Warranty terms, Authorised Signatory, Approval history. Reused by /api/export/po (bulk) and /api/po/{po_id}/export?format=excel (single)."
+
+  - task: "Enhanced Tally-compatible voucher export (Vasu GSTIN, MAT/VAR UIDs, HSN mandatory)"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py (_po_tally_workbook, /api/export/tally, /api/po/{po_id}/export?format=tally)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Voucher rows now carry Company GSTIN/State/State-Code, Party (vendor) ledger + GSTIN, Customer ID/Name/GSTIN, Project code, MAT/VAR UIDs, Make/Model, HSN (mandatory for Tally), unit, qty, rate, disc, taxable, GST%, CGST/SGST/IGST split, Line Total, Narration. HSN missing → 422 with 'Item i HSN/SAC (required for Tally)'. Bulk /api/export/tally?kind=purchase|invoice preserved; single /api/po/{po_id}/export?format=tally added."
+
+  - task: "MRF PDF endpoint (branded) + MRF/PO unified single-record dispatchers"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py (/api/mrf/{id}/pdf, /api/mrf/{id}/export, /api/po/{id}/export)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New branded MRF PDF with Vasu header, project/customer block, line-item table (MAT/VAR/Make/Model/Priority/Status/Purpose), remarks, approval trail. Dispatchers /api/po/{id}/export?format=pdf|excel|tally and /api/mrf/{id}/export?format=pdf|excel provide single unified download endpoint. Validation ensures mandatory fields before generating; ?force=1 bypass audit-logged."
+
+  - task: "Export validation + audit logging for every download"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/server.py (_validate_po_for_export, _validate_mrf_for_export, _log_export)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Two validators: PO checks Vendor name, Customer ID+name, Project, PO number/date, line items (description, qty>0, rate≥0). HSN warning for PDF/Excel; MANDATORY for Tally. Missing Vasu GSTIN → warning for PDF/Excel, MANDATORY for Tally. MRF validator similar (customer_id is warning-only). _log_export writes to audit_logs collection with action='export_{format}', details include format, record_number, warnings list, forced flag. Verified via GET /api/audit shows all 8 test exports logged with correct format+record."
+
 test_plan:
   current_focus:
-    - "Material UID (MAT-####) and Variant UID (VAR-####) with dedup"
-    - "Purchase-uploads → PM-reviews workflow for materials"
-    - "PUT /api/materials/{uid} routes changes-of-approved to pending_gm_approval"
-    - "Bulk import (Excel/CSV) — POST /api/import/materials + template"
+    - "Enhanced PO PDF with Vasu GSTIN header, MAT/VAR/HSN columns, CGST/SGST/IGST split"
+    - "Enhanced PO Excel bulk + single (40-column line-item workbook)"
+    - "Tally voucher export with HSN mandatory validation"
+    - "MRF PDF endpoint (new) + unified export dispatchers"
+    - "Pre-export validation returns 422 with missing_mandatory list"
+    - "?force=1 bypass audit-logged; every export logged in audit_logs"
+    - "Unified ExportMenu bottom-sheet on PO/MRF detail screens"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -608,3 +683,5 @@ test_plan:
 agent_communication:
     -agent: "main"
     -message: "Phase 4 (Material Master + UIDs + Bulk Import + GM-approval flow) implemented and manually smoke-tested. All flows green in curl: MAT/VAR UIDs assigned in order, migration idempotent, dedup case-insensitive on description AND (material,make,model), word-count 400 on >100 words, bulk import summary correct, PM approve/reject/bulk, edit-of-approved → pending_gm_approval, GM approve → approved. Please run RBAC & integrity regression per the test_result tasks. Verify: (a) POST /materials 403 for site_engineer/pm/gm/store; (b) POST /materials/{uid}/action 403 for purchase/site_engineer/gm (only PM/admin/director); (c) POST /materials/{uid}/gm-approve 403 for pm/purchase/site_engineer (only GM/director/admin); (d) POST /materials duplicate description (case-insensitive) → 400; (e) POST /variants duplicate combo returns SAME variant_uid (not error); (f) POST /materials word count >100 → 400; (g) Bulk import dedup skips existing; (h) /materials default filter is approved-only; (i) Migration idempotent (running /seed twice does not double up); (j) master_audit contains entries with entity='material'."
+    -agent: "main"
+    -message: "Phase 5 (Unified Export/Download + Validation + Audit) implemented. New endpoints: (1) GET /api/po/{po_id}/export?format=pdf|excel|tally&force=0|1 — single-PO download dispatcher; (2) GET /api/mrf/{mrf_id}/pdf — branded MRF PDF; (3) GET /api/mrf/{mrf_id}/export?format=pdf|excel — single-MRF dispatcher; enhanced GET /api/po/{po_id}/pdf, /api/export/mrf, /api/export/po, /api/export/tally. Every export writes an audit_logs row with action='export_{format}' via _log_export(). Backend smoke-tested via curl for purchase role: PDF (200, valid %PDF), Excel single (200, 40 cols), Tally single (422 without HSN → 200 with force=1), bulk MRF/PO/Tally (all 200), MRF PDF (200), MRF Excel single (200). Audit endpoint (director role) shows all export events logged. Please: (a) verify validation returns 422 with missing_mandatory listing missing Customer ID / Vendor / HSN (for tally) etc.; (b) verify ?force=1 bypasses and still audits with forced=true; (c) verify RBAC — site_engineer denied on /api/export/po and /api/export/tally, but can download their own MRF PDF; (d) verify audit rows written for both successful downloads AND forced downloads; (e) verify the enriched PO PDF contains MAT/VAR/HSN/CGST/SGST/IGST columns and the Vasu GSTIN/PAN identity strip; (f) verify PO Excel single/bulk produces 40 columns with the requested fields; (g) confirm no regression on existing endpoints (GRN PDF, invoice PDF, /seed). Frontend: new ExportMenu bottom-sheet component wired in /po/[id] and /mrf/[id]. Preflights the request and surfaces validation errors as an in-modal warning banner with 'Force Download' button. Skip UI screenshot testing if backend is green — the component is a straightforward Modal + fetch flow."

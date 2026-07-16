@@ -1,0 +1,42 @@
+{
+  "summary": "Phase 5 (Unified Export/Download + Validation + Audit) — 34/36 pass, 1 skip (no seed PO missing customer_id), 1 real bug: PM role denied on GET /api/export/po (spec expects 200 for pm/purchase/gm/director/admin). All core flows verified: PO PDF returns %PDF bytes; single-PO dispatcher works for pdf/excel/tally; tally without HSN returns 422 with missing_mandatory including 'HSN/SAC (required for Tally)'; ?force=1 bypasses validation and audit-logs details.forced=true; Excel exports contain all spec-required extended header columns (HSN/SAC, Taxable Value, CGST, SGST, IGST, MAT/VAR UIDs, Customer GSTIN, Authorised Signatory, Approved By (history)); MRF PDF/Excel dispatchers work; bulk /api/export/mrf|po|tally RBAC largely correct; every successful export writes an audit_logs row with action='export_{pdf|excel|tally}' visible via GET /api/audit; regression on /api/grn/{id}/pdf, /api/seed idempotency and /api/materials default (approved-only) all green.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/export/po",
+        "issue": "Spec (Phase 5) requires 200 for role 'pm' but implementation only allows purchase/director/admin/gm. PM currently receives 403 'Not allowed'. Fix: add 'pm' to the allowed-role tuple at server.py:3196.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase5_exports.py",
+    "/app/test_reports/pytest/phase5_iter17.xml"
+  ],
+  "action_items": [
+    "Add 'pm' to the role tuple in export_po() at /app/backend/server.py:3196 so ('purchase','director','admin','gm','pm'), matching the review-request contract 'pm/purchase/gm/director/admin allowed'.",
+    "Optional: The Excel header uses 'HSN/SAC' and 'Taxable Value' (matches spec verbatim). The review-request bullet also says 'HSN/SAC' and 'Taxable Value' so this is correct — but ensure documentation is aligned; no code change needed.",
+    "Optional test-data enhancement: seed at least one PO/project without a customer_id so /api/po/{id}/export?format=pdf validation error path (missing 'Customer ID (permanent)' + 'Customer name') can be regression-tested end-to-end; currently the test skips."
+  ],
+  "critical_code_review_comments": [
+    "server.py:3196 export_po role tuple ('purchase','director','admin','gm') does not include 'pm' — inconsistent with export_mrf (which does include pm) and with Phase 5 spec.",
+    "_validate_po_for_export correctly makes HSN mandatory only for fmt=='tally' and treats it as warning for pdf/excel (verified via test test_hsn_only_mandatory_for_tally).",
+    "_log_export writes to audit_logs and includes forced flag, warnings list and record_number — verified via GET /api/audit?entity_id=<po_id> as director; details.forced=true is set when ?force=1 bypasses missing mandatory."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase5_exports.py (new)"
+  ],
+  "success_rate": {"backend": "94% (34/36 executed, 1 real fail, 1 environmental skip)", "frontend": "not_tested"},
+  "seed_data_creation": "None — reused /api/seed idempotently. Existing seed POs already miss HSN which naturally exercises the Tally 422 path (as noted in the request context).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "test_phase5_exports.py at /app/backend/tests/ is the canonical regression suite for Phase 5. Run with: pytest tests/test_phase5_exports.py -v --junitxml=/app/test_reports/pytest/phase5_next.xml. Requires ENABLE_DEV_LOGIN=1 (already set) and dev-login users seeded (director/gm/pm/purchase/siteeng/admin/store @vasu.dev). BASE_URL resolves from EXPO_PUBLIC_BACKEND_URL. The single skipped test (test_missing_customer_id_and_name) requires a PO with customer_id=null to activate; either use API to unbind a PO's project.customer_id or update the fixture.",
+  "rca_of_issue": "Bug: PM role denied on /api/export/po. Root cause: server.py line 3196 role whitelist is ('purchase','director','admin','gm'); PM was omitted while export_mrf includes pm. Reproduction: (1) POST /api/auth/dev-login {email:'pm@vasu.dev',role:'pm',name:'PM'}; (2) GET /api/export/po with the bearer token → 403 'Not allowed'. Fix: change tuple to ('purchase','director','admin','gm','pm')."
+}

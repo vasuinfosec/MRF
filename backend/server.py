@@ -2399,7 +2399,178 @@ VASU_PRIMARY = colors.HexColor('#002FA7')  # Vasu brand blue
 VASU_ACCENT = colors.HexColor('#F7941D')   # Vasu orange
 VASU_TAGLINE = "Enterprise Fire Safety · CCTV · Access Control · Structured Cabling"
 VASU_ADDR = "Vasu Infosec Pvt Ltd  ·  Pune · Delhi  ·  vasuinfosec.com"
-VASU_GSTIN = ""  # populated at runtime from env if provided
+# Detailed company block (env-overridable). These appear on all outbound documents.
+VASU_LEGAL_NAME = os.getenv("VASU_LEGAL_NAME", "Vasu Infosec Pvt Ltd")
+VASU_GSTIN = os.getenv("VASU_GSTIN", "27AAFCV0000A1Z0")
+VASU_PAN = os.getenv("VASU_PAN", "AAFCV0000A")
+VASU_STATE = os.getenv("VASU_STATE", "Maharashtra")
+VASU_STATE_CODE = os.getenv("VASU_STATE_CODE", "27")
+VASU_CIN = os.getenv("VASU_CIN", "")
+VASU_ADDR_FULL = os.getenv(
+    "VASU_ADDR_FULL",
+    "Corporate Office: Pune, Maharashtra · Branch: Delhi · www.vasuinfosec.com",
+)
+VASU_CONTACT = os.getenv("VASU_CONTACT", "accounts@vasuinfosec.com  ·  +91-20-0000-0000")
+
+# ---------------------- Export helpers (validation / audit / enrichment) ----------------------
+async def _log_export(user: UserOut, entity: str, entity_id: str, fmt: str,
+                      record_number: str = "", extras: Optional[dict] = None):
+    """Audit every download/export so ops can prove regulatory compliance."""
+    details = {"format": fmt, "record_number": record_number}
+    if extras:
+        details.update(extras)
+    await audit(entity, entity_id, f"export_{fmt}", user, details)
+
+async def _resolve_material_info(item: dict) -> dict:
+    """Enrich a PO/MRF line with MAT/VAR UIDs, HSN, category, make/model.
+    Returns a dict with keys: material_uid, variant_uid, hsn_code, make, model, category, gst_pct.
+    Non-fatal — returns empty strings when unresolved.
+    """
+    out = {
+        "material_uid": item.get("material_uid") or "",
+        "variant_uid": item.get("variant_uid") or "",
+        "hsn_code": item.get("hsn_code") or "",
+        "make": item.get("make") or "",
+        "model": item.get("model") or "",
+        "category": item.get("category") or "",
+        "gst_pct": float(item.get("gst") or 0),
+    }
+    mat = None
+    if out["material_uid"]:
+        mat = await db.materials.find_one({"material_uid": out["material_uid"]}, {"_id": 0})
+    if not mat:
+        desc = (item.get("description") or "").strip()
+        if desc:
+            mat = await db.materials.find_one({"description_norm": _norm(desc)}, {"_id": 0})
+    if mat:
+        out["material_uid"] = out["material_uid"] or mat.get("material_uid", "")
+        out["hsn_code"] = out["hsn_code"] or (mat.get("hsn_code") or "")
+        out["category"] = out["category"] or (mat.get("category") or "")
+        if not out["gst_pct"] and mat.get("gst_rate") is not None:
+            out["gst_pct"] = float(mat.get("gst_rate") or 0)
+    # Resolve variant by (material_uid, make, model)
+    if out["material_uid"] and (out["make"] or out["model"]) and not out["variant_uid"]:
+        v = await db.variants.find_one(
+            {"material_uid": out["material_uid"],
+             "make_norm": _norm(out["make"]),
+             "model_norm": _norm(out["model"])},
+            {"_id": 0, "variant_uid": 1},
+        )
+        if v:
+            out["variant_uid"] = v.get("variant_uid", "")
+    return out
+
+
+def _split_gst_amt(taxable: float, gst_pct: float, intra_state: bool) -> tuple:
+    """Return (cgst, sgst, igst)."""
+    gst_amt = round(taxable * gst_pct / 100, 2)
+    if intra_state:
+        half = round(gst_amt / 2, 2)
+        return (half, gst_amt - half, 0.0)
+    return (0.0, 0.0, gst_amt)
+
+
+def _is_intra_state(party_state_or_addr: str) -> bool:
+    s = (party_state_or_addr or "").upper()
+    return ("MAHARASHTRA" in s) or (" MH" in f" {s}") or s.endswith(" MH") or s == "MH"
+
+
+def _validate_po_for_export(po: dict, vendor: Optional[dict], customer: Optional[dict],
+                            project: Optional[dict], fmt: str) -> tuple:
+    """Return (missing_mandatory, warnings). Mandatory = blocks export unless ?force=1."""
+    missing: List[str] = []
+    warnings: List[str] = []
+
+    # Vendor mandatory
+    if not (vendor and vendor.get("name")):
+        missing.append("Vendor name")
+    if vendor and not (vendor.get("gstin") or "").strip():
+        warnings.append("Vendor GSTIN")
+    if vendor and not (vendor.get("address") or "").strip():
+        warnings.append("Vendor address")
+
+    # Customer mandatory (permanent Customer ID + name)
+    if not (customer and customer.get("customer_id")):
+        missing.append("Customer ID (permanent)")
+    if not (customer and customer.get("name")):
+        missing.append("Customer name")
+    if customer and not (customer.get("gstin") or "").strip():
+        warnings.append("Customer GSTIN")
+
+    # Project mandatory
+    if not project:
+        missing.append("Project")
+    else:
+        if not project.get("code"):
+            warnings.append("Project code")
+
+    # PO metadata
+    if not po.get("po_number"):
+        missing.append("PO number")
+    if not po.get("date"):
+        missing.append("PO date")
+
+    # Line items
+    items = po.get("items") or []
+    if not items:
+        missing.append("At least one line item")
+    for i, it in enumerate(items, 1):
+        if not (it.get("description") or "").strip():
+            missing.append(f"Item {i} description")
+        if float(it.get("qty") or 0) <= 0:
+            missing.append(f"Item {i} qty > 0")
+        if float(it.get("rate") or 0) < 0:
+            missing.append(f"Item {i} rate ≥ 0")
+        if not (it.get("unit") or "").strip():
+            warnings.append(f"Item {i} unit")
+        # HSN mandatory ONLY for Tally (GST filing). Warning for PDF/Excel.
+        if not (it.get("hsn_code") or "").strip():
+            if fmt == "tally":
+                missing.append(f"Item {i} HSN/SAC (required for Tally)")
+            else:
+                warnings.append(f"Item {i} HSN/SAC")
+
+    # Vasu GSTIN — mandatory for tally, warning otherwise
+    if not VASU_GSTIN:
+        (missing if fmt == "tally" else warnings).append("Vasu GSTIN (env: VASU_GSTIN)")
+
+    return missing, warnings
+
+
+def _validate_mrf_for_export(mrf: dict, project: Optional[dict], customer: Optional[dict],
+                             fmt: str) -> tuple:
+    missing: List[str] = []
+    warnings: List[str] = []
+    if not (customer and customer.get("customer_id")):
+        # MRFs may pre-date customer master — warn only.
+        warnings.append("Customer ID (permanent)")
+    if not project:
+        missing.append("Project")
+    if not mrf.get("mrf_number"):
+        missing.append("MRF number")
+    items = mrf.get("items") or []
+    if not items:
+        missing.append("At least one line item")
+    for i, it in enumerate(items, 1):
+        if not (it.get("description") or "").strip():
+            missing.append(f"Item {i} description")
+        if float(it.get("qty_requested") or 0) <= 0:
+            missing.append(f"Item {i} qty_requested > 0")
+    return missing, warnings
+
+
+def _validation_error(missing: List[str], warnings: List[str], fmt: str) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail={
+            "error": "export_validation_failed",
+            "format": fmt,
+            "missing_mandatory": missing,
+            "warnings": warnings,
+            "hint": "Fix mandatory fields, or retry with ?force=1 to bypass (audit-logged).",
+        },
+    )
+
 
 def _vasu_footer(canvas, doc):
     """Draws Vasu footer + page number on every page."""
@@ -2430,9 +2601,21 @@ def _pdf_story(doc_type: str, doc_number: str, doc_date, project: dict,
     small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9, leading=12)
 
     story: List = []
-    # Header row: brand banner
+    # Header row: brand banner + Vasu identity
     story.append(Paragraph("VASU INFOSEC", title_style))
     story.append(Paragraph(VASU_TAGLINE, tag_style))
+
+    # Vasu identity strip (legal name + GSTIN + PAN + state)
+    identity_bits = [f"<b>{VASU_LEGAL_NAME}</b>"]
+    if VASU_GSTIN: identity_bits.append(f"GSTIN: {VASU_GSTIN}")
+    if VASU_PAN: identity_bits.append(f"PAN: {VASU_PAN}")
+    if VASU_STATE: identity_bits.append(f"State: {VASU_STATE} ({VASU_STATE_CODE})")
+    story.append(Paragraph("  ·  ".join(identity_bits),
+                           ParagraphStyle('id', parent=styles['Normal'], fontSize=8,
+                                          textColor=colors.HexColor('#333'), spaceAfter=2)))
+    story.append(Paragraph(VASU_ADDR_FULL,
+                           ParagraphStyle('id2', parent=styles['Normal'], fontSize=8,
+                                          textColor=colors.HexColor('#555'), spaceAfter=6)))
 
     # Document title band
     story.append(Paragraph(doc_type, doc_title_style))
@@ -2507,6 +2690,7 @@ def _pdf_story(doc_type: str, doc_number: str, doc_date, project: dict,
 
 @api.get("/po/{po_id}/pdf")
 async def po_pdf(po_id: str, token: Optional[str] = None,
+                 force: Optional[int] = 0,
                  authorization: Optional[str] = Header(None)):
     # Allow token via query for browser download
     auth = authorization or (f"Bearer {token}" if token else None)
@@ -2517,7 +2701,7 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
     await _check_po_access(u, po)
     vendor = await db.vendors.find_one({"vendor_id": po["vendor_id"]}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": po["project_id"]}, {"_id": 0}) or {}
-    po_mrf_nums = []
+    po_mrf_nums: List[str] = []
     for mid in po.get("mrf_refs") or []:
         m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "mrf_number": 1})
         if m: po_mrf_nums.append(m["mrf_number"])
@@ -2526,42 +2710,164 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
     cid = po.get("customer_id") or project.get("customer_id")
     cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
 
+    # Validate mandatory data
+    missing, warnings = _validate_po_for_export(po, vendor, cust, project, "pdf")
+    if missing and not force:
+        raise _validation_error(missing, warnings, "pdf")
+
+    # Enrich each PO item with MAT/VAR/HSN
+    enriched: List[dict] = []
+    for it in po.get("items", []):
+        info = await _resolve_material_info(it)
+        row = dict(it)
+        row.update(info)
+        enriched.append(row)
+
+    # Resolve customer PO reference (latest active CPO on the customer)
+    cpo_ref = ""
+    if cust and cust.get("customer_id"):
+        cpos = await db.customers.find_one({"customer_id": cust["customer_id"]},
+                                            {"_id": 0, "pos": 1})
+        if cpos and isinstance(cpos.get("pos"), list) and cpos["pos"]:
+            active = [p for p in cpos["pos"] if p.get("active", True)]
+            active.sort(key=lambda p: p.get("po_date") or "", reverse=True)
+            if active:
+                cpo_ref = f"{active[0].get('po_number','')} dt {active[0].get('po_date','')}".strip()
+
+    # Determine intra-state for CGST/SGST vs IGST
+    intra = _is_intra_state((vendor or {}).get("address") or VASU_STATE)
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
                             leftMargin=15*mm, rightMargin=15*mm)
-    story = _pdf_story("PURCHASE ORDER", po["po_number"], po["date"], project, cust, vendor, extra_ref=", ".join(po_mrf_nums))
+    extra_ref_parts = []
+    if po_mrf_nums:
+        extra_ref_parts.append("MRF: " + ", ".join(po_mrf_nums))
+    if cpo_ref:
+        extra_ref_parts.append("Customer PO: " + cpo_ref)
+    if po.get("vendor_quotation"):
+        extra_ref_parts.append("Vendor Quote: " + str(po["vendor_quotation"]))
+    story = _pdf_story("PURCHASE ORDER", po["po_number"], po["date"], project, cust, vendor,
+                       extra_ref="  ·  ".join(extra_ref_parts))
 
     styles = getSampleStyleSheet()
-    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=8, leading=10)
+    smallb = ParagraphStyle('sb', parent=styles['Normal'], fontSize=8, leading=10,
+                            fontName="Helvetica-Bold")
 
-    data = [["#", "Description", "Unit", "Qty", "Rate", "Disc", "GST%", "Total"]]
-    for idx, it in enumerate(po["items"], 1):
-        gross = it["qty"] * it["rate"]
-        after_disc = gross - (it.get("discount") or 0)
-        gst_amt = after_disc * (it.get("gst") or 0) / 100
-        total = after_disc + gst_amt
-        data.append([str(idx), it["description"][:40], it["unit"], f"{it['qty']}", f"{it['rate']}",
-                     f"{it.get('discount', 0)}", f"{it.get('gst', 0)}", f"{total:.2f}"])
-    tbl = Table(data, colWidths=[20, 180, 40, 40, 50, 40, 40, 60])
+    # Items table with MAT/VAR/HSN/Make/Model + GST breakdown
+    header = ["#", "MAT / VAR", "Description", "Make / Model", "HSN", "Unit",
+              "Qty", "Rate", "Disc", "Taxable", "GST %", "Total"]
+    data = [[Paragraph(h, smallb) for h in header]]
+    subtotal_taxable = 0.0
+    total_cgst = total_sgst = total_igst = 0.0
+    for idx, it in enumerate(enriched, 1):
+        qty = float(it.get("qty") or 0)
+        rate = float(it.get("rate") or 0)
+        disc = float(it.get("discount") or 0)
+        gst_pct = float(it.get("gst") or it.get("gst_pct") or 0)
+        taxable = qty * rate - disc
+        cgst, sgst, igst = _split_gst_amt(taxable, gst_pct, intra)
+        line_total = round(taxable + cgst + sgst + igst, 2)
+        subtotal_taxable += taxable
+        total_cgst += cgst
+        total_sgst += sgst
+        total_igst += igst
+        mat_var = ((it.get("material_uid") or "-") + "\n" +
+                   (it.get("variant_uid") or "-"))
+        make_model = ((it.get("make") or "-") + "\n" +
+                      (it.get("model") or "-"))
+        data.append([
+            Paragraph(str(idx), small),
+            Paragraph(mat_var, small),
+            Paragraph((it.get("description") or "")[:80], small),
+            Paragraph(make_model, small),
+            Paragraph(it.get("hsn_code") or "—", small),
+            Paragraph(it.get("unit") or "", small),
+            Paragraph(f"{qty:g}", small),
+            Paragraph(f"{rate:,.2f}", small),
+            Paragraph(f"{disc:,.2f}" if disc else "—", small),
+            Paragraph(f"{taxable:,.2f}", small),
+            Paragraph(f"{gst_pct:g}%", small),
+            Paragraph(f"{line_total:,.2f}", small),
+        ])
+    tbl = Table(data, colWidths=[16, 52, 130, 56, 40, 24, 26, 40, 32, 46, 26, 44], repeatRows=1)
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor('#002FA7')),
+        ("BACKGROUND", (0, 0), (-1, 0), VASU_PRIMARY),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("FONTSIZE", (0, 0), (-1, -1), 8),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor('#B7BEC9')),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor('#F7F8FC')]),
+        ("ALIGN", (5, 0), (-1, -1), "RIGHT"),
     ]))
     story.append(tbl)
     story.append(Spacer(1, 8))
-    story.append(Paragraph(f"<b>Freight:</b> ₹{po.get('freight',0):,.2f}  <b>Other:</b> ₹{po.get('other_charges',0):,.2f}  <b>Grand Total:</b> ₹{po.get('total',0):,.2f}", small))
+
+    # Tax summary block
+    freight = float(po.get('freight') or 0)
+    other = float(po.get('other_charges') or 0)
+    grand = round(subtotal_taxable + total_cgst + total_sgst + total_igst + freight + other, 2)
+    sum_rows = [
+        [Paragraph("<b>Taxable Value</b>", small), Paragraph(f"₹ {subtotal_taxable:,.2f}", small)],
+    ]
+    if intra:
+        sum_rows.append([Paragraph("CGST", small), Paragraph(f"₹ {total_cgst:,.2f}", small)])
+        sum_rows.append([Paragraph("SGST", small), Paragraph(f"₹ {total_sgst:,.2f}", small)])
+    else:
+        sum_rows.append([Paragraph("IGST", small), Paragraph(f"₹ {total_igst:,.2f}", small)])
+    sum_rows.append([Paragraph("Freight", small), Paragraph(f"₹ {freight:,.2f}", small)])
+    sum_rows.append([Paragraph("Other Charges", small), Paragraph(f"₹ {other:,.2f}", small)])
+    sum_rows.append([Paragraph("<b>Grand Total</b>", smallb),
+                     Paragraph(f"<b>₹ {grand:,.2f}</b>", smallb)])
+    sum_tbl = Table(sum_rows, colWidths=[380, 130])
+    sum_tbl.setStyle(TableStyle([
+        ("BOX", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("INNERGRID", (0, 0), (-1, -1), 0.25, colors.HexColor('#D5D8DE')),
+        ("BACKGROUND", (0, -1), (-1, -1), colors.HexColor('#EEF2FF')),
+        ("ALIGN", (1, 0), (1, -1), "RIGHT"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+    ]))
+    story.append(sum_tbl)
+    story.append(Spacer(1, 10))
+
+    # Terms & Authorisation block
+    story.append(Paragraph(f"<b>Delivery Schedule:</b> {po.get('delivery_schedule','—') or '—'}", small))
+    story.append(Paragraph(f"<b>Payment Terms:</b> {po.get('payment_terms','—') or '—'}", small))
+    story.append(Paragraph(f"<b>Warranty:</b> {po.get('warranty_terms','—') or '—'}", small))
+    if po.get("vendor_quotation"):
+        story.append(Paragraph(f"<b>Vendor Quotation Ref:</b> {po['vendor_quotation']}", small))
     story.append(Spacer(1, 6))
-    story.append(Paragraph(f"<b>Delivery:</b> {po.get('delivery_schedule','')}", small))
-    story.append(Paragraph(f"<b>Payment:</b> {po.get('payment_terms','')}", small))
-    story.append(Paragraph(f"<b>Warranty:</b> {po.get('warranty_terms','')}", small))
-    story.append(Spacer(1, 20))
-    story.append(Paragraph(f"<b>Authorised Signatory:</b> {po.get('authorised_signatory','')}", small))
+
+    # Authorised signatories — from approval history (GM/Director) + explicit signatory
+    signers: List[str] = []
+    for h in (po.get("approval_history") or []):
+        if (h.get("action") or "").lower() == "approve":
+            role = (h.get("user_role") or "").upper()
+            nm = h.get("user_name") or ""
+            ts = (h.get("timestamp") or "")[:10]
+            signers.append(f"{nm} ({role}) · {ts}")
+    if po.get("authorised_signatory"):
+        signers.append(str(po["authorised_signatory"]))
+    if not signers:
+        signers.append("For Vasu Infosec Pvt Ltd — Authorised Signatory")
+    story.append(Paragraph("<b>Authorisation</b>", smallb))
+    for s in signers:
+        story.append(Paragraph(f"• {s}", small))
+
+    # Warnings block (soft — printed at bottom)
+    if warnings:
+        story.append(Spacer(1, 8))
+        story.append(Paragraph(
+            f"<font color='#B45309'><b>Advisory:</b> Optional fields missing — {', '.join(warnings[:8])}"
+            + ("…" if len(warnings) > 8 else "") + "</font>", small))
+
     doc.build(story, onFirstPage=_vasu_footer, onLaterPages=_vasu_footer)
     buf.seek(0)
+    await _log_export(u, "po", po_id, "pdf", po["po_number"],
+                      {"warnings": warnings, "forced": bool(force and missing)})
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{po["po_number"].replace("/","_")}.pdf"'})
 
@@ -2582,72 +2888,323 @@ def _excel_response(wb, filename):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
+async def _po_excel_workbook(pos_list: List[dict], single: bool = False):
+    """Build a rich per-line PO Excel workbook. Reused by bulk & single exports."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "PO Line Items"
+    headers = [
+        "PO#", "PO Date", "Status", "Customer ID", "Customer Name", "Customer GSTIN",
+        "Project Code", "Project Name", "Site",
+        "Vendor Name", "Vendor GSTIN", "Vendor Address",
+        "MRF Refs", "Customer PO Ref", "Vendor Quote",
+        "Line #", "MAT UID", "VAR UID", "Description", "Make", "Model",
+        "HSN/SAC", "Unit", "Qty", "Rate", "Discount",
+        "Taxable Value", "GST %", "CGST", "SGST", "IGST", "Line Total",
+        "Freight (PO)", "Other Charges (PO)", "PO Grand Total",
+        "Delivery Schedule", "Payment Terms", "Warranty",
+        "Authorised Signatory", "Approved By (history)",
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    # Preload lookups
+    vend_map = {v["vendor_id"]: v for v in await db.vendors.find({}, {"_id": 0}).to_list(2000)}
+    proj_map = {p["project_id"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(500)}
+    cust_map = {}
+    for c in await db.customers.find({}, {"_id": 0}).to_list(500):
+        cust_map[c["customer_id"]] = c
+    # Preload MRF numbers
+    mrf_ids = set()
+    for p in pos_list:
+        for mid in p.get("mrf_refs") or []:
+            mrf_ids.add(mid)
+    mrf_num_map = {}
+    if mrf_ids:
+        for m in await db.mrfs.find({"mrf_id": {"$in": list(mrf_ids)}},
+                                     {"_id": 0, "mrf_id": 1, "mrf_number": 1}).to_list(2000):
+            mrf_num_map[m["mrf_id"]] = m.get("mrf_number", "")
+
+    for p in pos_list:
+        vend = vend_map.get(p.get("vendor_id")) or {}
+        proj = proj_map.get(p.get("project_id")) or {}
+        cust = cust_map.get(p.get("customer_id")) or {}
+        intra = _is_intra_state(vend.get("address") or VASU_STATE)
+        pdate = p["date"].strftime("%Y-%m-%d") if isinstance(p.get("date"), datetime) else str(p.get("date", ""))[:10]
+        mrf_refs = ", ".join(sorted({mrf_num_map.get(x, x) for x in (p.get("mrf_refs") or [])}))
+        cpo_ref = ""
+        if cust.get("customer_id"):
+            cpos = cust.get("pos") or []
+            active = sorted([x for x in cpos if x.get("active", True)],
+                            key=lambda x: x.get("po_date") or "", reverse=True)
+            if active:
+                cpo_ref = f"{active[0].get('po_number','')} dt {active[0].get('po_date','')}"
+        signers = "; ".join([
+            f"{h.get('user_name','')}({(h.get('user_role') or '').upper()})"
+            for h in (p.get("approval_history") or [])
+            if (h.get("action") or "").lower() == "approve"
+        ]) or ""
+        for idx, it in enumerate(p.get("items") or [], 1):
+            info = await _resolve_material_info(it)
+            qty = float(it.get("qty") or 0)
+            rate = float(it.get("rate") or 0)
+            disc = float(it.get("discount") or 0)
+            gst_pct = float(it.get("gst") or 0) or info.get("gst_pct") or 0
+            taxable = round(qty * rate - disc, 2)
+            cgst, sgst, igst = _split_gst_amt(taxable, gst_pct, intra)
+            line_total = round(taxable + cgst + sgst + igst, 2)
+            ws.append([
+                _safe_cell(p.get("po_number", "")), _safe_cell(pdate),
+                _safe_cell(p.get("status", "")),
+                _safe_cell(cust.get("customer_id") or p.get("customer_id") or ""),
+                _safe_cell(cust.get("name") or p.get("customer_name") or ""),
+                _safe_cell(cust.get("gstin") or ""),
+                _safe_cell(proj.get("code") or ""), _safe_cell(proj.get("name") or ""),
+                _safe_cell(p.get("delivery_site") or proj.get("site") or ""),
+                _safe_cell(vend.get("name") or ""),
+                _safe_cell(vend.get("gstin") or ""),
+                _safe_cell(vend.get("address") or ""),
+                _safe_cell(mrf_refs), _safe_cell(cpo_ref),
+                _safe_cell(p.get("vendor_quotation") or ""),
+                idx,
+                _safe_cell(info.get("material_uid") or ""),
+                _safe_cell(info.get("variant_uid") or ""),
+                _safe_cell(it.get("description") or ""),
+                _safe_cell(info.get("make") or ""), _safe_cell(info.get("model") or ""),
+                _safe_cell(info.get("hsn_code") or ""),
+                _safe_cell(it.get("unit") or ""),
+                qty, rate, disc,
+                taxable, gst_pct, cgst, sgst, igst, line_total,
+                float(p.get("freight") or 0),
+                float(p.get("other_charges") or 0),
+                float(p.get("total") or 0),
+                _safe_cell(p.get("delivery_schedule") or ""),
+                _safe_cell(p.get("payment_terms") or ""),
+                _safe_cell(p.get("warranty_terms") or ""),
+                _safe_cell(p.get("authorised_signatory") or ""),
+                _safe_cell(signers),
+            ])
+
+    for col_idx, h in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, min(len(h) + 2, 30))
+    return wb
+
+
+async def _po_tally_workbook(pos_list: List[dict]):
+    """Build a Tally-compatible Purchase-voucher workbook for one or many POs."""
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Purchase Voucher"
+    headers = [
+        "Voucher Date", "Voucher Type", "Voucher No", "Reference No", "Reference Date",
+        "Company GSTIN", "Company State", "Company State Code",
+        "Party Ledger", "Party GSTIN", "Party State",
+        "Customer ID", "Customer Name", "Customer GSTIN",
+        "Project Code",
+        "MAT UID", "VAR UID", "Item Name", "Make", "Model",
+        "HSN/SAC", "Unit", "Quantity", "Rate", "Discount",
+        "Taxable Value", "GST Rate %", "CGST", "SGST", "IGST",
+        "Line Total", "Narration",
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+
+    vend_map = {v["vendor_id"]: v for v in await db.vendors.find({}, {"_id": 0}).to_list(2000)}
+    proj_map = {p["project_id"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(500)}
+    cust_map = {c["customer_id"]: c for c in await db.customers.find({}, {"_id": 0}).to_list(500)}
+
+    for p in pos_list:
+        vend = vend_map.get(p.get("vendor_id")) or {}
+        proj = proj_map.get(p.get("project_id")) or {}
+        cust = cust_map.get(p.get("customer_id")) or {}
+        intra = _is_intra_state(vend.get("address") or VASU_STATE)
+        vdate = p["date"].strftime("%d-%m-%Y") if isinstance(p.get("date"), datetime) else str(p.get("date"))[:10]
+        for it in p.get("items", []):
+            info = await _resolve_material_info(it)
+            qty = float(it.get("qty") or 0)
+            rate = float(it.get("rate") or 0)
+            disc = float(it.get("discount") or 0)
+            gst_pct = float(it.get("gst") or 0) or info.get("gst_pct") or 0
+            taxable = round(qty * rate - disc, 2)
+            cgst, sgst, igst = _split_gst_amt(taxable, gst_pct, intra)
+            line_total = round(taxable + cgst + sgst + igst, 2)
+            narration = f"PO {p.get('po_number','')} · Project {proj.get('code','')} · Customer {cust.get('customer_id','')}"
+            ws.append([
+                _safe_cell(vdate), _safe_cell("Purchase"), _safe_cell(p.get("po_number", "")),
+                "", "",
+                _safe_cell(VASU_GSTIN), _safe_cell(VASU_STATE), _safe_cell(VASU_STATE_CODE),
+                _safe_cell(vend.get("name", "")),
+                _safe_cell(vend.get("gstin", "")),
+                _safe_cell((vend.get("address", "") or "")[:40]),
+                _safe_cell(cust.get("customer_id", "")),
+                _safe_cell(cust.get("name", "")),
+                _safe_cell(cust.get("gstin", "")),
+                _safe_cell(proj.get("code", "")),
+                _safe_cell(info.get("material_uid") or ""),
+                _safe_cell(info.get("variant_uid") or ""),
+                _safe_cell(it.get("description", "")),
+                _safe_cell(info.get("make") or ""), _safe_cell(info.get("model") or ""),
+                _safe_cell(info.get("hsn_code") or ""),
+                _safe_cell(it.get("unit", "")),
+                qty, rate, disc,
+                taxable, gst_pct, cgst, sgst, igst,
+                line_total, _safe_cell(narration),
+            ])
+
+    for col_idx, h in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, min(len(h) + 2, 28))
+    return wb
+
+
+async def _mrf_pdf_bytes(mrf: dict, project: dict, customer: Optional[dict]) -> bytes:
+    """Branded MRF PDF (Material Requisition Form)."""
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                            leftMargin=15*mm, rightMargin=15*mm)
+    mdate = mrf.get("date")
+    extra = f"Requested by: {mrf.get('requesting_person','')}  ·  System: {mrf.get('system_category','')}"
+    if mrf.get("required_by"):
+        extra += f"  ·  Required by: {mrf['required_by']}"
+    story = _pdf_story("MATERIAL REQUISITION FORM", mrf.get("mrf_number", ""),
+                       mdate, project, customer, extra_ref=extra)
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=8, leading=10)
+    smallb = ParagraphStyle('sb', parent=styles['Normal'], fontSize=8, leading=10,
+                            fontName="Helvetica-Bold")
+
+    header = ["#", "MAT / VAR", "Description", "Make / Model", "Unit",
+              "Qty Req.", "Qty Appr.", "Priority", "Status", "Purpose"]
+    data = [[Paragraph(h, smallb) for h in header]]
+    for idx, it in enumerate(mrf.get("items") or [], 1):
+        info = await _resolve_material_info(it)
+        mv = ((info.get("material_uid") or "-") + "\n" + (info.get("variant_uid") or "-"))
+        mkmd = ((info.get("make") or it.get("make") or "-") + "\n" +
+                (info.get("model") or it.get("model") or "-"))
+        data.append([
+            Paragraph(str(idx), small),
+            Paragraph(mv, small),
+            Paragraph((it.get("description") or "")[:70], small),
+            Paragraph(mkmd, small),
+            Paragraph(it.get("unit") or "", small),
+            Paragraph(f"{float(it.get('qty_requested') or 0):g}", small),
+            Paragraph(f"{float(it.get('qty_approved') or 0):g}", small),
+            Paragraph((it.get("priority") or "normal").upper(), small),
+            Paragraph((it.get("status") or "pending").upper(), small),
+            Paragraph((it.get("purpose") or "-")[:40], small),
+        ])
+    tbl = Table(data, colWidths=[16, 52, 130, 60, 26, 38, 38, 36, 44, 76], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), VASU_PRIMARY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor('#B7BEC9')),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor('#F7F8FC')]),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 8))
+    if mrf.get("remarks"):
+        story.append(Paragraph(f"<b>Remarks:</b> {mrf['remarks']}", small))
+    story.append(Paragraph(f"<b>Status:</b> {(mrf.get('status') or 'draft').upper()}", small))
+    story.append(Spacer(1, 6))
+    # Approval history
+    hist = mrf.get("approval_history") or []
+    if hist:
+        story.append(Paragraph("<b>Approval Trail</b>", smallb))
+        for h in hist:
+            ts = (h.get("timestamp") or "")[:16].replace("T", " ")
+            story.append(Paragraph(
+                f"• {h.get('user_name','')} ({(h.get('user_role') or '').upper()}) — "
+                f"{(h.get('action') or '').upper()} at {ts}"
+                + (f" — “{h['comment']}”" if h.get('comment') else ""), small))
+    doc.build(story, onFirstPage=_vasu_footer, onLaterPages=_vasu_footer)
+    buf.seek(0)
+    return buf.read()
+
+
 @api.get("/export/mrf")
 async def export_mrf(token: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "director", "admin", "pm"):
+    if u.role not in ("purchase", "director", "admin", "pm", "gm"):
         raise HTTPException(403, "Not allowed")
-    mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(2000)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "MRFs"
-    headers = ["MRF#", "Date", "Customer ID", "Customer Name", "Project", "Site", "Requester", "System", "Status", "Item", "Qty", "Approved", "Billing"]
+    headers = [
+        "MRF#", "Date", "Status", "Customer ID", "Customer Name",
+        "Project", "Site", "Requester", "System",
+        "Line#", "MAT UID", "VAR UID", "Description", "Make", "Model",
+        "Unit", "Qty Requested", "Qty Approved", "Qty Ordered", "Qty Received",
+        "Priority", "Item Status", "Billing Status", "Remarks",
+    ]
     ws.append(headers)
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="002FA7")
-    # Preload project code / customer name lookup
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+    proj_map = {p["project_id"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(500)}
     for m in mrfs:
-        for it in m["items"]:
-            ws.append([_safe_cell(m["mrf_number"]),
-                       m["date"].strftime("%Y-%m-%d") if isinstance(m["date"], datetime) else str(m["date"]),
-                       _safe_cell(m.get("customer_id") or ""),
-                       _safe_cell(m.get("customer_name") or ""),
-                       _safe_cell(m["project_id"]), _safe_cell(m["site"]),
-                       _safe_cell(m["requesting_person"]), _safe_cell(m["system_category"]),
-                       _safe_cell(m["status"]), _safe_cell(it["description"]),
-                       it["qty_requested"], it.get("qty_approved") or 0,
-                       _safe_cell(it.get("billing_status", ""))])
+        proj = proj_map.get(m.get("project_id")) or {}
+        for idx, it in enumerate(m.get("items") or [], 1):
+            info = await _resolve_material_info(it)
+            ws.append([
+                _safe_cell(m.get("mrf_number", "")),
+                m["date"].strftime("%Y-%m-%d") if isinstance(m.get("date"), datetime) else str(m.get("date", "")),
+                _safe_cell(m.get("status", "")),
+                _safe_cell(m.get("customer_id") or ""),
+                _safe_cell(m.get("customer_name") or ""),
+                _safe_cell(proj.get("code") or m.get("project_id", "")),
+                _safe_cell(m.get("site", "")),
+                _safe_cell(m.get("requesting_person", "")),
+                _safe_cell(m.get("system_category", "")),
+                idx,
+                _safe_cell(info.get("material_uid") or ""),
+                _safe_cell(info.get("variant_uid") or ""),
+                _safe_cell(it.get("description", "")),
+                _safe_cell(info.get("make") or ""),
+                _safe_cell(info.get("model") or ""),
+                _safe_cell(it.get("unit", "")),
+                float(it.get("qty_requested") or 0),
+                float(it.get("qty_approved") or 0),
+                float(it.get("qty_ordered") or 0),
+                float(it.get("qty_received") or 0),
+                _safe_cell((it.get("priority") or "normal")),
+                _safe_cell(it.get("status", "")),
+                _safe_cell(it.get("billing_status", "")),
+                _safe_cell(it.get("remarks", "")),
+            ])
+    for col_idx, h in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, min(len(h) + 2, 28))
+    await _log_export(u, "mrf", "bulk", "excel", f"count={len(mrfs)}")
     return _excel_response(wb, "mrf_export.xlsx")
+
 
 @api.get("/export/po")
 async def export_po(token: Optional[str] = None,
                     authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "director", "admin"):
+    if u.role not in ("purchase", "director", "admin", "gm"):
         raise HTTPException(403, "Not allowed")
-    pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(1000)
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = "POs"
-    ws.append(["PO#", "Date", "Customer ID", "Customer Name", "Vendor", "Project", "MRF Refs", "Total", "Status"])
-    for c in ws[1]:
-        c.font = Font(bold=True, color="FFFFFF")
-        c.fill = PatternFill("solid", fgColor="002FA7")
-    for p in pos:
-        ws.append([_safe_cell(p["po_number"]),
-                   p["date"].strftime("%Y-%m-%d") if isinstance(p["date"], datetime) else str(p["date"]),
-                   _safe_cell(p.get("customer_id") or ""),
-                   _safe_cell(p.get("customer_name") or ""),
-                   _safe_cell(p.get("vendor_id", "")), _safe_cell(p.get("project_id", "")),
-                   _safe_cell(", ".join(p.get("mrf_refs", []))),
-                   p.get("total", 0), _safe_cell(p.get("status", ""))])
+    pos = await db.pos.find({"deleted": False}, {"_id": 0}).sort("date", -1).to_list(2000)
+    wb = await _po_excel_workbook(pos, single=False)
+    await _log_export(u, "po", "bulk", "excel", f"count={len(pos)}")
     return _excel_response(wb, "po_export.xlsx")
 
-# ---------------------- Tally-compatible Excel Voucher Export ----------------------
+
 @api.get("/export/tally")
 async def export_tally(kind: str = "purchase", token: Optional[str] = None,
                        authorization: Optional[str] = Header(None)):
-    """Emit Tally-compatible Excel voucher rows.
-
-    - kind=purchase → one row per PO line item (Purchase voucher).
-    - kind=invoice  → one row per vendor invoice line item (Purchase voucher, matches invoice).
-    Column layout follows Tally's standard "Purchase" template so users can import via
-    XML import / Excel-to-Tally utilities.
-    """
+    """Bulk Tally purchase-voucher rows. kind=purchase | invoice."""
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "director", "admin"):
@@ -2656,11 +3213,20 @@ async def export_tally(kind: str = "purchase", token: Optional[str] = None,
     if kind not in ("purchase", "invoice"):
         raise HTTPException(400, "kind must be 'purchase' or 'invoice'")
 
+    if kind == "purchase":
+        pos = await db.pos.find({"deleted": False}, {"_id": 0}).sort("date", 1).to_list(2000)
+        wb = await _po_tally_workbook(pos)
+        fname = "tally_purchase_voucher.xlsx"
+        await _log_export(u, "tally", "bulk_purchase", "tally", f"count={len(pos)}")
+        return _excel_response(wb, fname)
+
+    # invoice-based purchase voucher (vendor invoices)
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Purchase Voucher"
     headers = [
         "Voucher Date", "Voucher Type", "Voucher No", "Reference No", "Reference Date",
+        "Company GSTIN", "Company State",
         "Party Ledger", "Party GSTIN", "Party State",
         "Customer ID", "Customer Name",
         "Item Name", "HSN/SAC", "Unit", "Quantity", "Rate", "Discount",
@@ -2671,69 +3237,193 @@ async def export_tally(kind: str = "purchase", token: Optional[str] = None,
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="002FA7")
-        c.alignment = Alignment(horizontal="center")
-
-    # Preload vendors
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
     vendors = {v["vendor_id"]: v for v in await db.vendors.find({}, {"_id": 0}).to_list(1000)}
+    invs = await db.invoices.find({}, {"_id": 0}).sort("created_at", 1).to_list(2000)
+    for inv in invs:
+        vend = vendors.get(inv.get("vendor_id")) or {}
+        vdate = str(inv.get("invoice_date", ""))[:10]
+        intra = _is_intra_state(vend.get("address") or VASU_STATE)
+        for it in inv.get("items", []):
+            info = await _resolve_material_info(it)
+            qty = float(it.get("qty") or 0)
+            rate = float(it.get("rate") or 0)
+            disc = float(it.get("discount") or 0)
+            gst_pct = float(it.get("gst") or 0) or info.get("gst_pct") or 0
+            taxable = round(qty * rate - disc, 2)
+            cgst, sgst, igst = _split_gst_amt(taxable, gst_pct, intra)
+            line_total = round(taxable + cgst + sgst + igst, 2)
+            ws.append([
+                _safe_cell(vdate), _safe_cell("Purchase"), _safe_cell(inv["invoice_number"]),
+                _safe_cell(inv.get("vendor_invoice_number", "")), _safe_cell(vdate),
+                _safe_cell(VASU_GSTIN), _safe_cell(VASU_STATE),
+                _safe_cell(vend.get("name", "")),
+                _safe_cell(vend.get("gstin", "")),
+                _safe_cell((vend.get("address", "") or "")[:40]),
+                _safe_cell(inv.get("customer_id", "")),
+                _safe_cell(inv.get("customer_name", "")),
+                _safe_cell(it.get("description", "")),
+                _safe_cell(info.get("hsn_code") or ""),
+                _safe_cell(it.get("unit", "")),
+                qty, rate, disc,
+                taxable, gst_pct, cgst, sgst, igst,
+                line_total,
+                _safe_cell(f"Vendor Inv {inv.get('vendor_invoice_number','')} · PO {inv.get('po_number','')}"),
+            ])
+    for col_idx, h in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, min(len(h) + 2, 28))
+    await _log_export(u, "tally", "bulk_invoice", "tally", f"count={len(invs)}")
+    return _excel_response(wb, "tally_invoice_voucher.xlsx")
 
-    def _split_gst(taxable: float, gst_pct: float, party_state: str) -> tuple:
-        """Approximate CGST/SGST vs IGST split (assumes intra-state if state == 'MH')."""
-        gst_amt = taxable * gst_pct / 100
-        # Simplified: if party state contains 'MH' or 'Maharashtra' → intra-state
-        intra = ("MH" in (party_state or "").upper()) or ("MAHARASHTRA" in (party_state or "").upper())
-        if intra:
-            return (round(gst_amt / 2, 2), round(gst_amt / 2, 2), 0.0)
-        return (0.0, 0.0, round(gst_amt, 2))
 
-    def _row(voucher_type: str, vdate: str, vno: str, ref_no: str, ref_date: str,
-             vend: dict, cust_id: str, cust_name: str, item: dict, narration: str):
-        gst_pct = float(item.get("gst") or 0)
-        qty = float(item.get("qty") or 0)
-        rate = float(item.get("rate") or 0)
-        disc = float(item.get("discount") or 0)
-        taxable = qty * rate - disc
-        cgst, sgst, igst = _split_gst(taxable, gst_pct, (vend or {}).get("address", ""))
-        line_total = round(taxable + cgst + sgst + igst, 2)
+# ---------------------- Unified single-record export dispatchers ----------------------
+_ALLOWED_PO_FORMATS = ("pdf", "excel", "tally")
+_ALLOWED_MRF_FORMATS = ("pdf", "excel")
+
+
+@api.get("/po/{po_id}/export")
+async def po_export_dispatch(po_id: str,
+                             format: str = "pdf",
+                             force: Optional[int] = 0,
+                             token: Optional[str] = None,
+                             authorization: Optional[str] = Header(None)):
+    """Unified download endpoint for a single PO. format = pdf | excel | tally."""
+    fmt = (format or "pdf").lower()
+    if fmt not in _ALLOWED_PO_FORMATS:
+        raise HTTPException(400, f"format must be one of {_ALLOWED_PO_FORMATS}")
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO not found")
+    await _check_po_access(u, po)
+
+    if fmt == "pdf":
+        # Delegate to enriched po_pdf which validates internally
+        return await po_pdf(po_id, token=token, force=force, authorization=authorization)
+
+    # Excel / Tally single-record path — validate first
+    vendor = await db.vendors.find_one({"vendor_id": po["vendor_id"]}, {"_id": 0}) or {}
+    project = await db.projects.find_one({"project_id": po["project_id"]}, {"_id": 0}) or {}
+    cid = po.get("customer_id") or project.get("customer_id")
+    cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
+    missing, warnings = _validate_po_for_export(po, vendor, cust, project, fmt)
+    if missing and not force:
+        raise _validation_error(missing, warnings, fmt)
+
+    if fmt == "excel":
+        wb = await _po_excel_workbook([po], single=True)
+        await _log_export(u, "po", po_id, "excel", po["po_number"],
+                          {"warnings": warnings, "forced": bool(force and missing)})
+        return _excel_response(wb, f"{po['po_number'].replace('/', '_')}_details.xlsx")
+
+    # tally
+    wb = await _po_tally_workbook([po])
+    await _log_export(u, "po", po_id, "tally", po["po_number"],
+                      {"warnings": warnings, "forced": bool(force and missing)})
+    return _excel_response(wb, f"{po['po_number'].replace('/', '_')}_tally.xlsx")
+
+
+@api.get("/mrf/{mrf_id}/pdf")
+async def mrf_pdf_route(mrf_id: str, token: Optional[str] = None,
+                        force: Optional[int] = 0,
+                        authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    mrf = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not mrf:
+        raise HTTPException(404, "MRF not found")
+    await _check_mrf_access(u, mrf)
+    project = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0}) or {}
+    cid = mrf.get("customer_id") or project.get("customer_id")
+    cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
+    missing, warnings = _validate_mrf_for_export(mrf, project, cust, "pdf")
+    if missing and not force:
+        raise _validation_error(missing, warnings, "pdf")
+    pdf_bytes = await _mrf_pdf_bytes(mrf, project, cust)
+    await _log_export(u, "mrf", mrf_id, "pdf", mrf.get("mrf_number", ""),
+                      {"warnings": warnings, "forced": bool(force and missing)})
+    return StreamingResponse(io.BytesIO(pdf_bytes), media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{mrf["mrf_number"].replace("/","_")}.pdf"'})
+
+
+@api.get("/mrf/{mrf_id}/export")
+async def mrf_export_dispatch(mrf_id: str,
+                              format: str = "pdf",
+                              force: Optional[int] = 0,
+                              token: Optional[str] = None,
+                              authorization: Optional[str] = Header(None)):
+    fmt = (format or "pdf").lower()
+    if fmt not in _ALLOWED_MRF_FORMATS:
+        raise HTTPException(400, f"format must be one of {_ALLOWED_MRF_FORMATS}")
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    mrf = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not mrf:
+        raise HTTPException(404, "MRF not found")
+    await _check_mrf_access(u, mrf)
+
+    if fmt == "pdf":
+        return await mrf_pdf_route(mrf_id, token=token, force=force, authorization=authorization)
+
+    # Excel single-MRF export
+    project = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0}) or {}
+    cid = mrf.get("customer_id") or project.get("customer_id")
+    cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
+    missing, warnings = _validate_mrf_for_export(mrf, project, cust, "excel")
+    if missing and not force:
+        raise _validation_error(missing, warnings, "excel")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "MRF Line Items"
+    headers = [
+        "MRF#", "Date", "Status", "Customer ID", "Customer Name",
+        "Project", "Site", "Requester", "System",
+        "Line#", "MAT UID", "VAR UID", "Description", "Make", "Model",
+        "Unit", "Qty Requested", "Qty Approved", "Qty Ordered", "Qty Received",
+        "Priority", "Item Status", "Billing Status", "Purpose", "Remarks",
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+    for idx, it in enumerate(mrf.get("items") or [], 1):
+        info = await _resolve_material_info(it)
         ws.append([
-            _safe_cell(vdate), _safe_cell(voucher_type), _safe_cell(vno),
-            _safe_cell(ref_no), _safe_cell(ref_date),
-            _safe_cell((vend or {}).get("name", "")),
-            _safe_cell((vend or {}).get("gstin", "")),
-            _safe_cell((vend or {}).get("address", "")[:20]),
-            _safe_cell(cust_id or ""), _safe_cell(cust_name or ""),
-            _safe_cell(item.get("description", "")),
-            _safe_cell(item.get("hsn_code", "") or ""),
-            _safe_cell(item.get("unit", "")),
-            qty, rate, disc,
-            round(taxable, 2), gst_pct, cgst, sgst, igst,
-            line_total, _safe_cell(narration),
+            _safe_cell(mrf.get("mrf_number", "")),
+            mrf["date"].strftime("%Y-%m-%d") if isinstance(mrf.get("date"), datetime) else str(mrf.get("date", "")),
+            _safe_cell(mrf.get("status", "")),
+            _safe_cell(mrf.get("customer_id") or ""),
+            _safe_cell(mrf.get("customer_name") or ""),
+            _safe_cell(project.get("code") or mrf.get("project_id", "")),
+            _safe_cell(mrf.get("site", "")),
+            _safe_cell(mrf.get("requesting_person", "")),
+            _safe_cell(mrf.get("system_category", "")),
+            idx,
+            _safe_cell(info.get("material_uid") or ""),
+            _safe_cell(info.get("variant_uid") or ""),
+            _safe_cell(it.get("description", "")),
+            _safe_cell(info.get("make") or ""),
+            _safe_cell(info.get("model") or ""),
+            _safe_cell(it.get("unit", "")),
+            float(it.get("qty_requested") or 0),
+            float(it.get("qty_approved") or 0),
+            float(it.get("qty_ordered") or 0),
+            float(it.get("qty_received") or 0),
+            _safe_cell((it.get("priority") or "normal")),
+            _safe_cell(it.get("status", "")),
+            _safe_cell(it.get("billing_status", "")),
+            _safe_cell(it.get("purpose", "")),
+            _safe_cell(it.get("remarks", "")),
         ])
+    for col_idx, h in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, min(len(h) + 2, 28))
+    await _log_export(u, "mrf", mrf_id, "excel", mrf.get("mrf_number", ""),
+                      {"warnings": warnings, "forced": bool(force and missing)})
+    return _excel_response(wb, f"{mrf['mrf_number'].replace('/', '_')}_details.xlsx")
 
-    if kind == "purchase":
-        pos = await db.pos.find({"deleted": False}, {"_id": 0}).sort("date", 1).to_list(2000)
-        for p in pos:
-            vend = vendors.get(p.get("vendor_id"))
-            vdate = p["date"].strftime("%d-%m-%Y") if isinstance(p.get("date"), datetime) else str(p.get("date"))[:10]
-            for it in p.get("items", []):
-                narration = f"PO {p['po_number']} · MRF {', '.join(p.get('mrf_refs') or [])[:60]}"
-                _row("Purchase", vdate, p["po_number"], "", "", vend,
-                     p.get("customer_id"), p.get("customer_name"), it, narration)
-    else:  # invoice
-        invs = await db.invoices.find({}, {"_id": 0}).sort("created_at", 1).to_list(2000)
-        for inv in invs:
-            vend = vendors.get(inv.get("vendor_id"))
-            vdate = str(inv.get("invoice_date", ""))[:10]
-            for it in inv.get("items", []):
-                narration = f"Vendor Inv {inv.get('vendor_invoice_number','')} · PO {inv.get('po_number','')}"
-                _row("Purchase", vdate, inv["invoice_number"],
-                     inv.get("vendor_invoice_number", ""), vdate,
-                     vend, inv.get("customer_id"), inv.get("customer_name"), it, narration)
-
-    # Auto-width columns
-    for col_idx, header in enumerate(headers, 1):
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, len(header) + 2)
-
-    return _excel_response(wb, f"tally_{kind}_voucher.xlsx")
 
 # ---------------------- GRN ----------------------
 @api.get("/po/{po_id}/grns")
