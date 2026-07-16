@@ -87,6 +87,7 @@ class Project(BaseModel):
     site_engineers: List[str] = []      # user_ids at project level
     project_managers: List[str] = []    # user_ids
     sites: List[Site] = []              # sub-sites under this project
+    system_categories: List[str] = []   # e.g. ["Fire Alarm", "CCTV"]
 
 class Vendor(BaseModel):
     vendor_id: str = Field(default_factory=lambda: gid("vnd"))
@@ -486,6 +487,79 @@ async def add_project(p: Project, authorization: Optional[str] = Header(None)):
     await db.projects.insert_one(p.model_dump())
     await audit("project", p.project_id, "create", u, p.model_dump())
     return p
+
+@api.put("/projects/{project_id}")
+async def update_project(project_id: str, body: dict,
+                         authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin")
+    updates: Dict[str, Any] = {}
+    for k in ("code", "name", "site", "client"):
+        if k in body:
+            updates[k] = str(body[k] or "").strip()
+    if "system_categories" in body and isinstance(body["system_categories"], list):
+        updates["system_categories"] = [str(x) for x in body["system_categories"]]
+    if "active" in body:
+        updates["active"] = bool(body["active"])
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    r = await db.projects.update_one({"project_id": project_id}, {"$set": updates})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Project not found")
+    await audit("project", project_id, "update", u, updates)
+    return await db.projects.find_one({"project_id": project_id}, {"_id": 0})
+
+@api.delete("/projects/{project_id}")
+async def deactivate_project(project_id: str,
+                             authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin")
+    r = await db.projects.update_one({"project_id": project_id},
+                                     {"$set": {"active": False}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Project not found")
+    await audit("project", project_id, "deactivate", u)
+    return {"ok": True}
+
+@api.put("/vendors/{vendor_id}")
+async def update_vendor(vendor_id: str, body: dict,
+                        authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["admin", "purchase"]:
+        raise HTTPException(403, "Not allowed")
+    updates: Dict[str, Any] = {}
+    for k in ("name", "address", "gstin", "contact", "email"):
+        if k in body:
+            updates[k] = str(body[k] or "").strip()
+    if "active" in body:
+        updates["active"] = bool(body["active"])
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    r = await db.vendors.update_one({"vendor_id": vendor_id}, {"$set": updates})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Vendor not found")
+    await audit("vendor", vendor_id, "update", u, updates)
+    return await db.vendors.find_one({"vendor_id": vendor_id}, {"_id": 0})
+
+@api.delete("/vendors/{vendor_id}")
+async def deactivate_vendor(vendor_id: str,
+                            authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["admin", "purchase"]:
+        raise HTTPException(403, "Not allowed")
+    r = await db.vendors.update_one({"vendor_id": vendor_id},
+                                    {"$set": {"active": False}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Vendor not found")
+    await audit("vendor", vendor_id, "deactivate", u)
+    return {"ok": True}
+
+@api.get("/systems")
+async def list_systems(authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    return SYSTEMS
 
 @api.get("/vendors")
 async def list_vendors(authorization: Optional[str] = Header(None)):

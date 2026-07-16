@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput } from "react-native";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -9,6 +9,7 @@ import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import { Btn, Card, H1, H2, Muted, Label, Pill } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import ProjectTeamModal from "@/src/components/ProjectTeamModal";
 
 const ROLES = [
   { key: "site_engineer", label: "Site Engineer" },
@@ -26,15 +27,9 @@ export default function More() {
   const [vendors, setVendors] = useState<any[]>([]);
   const [projects, setProjects] = useState<any[]>([]);
   const [roleEdit, setRoleEdit] = useState<any>(null);
-  const [teamEdit, setTeamEdit] = useState<any>(null);
-  const [teamSe, setTeamSe] = useState<string[]>([]);
-  const [teamPm, setTeamPm] = useState<string[]>([]);
-  const [savingTeam, setSavingTeam] = useState(false);
-  const [newSiteName, setNewSiteName] = useState("");
-  const [newSiteLoc, setNewSiteLoc] = useState("");
-  const [siteExpand, setSiteExpand] = useState<string | null>(null);
+  const [teamPid, setTeamPid] = useState<string | null>(null);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
   const load = async () => {
     try {
       const [u, v, p] = await Promise.all([
@@ -50,59 +45,6 @@ export default function More() {
     setRoleEdit(null); load();
     if (uid === user?.user_id) refresh();
   };
-
-  const openTeam = (p: any) => {
-    setTeamEdit(p);
-    setTeamSe(p.site_engineers || []);
-    setTeamPm(p.project_managers || []);
-  };
-  const toggleTeam = (list: string[], setList: (v: string[]) => void, uid: string) => {
-    setList(list.includes(uid) ? list.filter((x) => x !== uid) : [...list, uid]);
-  };
-  const saveTeam = async () => {
-    setSavingTeam(true);
-    try {
-      await api(`/projects/${teamEdit.project_id}/team`, {
-        method: "POST", body: { site_engineers: teamSe, project_managers: teamPm },
-      });
-      setTeamEdit(null); load();
-    } catch (_e) { /* noop */ }
-    setSavingTeam(false);
-  };
-
-  const refreshTeamProject = async (pid: string) => {
-    const all = await api<any[]>("/projects?all=1");
-    const updated = all.find((p) => p.project_id === pid);
-    setTeamEdit(updated);
-    setProjects(all);
-  };
-
-  const addSite = async () => {
-    if (!newSiteName.trim() || !teamEdit) return;
-    await api(`/projects/${teamEdit.project_id}/sites`, {
-      method: "POST",
-      body: { name: newSiteName.trim(), location: newSiteLoc.trim(), site_engineers: [] },
-    });
-    setNewSiteName(""); setNewSiteLoc("");
-    await refreshTeamProject(teamEdit.project_id);
-  };
-
-  const toggleSiteEngineer = async (site: any, uid: string) => {
-    const cur: string[] = site.site_engineers || [];
-    const next = cur.includes(uid) ? cur.filter((x) => x !== uid) : [...cur, uid];
-    await api(`/projects/${teamEdit.project_id}/sites/${site.site_id}`, {
-      method: "PUT", body: { site_engineers: next },
-    });
-    await refreshTeamProject(teamEdit.project_id);
-  };
-
-  const removeSite = async (site_id: string) => {
-    await api(`/projects/${teamEdit.project_id}/sites/${site_id}`, { method: "DELETE" });
-    await refreshTeamProject(teamEdit.project_id);
-  };
-
-  const engineers = users.filter((u) => u.role === "site_engineer" || u.role === "admin");
-  const pms = users.filter((u) => u.role === "project_manager" || u.role === "admin");
 
   const isAdmin = user?.role === "admin";
 
@@ -123,7 +65,7 @@ export default function More() {
       <Card style={{ marginTop: 12 }} testID="reports-card">
         <H2>Reports & Tools</H2>
         <View style={{ marginTop: 8, gap: 8 }}>
-          <Btn testID="masters-btn" title="Master Data (Projects, Vendors, Units, Brands, Materials)" variant="primary" onPress={() => router.push("/masters")} />
+          <Btn testID="masters-btn" title="Master Data (Projects, Vendors, Sites, Units, Brands, Materials)" variant="primary" onPress={() => router.push("/masters")} />
           <Btn testID="reports-btn" title="Reports Dashboard" variant="outline" onPress={() => router.push("/reports")} />
           <Btn testID="import-btn" title="Excel Bulk Import" variant="outline" onPress={() => router.push("/import")} />
           <Btn testID="audit-log-btn" title="System Audit Trail" variant="outline" onPress={() => router.push("/audit")} />
@@ -139,20 +81,13 @@ export default function More() {
             </TouchableOpacity>
           ) : null}
         </View>
-        {isAdmin ? <Muted>Tap a project to manage sub-sites and team. Tap + to create a new project.</Muted> : null}
+        {isAdmin ? <Muted>Tap Assign Team to manage engineers, PMs and sub-sites.</Muted> : null}
         <View style={{ marginTop: 8 }}>
           {projects.map((p) => {
             const seCount = (p.site_engineers || []).length;
             const pmCount = (p.project_managers || []).length;
             return (
-              <TouchableOpacity
-                key={p.project_id}
-                testID={`project-row-${p.code}`}
-                onPress={() => isAdmin && openTeam(p)}
-                disabled={!isAdmin}
-                activeOpacity={isAdmin ? 0.6 : 1}
-                style={styles.row}
-              >
+              <View key={p.project_id} style={styles.row} testID={`project-row-${p.code}`}>
                 <View style={{ flex: 1 }}>
                   <Text style={{ fontWeight: "700" }}>{p.code}</Text>
                   <Text style={{ color: theme.colors.textMuted, fontSize: 12 }}>{p.name} · {p.site}</Text>
@@ -160,8 +95,13 @@ export default function More() {
                     {seCount} engineer(s) · {pmCount} PM(s)
                   </Text>
                 </View>
-                {isAdmin ? <Ionicons name="people-outline" size={20} color={theme.colors.primary} /> : null}
-              </TouchableOpacity>
+                {isAdmin ? (
+                  <TouchableOpacity testID={`assign-${p.code}`} onPress={() => setTeamPid(p.project_id)} style={styles.assignBtn}>
+                    <Ionicons name="people-outline" size={14} color="#fff" />
+                    <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700", marginLeft: 4 }}>Assign</Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
             );
           })}
         </View>
@@ -220,106 +160,9 @@ export default function More() {
         </View>
       </Modal>
 
-      {/* Team edit modal */}
-      <Modal visible={!!teamEdit} transparent animationType="fade" onRequestClose={() => setTeamEdit(null)}>
-        <View style={styles.modalBg}>
-          <View style={[styles.modal, { marginBottom: insets.bottom + 16, maxHeight: "85%" }]}>
-            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <View style={{ flex: 1 }}>
-                <Text style={{ fontWeight: "800", fontSize: 16 }}>Project Team</Text>
-                <Text style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>
-                  {teamEdit?.code} — {teamEdit?.name}
-                </Text>
-              </View>
-              <TouchableOpacity testID="close-team-btn" onPress={() => setTeamEdit(null)}>
-                <Ionicons name="close" size={22} />
-              </TouchableOpacity>
-            </View>
-            <ScrollView style={{ marginTop: 6 }}>
-              <Text style={styles.teamHead}>Site Engineers</Text>
-              {engineers.map((eu) => (
-                <TouchableOpacity key={eu.user_id} testID={`toggle-se-${eu.email}`}
-                  onPress={() => toggleTeam(teamSe, setTeamSe, eu.user_id)} style={styles.teamRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontWeight: "600" }}>{eu.name}</Text>
-                    <Text style={{ fontSize: 11, color: theme.colors.textMuted }}>{eu.email} · {eu.role}</Text>
-                  </View>
-                  <View style={[styles.checkbox, { backgroundColor: teamSe.includes(eu.user_id) ? theme.colors.primary : "#fff", borderColor: teamSe.includes(eu.user_id) ? theme.colors.primary : theme.colors.borderStrong }]}>
-                    {teamSe.includes(eu.user_id) ? <Ionicons name="checkmark" size={14} color="#fff" /> : null}
-                  </View>
-                </TouchableOpacity>
-              ))}
-              <Text style={[styles.teamHead, { marginTop: 12 }]}>Project Managers</Text>
-              {pms.map((pu) => (
-                <TouchableOpacity key={pu.user_id} testID={`toggle-pm-${pu.email}`}
-                  onPress={() => toggleTeam(teamPm, setTeamPm, pu.user_id)} style={styles.teamRow}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={{ fontWeight: "600" }}>{pu.name}</Text>
-                    <Text style={{ fontSize: 11, color: theme.colors.textMuted }}>{pu.email} · {pu.role}</Text>
-                  </View>
-                  <View style={[styles.checkbox, { backgroundColor: teamPm.includes(pu.user_id) ? theme.colors.primary : "#fff", borderColor: teamPm.includes(pu.user_id) ? theme.colors.primary : theme.colors.borderStrong }]}>
-                    {teamPm.includes(pu.user_id) ? <Ionicons name="checkmark" size={14} color="#fff" /> : null}
-                  </View>
-                </TouchableOpacity>
-              ))}
-              <Text style={[styles.teamHead, { marginTop: 16 }]}>Sites</Text>
-              {(teamEdit?.sites || []).filter((s: any) => s.active !== false).map((s: any) => (
-                <View key={s.site_id} style={styles.siteBox} testID={`site-row-${s.site_id}`}>
-                  <View style={{ flexDirection: "row", alignItems: "center" }}>
-                    <TouchableOpacity onPress={() => setSiteExpand(siteExpand === s.site_id ? null : s.site_id)} style={{ flex: 1 }}>
-                      <Text style={{ fontWeight: "700" }}>{s.name}</Text>
-                      {s.location ? <Text style={{ fontSize: 11, color: theme.colors.textMuted }}>{s.location}</Text> : null}
-                      <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
-                        {(s.site_engineers || []).length} engineer(s)
-                      </Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity testID={`remove-site-${s.site_id}`} onPress={() => removeSite(s.site_id)} style={{ padding: 6 }}>
-                      <Ionicons name="trash-outline" size={16} color={theme.colors.danger} />
-                    </TouchableOpacity>
-                  </View>
-                  {siteExpand === s.site_id ? (
-                    <View style={{ marginTop: 8, paddingTop: 8, borderTopWidth: 1, borderTopColor: theme.colors.border }}>
-                      {engineers.map((eu) => (
-                        <TouchableOpacity key={eu.user_id} testID={`site-toggle-${s.site_id}-${eu.email}`}
-                          onPress={() => toggleSiteEngineer(s, eu.user_id)}
-                          style={styles.teamRow}>
-                          <View style={{ flex: 1 }}>
-                            <Text style={{ fontWeight: "600", fontSize: 13 }}>{eu.name}</Text>
-                            <Text style={{ fontSize: 10, color: theme.colors.textMuted }}>{eu.email}</Text>
-                          </View>
-                          <View style={[styles.checkbox, {
-                            backgroundColor: (s.site_engineers || []).includes(eu.user_id) ? theme.colors.primary : "#fff",
-                            borderColor: (s.site_engineers || []).includes(eu.user_id) ? theme.colors.primary : theme.colors.borderStrong,
-                          }]}>
-                            {(s.site_engineers || []).includes(eu.user_id) ? <Ionicons name="checkmark" size={14} color="#fff" /> : null}
-                          </View>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  ) : null}
-                </View>
-              ))}
-              {/* Add site */}
-              <View style={styles.addSite}>
-                <TextInput testID="new-site-name" value={newSiteName} onChangeText={setNewSiteName}
-                  placeholder="New site name (e.g. Tower A)" style={styles.inp} />
-                <TextInput testID="new-site-loc" value={newSiteLoc} onChangeText={setNewSiteLoc}
-                  placeholder="Location (optional)" style={[styles.inp, { marginTop: 6 }]} />
-                <TouchableOpacity testID="add-site-btn" onPress={addSite} style={styles.addBtn}>
-                  <Ionicons name="add-circle-outline" size={16} color="#fff" />
-                  <Text style={{ color: "#fff", fontWeight: "700", marginLeft: 4, fontSize: 12 }}>Add Site</Text>
-                </TouchableOpacity>
-              </View>
-            </ScrollView>
-            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
-              <View style={{ flex: 1 }}><Btn title="Close" variant="outline" onPress={() => setTeamEdit(null)} /></View>
-              <View style={{ flex: 1 }}>
-                <Btn testID="save-team-btn" title={savingTeam ? "Saving…" : "Save Team"} variant="action" onPress={saveTeam} disabled={savingTeam} />
-              </View>
-            </View>
-          </View>
-        </View>
-      </Modal>
+      {teamPid ? (
+        <ProjectTeamModal projectId={teamPid} onClose={() => setTeamPid(null)} onChanged={load} />
+      ) : null}
     </AppShell>
   );
 }
@@ -327,14 +170,8 @@ export default function More() {
 const styles = StyleSheet.create({
   row: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 8, borderTopWidth: 1, borderTopColor: theme.colors.border },
   rolePill: { flexDirection: "row", alignItems: "center", gap: 4, backgroundColor: theme.colors.surface2, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999 },
+  assignBtn: { flexDirection: "row", alignItems: "center", backgroundColor: theme.colors.primary, paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6 },
   modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
   modal: { backgroundColor: "#fff", borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 20 },
-  checkbox: { width: 22, height: 22, borderWidth: 2, borderRadius: 4, alignItems: "center", justifyContent: "center" },
-  teamHead: { fontSize: 11, fontWeight: "800", color: theme.colors.textMuted, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 4 },
-  teamRow: { flexDirection: "row", alignItems: "center", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: theme.colors.border },
   roleOpt: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", paddingVertical: 14, borderTopWidth: 1, borderTopColor: theme.colors.border },
-  siteBox: { padding: 10, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6, marginBottom: 8 },
-  addSite: { padding: 10, borderWidth: 1, borderColor: theme.colors.borderStrong, borderRadius: 6, marginTop: 6, borderStyle: "dashed" },
-  inp: { borderWidth: 1, borderColor: theme.colors.borderStrong, borderRadius: 6, minHeight: 40, paddingHorizontal: 10, backgroundColor: "#fff", fontSize: 13 },
-  addBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.primary, paddingVertical: 10, borderRadius: 6, marginTop: 8 },
 });
