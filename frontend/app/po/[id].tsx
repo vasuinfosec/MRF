@@ -199,6 +199,12 @@ export default function PODetail() {
           <View style={{ flex: 1 }}>
             <H1>{po.po_number}</H1>
             <Muted>{new Date(po.date).toLocaleDateString()}</Muted>
+            {po.customer_id ? (
+              <View style={{ marginTop: 6, backgroundColor: "rgba(0,47,167,0.06)", borderWidth: 1, borderColor: "rgba(0,47,167,0.2)", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, alignSelf: "flex-start" }} testID="po-customer">
+                <Text style={{ fontSize: 11, color: "#002FA7", fontWeight: "700", letterSpacing: 0.4 }}>{po.customer_id}</Text>
+                {po.customer_name ? <Text style={{ fontSize: 12, color: "#111" }}>{po.customer_name}</Text> : null}
+              </View>
+            ) : null}
           </View>
           <Pill status={po.status === "issued" ? "sent_to_purchase" : po.status} />
         </View>

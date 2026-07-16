@@ -84,6 +84,12 @@ export default function MRFDetail() {
           <View style={{ flex: 1 }}>
             <H1>{mrf.mrf_number}</H1>
             <Muted>{project ? `${project.code} — ${project.name}` : mrf.project_id}</Muted>
+            {mrf.customer_id ? (
+              <View style={{ marginTop: 6, backgroundColor: "rgba(0,47,167,0.06)", borderWidth: 1, borderColor: "rgba(0,47,167,0.2)", borderRadius: 6, paddingHorizontal: 8, paddingVertical: 4, alignSelf: "flex-start" }} testID="mrf-customer">
+                <Text style={{ fontSize: 11, color: "#002FA7", fontWeight: "700", letterSpacing: 0.4 }}>{mrf.customer_id}</Text>
+                {mrf.customer_name ? <Text style={{ fontSize: 12, color: "#111" }}>{mrf.customer_name}</Text> : null}
+              </View>
+            ) : null}
           </View>
           <Pill status={mrf.status} />
         </View>

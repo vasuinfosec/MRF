@@ -298,3 +298,99 @@ test_plan:
 agent_communication:
     -agent: "main"
     -message: "Phase 2b (Admin Master Module) implemented. Manual smoke test passed for: customer create/duplicate/invalid-ID/rename-with-cascade/deactivate, customer PO add, master reason enforcement, master_audit list, non-admin denial. Please run full RBAC & integrity regression: customer CRUD (admin/director allowed, others 403), CID rename cascade to projects/mrfs/pos/invoices, GST/Department/Model CRUD via masters endpoint, reason-required on customer/vendor/project/master PUT (400 without), master_audit list filtered by entity, duplicate customer name/ID rejected, project.customer_id validation (400 if unknown). Do NOT test PDF generation or Tally export (deferred to Phase 3)."
+
+## Phase 2c — Customer wiring + Branded PDFs + Tally export + 12-status MRF pipeline + line-item audit
+
+backend:
+  - task: "Customer ID snapshot on MRF/PO/Invoice + backfill"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "MRF/PO/Invoice models now carry customer_id + customer_name (denormalized snapshot from project at create time). Existing records backfilled. Excel exports (MRF, PO) now include Customer ID + Name columns."
+  - task: "Branded Vasu PDF templates (PO/GRN/Invoice)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New _pdf_story() common builder + _vasu_footer(). Every PDF now has: VASU INFOSEC brand banner, tagline, colored title band, meta table (doc no/date/refs), BILL TO block with Customer ID + name + GSTIN, PROJECT DETAILS block, vendor line, alternating row shading in items table, ₹-prefixed totals, footer with address & page number. Verified via analyze_file_tool — PDF confirms all elements present."
+  - task: "Tally-compatible Excel voucher export"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New GET /api/export/tally?kind=purchase|invoice. Emits Tally-standard Purchase Voucher rows: Date, Voucher No, Ref, Party Ledger + GSTIN + State, Customer ID + Name, Item, HSN, Qty, Rate, Discount, Taxable, GST%, CGST/SGST/IGST split (auto intra/inter-state based on vendor MH tag), Line Total, Narration. purchase kind uses POs; invoice kind uses vendor invoices."
+  - task: "MRF 12-status pipeline (extended MRF_STATUS + canonical alias map)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "MRF_STATUS array extended to 13 canonical statuses (draft, under_review, authorised, rejected, returned, purchase_pending, quotation_received, po_pending, po_issued, partially_received, fully_received, closed, cancelled). Legacy statuses (submitted/pm_review/approved/sent_to_purchase/etc.) preserved. canonical_mrf_status() helper for alias resolution. Existing writes still use legacy names — safe migration."
+  - task: "MRF line-item edit with mandatory reason + change log"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New PUT /api/mrf/{mrf_id}/items/{line_id}. Requires reason (400 without). Records per-field {old, new} into items[].change_log[] and mirrors to master_audit_logs. Locked from edit in terminal states (received/fully_received/closed/cancelled/rejected) — admin/director can override."
+
+frontend:
+  - task: "Customer ID badge on MRF/PO detail screens"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/mrf/[id].tsx, /app/frontend/app/po/[id].tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Blue Vasu-branded pill under document number showing Customer ID + Customer Name. Verified via screenshot on MRF/2026/0248 — RIL-DIG · Reliance Digital Ltd visible."
+  - task: "Reports screen Tally export buttons + status color mapping for new statuses"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/reports.tsx, /app/frontend/src/theme.ts"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Reports → Tally-Compatible Voucher Export section with two buttons: Purchase Voucher (from POs) and Purchase Voucher (from Vendor Invoices). theme.status extended with under_review/authorised/purchase_pending/po_pending/po_issued/fully_received/cancelled colors."
+
+test_plan:
+  current_focus:
+    - "Customer ID snapshot on MRF/PO/Invoice + backfill"
+    - "Tally-compatible Excel voucher export"
+    - "MRF line-item edit with mandatory reason + change log"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: "Phase 2c bundle implemented. Backend smoke test passed: new customer_id on MRF/PO responses populated; Tally export returns XLSX with correct columns and CGST/SGST split; branded PO PDF verified with Vasu banner + Customer ID + footer; MRF line-item PUT enforces reason and writes to master_audit. Please run regression: (1) Tally purchase export returns 200 with expected columns for POs; (2) Tally invoice export handles invoice line-items; (3) MRF line-item PUT: 400 without reason, 200 with reason and creates master_audit entry with entity='mrf.item'; (4) Locked-status editing blocked (fully_received, closed) except for admin/director; (5) Non-creator SE cannot edit lines they didn't create (403); (6) Existing tests still pass. Do NOT test PDF layout — was manually verified via analyze_file_tool."

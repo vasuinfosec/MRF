@@ -79,9 +79,26 @@ def _po_initial_status(total: float, gm_t: float, dir_t: float) -> str:
     return "issued"
 SYSTEMS = ["Fire Alarm", "Fire Fighting", "Gas Suppression", "Water Mist",
            "CCTV", "Access Control", "Structured Cabling", "Electrical", "Other"]
-MRF_STATUS = ["draft", "submitted", "pm_review", "approved", "rejected",
-              "returned", "sent_to_purchase", "partially_ordered", "fully_ordered",
-              "received", "closed"]
+MRF_STATUS = ["draft", "under_review", "authorised", "rejected", "returned",
+              "purchase_pending", "quotation_received", "po_pending",
+              "po_issued", "partially_received", "fully_received",
+              "closed", "cancelled",
+              # legacy aliases retained for backwards compat with existing data:
+              "submitted", "pm_review", "approved", "sent_to_purchase",
+              "partially_ordered", "fully_ordered", "received"]
+
+# Canonical status alias map (legacy -> new). New statuses map to themselves.
+MRF_STATUS_ALIAS = {
+    "submitted": "under_review",
+    "pm_review": "under_review",
+    "approved": "authorised",
+    "sent_to_purchase": "purchase_pending",
+    "partially_ordered": "po_issued",
+    "fully_ordered": "po_issued",
+    "received": "fully_received",
+}
+def canonical_mrf_status(s: str) -> str:
+    return MRF_STATUS_ALIAS.get(s or "", s or "")
 BILLING_STATUS = ["not_billed", "partially_billed", "fully_billed", "non_billable"]
 
 # ---------------------- Models ----------------------
@@ -219,6 +236,8 @@ class MRF(BaseModel):
     required_by: str
     requesting_person: str
     system_category: str
+    customer_id: Optional[str] = None          # snapshot from project at create time
+    customer_name: Optional[str] = None        # snapshot for display / exports
     items: List[MRFItem]
     attachments: List[str] = []
     remarks: str = ""
@@ -261,6 +280,8 @@ class PO(POCreate):
     mrf_refs: List[str] = []
     status: str = "issued"  # issued/received/closed
     total: float = 0
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
     created_by: str
     created_at: datetime = Field(default_factory=now_utc)
     deleted: bool = False
@@ -1076,6 +1097,15 @@ async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None
         if d.get("qty_approved") is None:
             d["qty_approved"] = i.qty_requested
         items.append(MRFItem(**d))
+    # Snapshot customer info from project (for reporting / exports / cross-collection joins)
+    proj = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
+    cust_id = (proj or {}).get("customer_id")
+    cust_name = ""
+    if cust_id:
+        c = await db.customers.find_one({"customer_id": cust_id}, {"_id": 0, "name": 1})
+        cust_name = (c or {}).get("name") or ""
+    if not cust_name:
+        cust_name = (proj or {}).get("client") or ""
     mrf = MRF(
         mrf_number=await next_mrf_number(),
         project_id=body.project_id,
@@ -1083,6 +1113,8 @@ async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None
         required_by=body.required_by,
         requesting_person=body.requesting_person,
         system_category=body.system_category,
+        customer_id=cust_id,
+        customer_name=cust_name,
         items=items,
         attachments=body.attachments,
         remarks=body.remarks or "",
@@ -1292,6 +1324,66 @@ async def delete_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
     await audit("mrf", mrf_id, "soft_delete", u)
     return {"ok": True}
 
+@api.put("/mrf/{mrf_id}/items/{line_id}")
+async def update_mrf_line(mrf_id: str, line_id: str, body: dict,
+                          authorization: Optional[str] = Header(None)):
+    """Edit an MRF line item WITH mandatory reason. Records every field-level change
+    (user, timestamp, reason, old value, new value) in mrfs.items[].change_log[]."""
+    u = await get_current_user(authorization)
+    reason = (body.pop("reason", "") or "").strip()
+    if not reason:
+        raise HTTPException(400, "A reason is required for line-item edits")
+
+    mrf = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not mrf:
+        raise HTTPException(404, "MRF not found")
+    await _check_mrf_access(u, mrf)
+    # Only creator OR pm/gm/director/admin can edit lines
+    if u.role not in ("pm", "gm", "director", "admin") and mrf.get("created_by") != u.user_id:
+        raise HTTPException(403, "Not allowed to edit this MRF")
+    # Lock certain states from edits (except admin/director override)
+    locked = {"received", "fully_received", "closed", "cancelled", "rejected"}
+    if canonical_mrf_status(mrf.get("status")) in locked and u.role not in ("admin", "director"):
+        raise HTTPException(400, f"MRF is in status '{mrf.get('status')}' — line edits are locked")
+
+    items = mrf.get("items", [])
+    target = next((it for it in items if it.get("item_line_id") == line_id), None)
+    if not target:
+        raise HTTPException(404, "Line item not found")
+
+    changed: Dict[str, Any] = {}
+    editable_fields = ["description", "specification", "part_number", "make", "model",
+                       "unit", "qty_requested", "qty_approved", "priority", "remarks",
+                       "billing_status", "status"]
+    for k in editable_fields:
+        if k in body:
+            new_v = body[k]
+            if k in ("qty_requested", "qty_approved"):
+                try: new_v = float(new_v) if new_v is not None else new_v
+                except Exception: raise HTTPException(400, f"{k} must be numeric")
+            old_v = target.get(k)
+            if new_v != old_v:
+                changed[k] = {"old": old_v, "new": new_v}
+                target[k] = new_v
+    if not changed:
+        raise HTTPException(400, "No changes provided")
+
+    log_entry = {
+        "log_id": gid("chl"),
+        "user_id": u.user_id, "user_name": u.name, "user_role": u.role,
+        "timestamp": now_utc().isoformat(),
+        "reason": reason, "changes": changed,
+    }
+    target.setdefault("change_log", []).append(log_entry)
+    await db.mrfs.update_one({"mrf_id": mrf_id},
+                             {"$set": {"items": items, "updated_at": now_utc()}})
+    # Mirror into master_audit for global searchability
+    await master_audit("mrf.item", f"{mrf['mrf_number']}#{line_id}", "update", u,
+                       reason,
+                       {k: v["old"] for k, v in changed.items()},
+                       {k: v["new"] for k, v in changed.items()})
+    return {"ok": True, "changes": changed, "log": log_entry}
+
 # ---------------------- Purchase Orders ----------------------
 @api.post("/po")
 async def create_po(body: POCreate, authorization: Optional[str] = Header(None)):
@@ -1323,6 +1415,16 @@ async def create_po(body: POCreate, authorization: Optional[str] = Header(None))
     thresholds = await get_thresholds()
     initial_status = _po_initial_status(total, thresholds["gm"], thresholds["director"])
 
+    # Snapshot customer from project
+    proj = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
+    cust_id = (proj or {}).get("customer_id")
+    cust_name = ""
+    if cust_id:
+        c = await db.customers.find_one({"customer_id": cust_id}, {"_id": 0, "name": 1})
+        cust_name = (c or {}).get("name") or ""
+    if not cust_name:
+        cust_name = (proj or {}).get("client") or ""
+
     po = PO(
         po_number=await next_po_number(),
         vendor_id=body.vendor_id,
@@ -1338,6 +1440,8 @@ async def create_po(body: POCreate, authorization: Optional[str] = Header(None))
         vendor_quotation=body.vendor_quotation,
         mrf_refs=list(mrf_refs),
         total=round(total, 2),
+        customer_id=cust_id,
+        customer_name=cust_name,
         created_by=u.user_id,
     )
     po_doc = po.model_dump()
@@ -1821,6 +1925,117 @@ async def update_settings_thresholds(body: dict, authorization: Optional[str] = 
     return {"gm": gm, "director": dr}
 
 # ---------------------- PDF ----------------------
+# ---------------------- Branded PDF helpers ----------------------
+VASU_PRIMARY = colors.HexColor('#002FA7')  # Vasu brand blue
+VASU_ACCENT = colors.HexColor('#F7941D')   # Vasu orange
+VASU_TAGLINE = "Enterprise Fire Safety · CCTV · Access Control · Structured Cabling"
+VASU_ADDR = "Vasu Infosec Pvt Ltd  ·  Pune · Delhi  ·  vasuinfosec.com"
+VASU_GSTIN = ""  # populated at runtime from env if provided
+
+def _vasu_footer(canvas, doc):
+    """Draws Vasu footer + page number on every page."""
+    canvas.saveState()
+    w, _ = A4
+    canvas.setStrokeColor(VASU_PRIMARY)
+    canvas.setLineWidth(0.6)
+    canvas.line(15*mm, 12*mm, w - 15*mm, 12*mm)
+    canvas.setFont("Helvetica", 7)
+    canvas.setFillColor(colors.grey)
+    canvas.drawString(15*mm, 7*mm, VASU_ADDR)
+    canvas.drawRightString(w - 15*mm, 7*mm, f"Page {doc.page}")
+    canvas.restoreState()
+
+def _pdf_story(doc_type: str, doc_number: str, doc_date, project: dict,
+               customer: Optional[dict], vendor: Optional[dict] = None,
+               extra_ref: str = "") -> List:
+    """Build a common branded header (VASU banner + Customer + Vendor + Project block)."""
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('t', parent=styles['Title'], fontSize=20,
+                                 textColor=VASU_PRIMARY, alignment=0, spaceAfter=2)
+    tag_style = ParagraphStyle('tg', parent=styles['Normal'], fontSize=8,
+                               textColor=colors.HexColor('#555'), spaceAfter=8)
+    doc_title_style = ParagraphStyle('dt', parent=styles['Heading1'], fontSize=14,
+                                     alignment=1, textColor=colors.HexColor('#111'),
+                                     backColor=colors.HexColor('#EEF2FF'),
+                                     borderPadding=6, spaceAfter=8)
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9, leading=12)
+
+    story: List = []
+    # Header row: brand banner
+    story.append(Paragraph("VASU INFOSEC", title_style))
+    story.append(Paragraph(VASU_TAGLINE, tag_style))
+
+    # Document title band
+    story.append(Paragraph(doc_type, doc_title_style))
+
+    # Meta table: doc no + date + refs
+    date_str = doc_date.strftime('%d-%b-%Y') if hasattr(doc_date, 'strftime') else str(doc_date)[:10]
+    meta_rows = [
+        [Paragraph(f"<b>{doc_type.split()[-1]} No.</b>", small), Paragraph(doc_number, small),
+         Paragraph("<b>Date</b>", small), Paragraph(date_str, small)],
+    ]
+    if extra_ref:
+        meta_rows.append([Paragraph("<b>References</b>", small),
+                          Paragraph(extra_ref, small), "", ""])
+    meta_tbl = Table(meta_rows, colWidths=[70, 200, 40, 100])
+    meta_tbl.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor('#D5D8DE')),
+        ("BACKGROUND", (0, 0), (0, -1), colors.HexColor('#F2F5FF')),
+        ("BACKGROUND", (2, 0), (2, -1), colors.HexColor('#F2F5FF')),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+    ]))
+    story.append(meta_tbl)
+    story.append(Spacer(1, 6))
+
+    # Customer + Project + Vendor combined info block
+    cust_lines = []
+    if customer:
+        cust_lines.append(f"<b>Customer ID:</b> {customer.get('customer_id','')}")
+        cust_lines.append(f"<b>Customer:</b> {customer.get('name','')}")
+        if customer.get('gstin'): cust_lines.append(f"GSTIN: {customer['gstin']}")
+        if customer.get('billing_address'): cust_lines.append(customer['billing_address'])
+        if customer.get('contact_person'): cust_lines.append(f"Contact: {customer['contact_person']} · {customer.get('phone','')}")
+    else:
+        cust_lines.append(f"<b>Client:</b> {project.get('client','—')}")
+
+    proj_lines = [
+        f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})",
+        f"<b>Site:</b> {project.get('site','')}",
+    ]
+    if project.get('system_categories'):
+        proj_lines.append(f"Systems: {', '.join(project['system_categories'])}")
+
+    party_rows = [[Paragraph("BILL TO / CUSTOMER", small),
+                   Paragraph("PROJECT DETAILS", small)],
+                  [Paragraph("<br/>".join(cust_lines), small),
+                   Paragraph("<br/>".join(proj_lines), small)]]
+    party = Table(party_rows, colWidths=[210, 210])
+    party.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), VASU_PRIMARY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, 0), 9),
+        ("BOX", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("INNERGRID", (0, 0), (-1, -1), 0.3, colors.HexColor('#D5D8DE')),
+        ("VALIGN", (0, 1), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 6),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 1), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 1), (-1, -1), 5),
+    ]))
+    story.append(party)
+    story.append(Spacer(1, 8))
+
+    if vendor:
+        vend_txt = (f"<b>Vendor:</b> {vendor.get('name','')} "
+                    f"({vendor.get('gstin','')})<br/>"
+                    f"{vendor.get('address','')} · Contact: {vendor.get('contact','')}")
+        story.append(Paragraph(vend_txt, small))
+        story.append(Spacer(1, 6))
+
+    return story
+
 @api.get("/po/{po_id}/pdf")
 async def po_pdf(po_id: str, token: Optional[str] = None,
                  authorization: Optional[str] = Header(None)):
@@ -1838,24 +2053,17 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
         m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "mrf_number": 1})
         if m: po_mrf_nums.append(m["mrf_number"])
 
+    # Customer snapshot (fall back to project's customer)
+    cid = po.get("customer_id") or project.get("customer_id")
+    cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
+
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
                             leftMargin=15*mm, rightMargin=15*mm)
+    story = _pdf_story("PURCHASE ORDER", po["po_number"], po["date"], project, cust, vendor, extra_ref=", ".join(po_mrf_nums))
+
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('t', parent=styles['Title'], fontSize=18, textColor=colors.HexColor('#002FA7'))
     small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
-    story = []
-    story.append(Paragraph("VASU INFOSEC", title_style))
-    story.append(Paragraph("PURCHASE ORDER", styles['Heading2']))
-    story.append(Spacer(1, 6))
-    story.append(Paragraph(f"<b>PO Number:</b> {po['po_number']}   <b>Date:</b> {po['date'].strftime('%d-%b-%Y')}", small))
-    story.append(Paragraph(f"<b>MRF Ref:</b> {', '.join(po_mrf_nums)}", small))
-    story.append(Spacer(1, 6))
-    vendor_info = f"<b>Vendor:</b> {vendor.get('name','')}<br/>{vendor.get('address','')}<br/>GSTIN: {vendor.get('gstin','')}<br/>Contact: {vendor.get('contact','')}"
-    story.append(Paragraph(vendor_info, small))
-    story.append(Spacer(1, 4))
-    story.append(Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})<br/><b>Delivery:</b> {po['delivery_site']}", small))
-    story.append(Spacer(1, 8))
 
     data = [["#", "Description", "Unit", "Qty", "Rate", "Disc", "GST%", "Total"]]
     for idx, it in enumerate(po["items"], 1):
@@ -1872,17 +2080,18 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
         ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor('#F7F8FC')]),
     ]))
     story.append(tbl)
     story.append(Spacer(1, 8))
-    story.append(Paragraph(f"<b>Freight:</b> {po.get('freight',0)}  <b>Other:</b> {po.get('other_charges',0)}  <b>Grand Total:</b> {po.get('total',0)}", small))
+    story.append(Paragraph(f"<b>Freight:</b> ₹{po.get('freight',0):,.2f}  <b>Other:</b> ₹{po.get('other_charges',0):,.2f}  <b>Grand Total:</b> ₹{po.get('total',0):,.2f}", small))
     story.append(Spacer(1, 6))
     story.append(Paragraph(f"<b>Delivery:</b> {po.get('delivery_schedule','')}", small))
     story.append(Paragraph(f"<b>Payment:</b> {po.get('payment_terms','')}", small))
     story.append(Paragraph(f"<b>Warranty:</b> {po.get('warranty_terms','')}", small))
     story.append(Spacer(1, 20))
-    story.append(Paragraph(f"Authorised Signatory: {po.get('authorised_signatory','')}", small))
-    doc.build(story)
+    story.append(Paragraph(f"<b>Authorised Signatory:</b> {po.get('authorised_signatory','')}", small))
+    doc.build(story, onFirstPage=_vasu_footer, onLaterPages=_vasu_footer)
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{po["po_number"].replace("/","_")}.pdf"'})
@@ -1915,15 +2124,18 @@ async def export_mrf(token: Optional[str] = None,
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "MRFs"
-    headers = ["MRF#", "Date", "Project", "Site", "Requester", "System", "Status", "Item", "Qty", "Approved", "Billing"]
+    headers = ["MRF#", "Date", "Customer ID", "Customer Name", "Project", "Site", "Requester", "System", "Status", "Item", "Qty", "Approved", "Billing"]
     ws.append(headers)
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="002FA7")
+    # Preload project code / customer name lookup
     for m in mrfs:
         for it in m["items"]:
             ws.append([_safe_cell(m["mrf_number"]),
                        m["date"].strftime("%Y-%m-%d") if isinstance(m["date"], datetime) else str(m["date"]),
+                       _safe_cell(m.get("customer_id") or ""),
+                       _safe_cell(m.get("customer_name") or ""),
                        _safe_cell(m["project_id"]), _safe_cell(m["site"]),
                        _safe_cell(m["requesting_person"]), _safe_cell(m["system_category"]),
                        _safe_cell(m["status"]), _safe_cell(it["description"]),
@@ -1942,17 +2154,117 @@ async def export_po(token: Optional[str] = None,
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "POs"
-    ws.append(["PO#", "Date", "Vendor", "Project", "MRF Refs", "Total", "Status"])
+    ws.append(["PO#", "Date", "Customer ID", "Customer Name", "Vendor", "Project", "MRF Refs", "Total", "Status"])
     for c in ws[1]:
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="002FA7")
     for p in pos:
         ws.append([_safe_cell(p["po_number"]),
                    p["date"].strftime("%Y-%m-%d") if isinstance(p["date"], datetime) else str(p["date"]),
+                   _safe_cell(p.get("customer_id") or ""),
+                   _safe_cell(p.get("customer_name") or ""),
                    _safe_cell(p.get("vendor_id", "")), _safe_cell(p.get("project_id", "")),
                    _safe_cell(", ".join(p.get("mrf_refs", []))),
                    p.get("total", 0), _safe_cell(p.get("status", ""))])
     return _excel_response(wb, "po_export.xlsx")
+
+# ---------------------- Tally-compatible Excel Voucher Export ----------------------
+@api.get("/export/tally")
+async def export_tally(kind: str = "purchase", token: Optional[str] = None,
+                       authorization: Optional[str] = Header(None)):
+    """Emit Tally-compatible Excel voucher rows.
+
+    - kind=purchase → one row per PO line item (Purchase voucher).
+    - kind=invoice  → one row per vendor invoice line item (Purchase voucher, matches invoice).
+    Column layout follows Tally's standard "Purchase" template so users can import via
+    XML import / Excel-to-Tally utilities.
+    """
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    if u.role not in ("purchase", "director", "admin"):
+        raise HTTPException(403, "Only purchase/director/admin")
+    kind = (kind or "purchase").lower()
+    if kind not in ("purchase", "invoice"):
+        raise HTTPException(400, "kind must be 'purchase' or 'invoice'")
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Purchase Voucher"
+    headers = [
+        "Voucher Date", "Voucher Type", "Voucher No", "Reference No", "Reference Date",
+        "Party Ledger", "Party GSTIN", "Party State",
+        "Customer ID", "Customer Name",
+        "Item Name", "HSN/SAC", "Unit", "Quantity", "Rate", "Discount",
+        "Taxable Value", "GST Rate %", "CGST", "SGST", "IGST",
+        "Line Total", "Narration",
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+        c.alignment = Alignment(horizontal="center")
+
+    # Preload vendors
+    vendors = {v["vendor_id"]: v for v in await db.vendors.find({}, {"_id": 0}).to_list(1000)}
+
+    def _split_gst(taxable: float, gst_pct: float, party_state: str) -> tuple:
+        """Approximate CGST/SGST vs IGST split (assumes intra-state if state == 'MH')."""
+        gst_amt = taxable * gst_pct / 100
+        # Simplified: if party state contains 'MH' or 'Maharashtra' → intra-state
+        intra = ("MH" in (party_state or "").upper()) or ("MAHARASHTRA" in (party_state or "").upper())
+        if intra:
+            return (round(gst_amt / 2, 2), round(gst_amt / 2, 2), 0.0)
+        return (0.0, 0.0, round(gst_amt, 2))
+
+    def _row(voucher_type: str, vdate: str, vno: str, ref_no: str, ref_date: str,
+             vend: dict, cust_id: str, cust_name: str, item: dict, narration: str):
+        gst_pct = float(item.get("gst") or 0)
+        qty = float(item.get("qty") or 0)
+        rate = float(item.get("rate") or 0)
+        disc = float(item.get("discount") or 0)
+        taxable = qty * rate - disc
+        cgst, sgst, igst = _split_gst(taxable, gst_pct, (vend or {}).get("address", ""))
+        line_total = round(taxable + cgst + sgst + igst, 2)
+        ws.append([
+            _safe_cell(vdate), _safe_cell(voucher_type), _safe_cell(vno),
+            _safe_cell(ref_no), _safe_cell(ref_date),
+            _safe_cell((vend or {}).get("name", "")),
+            _safe_cell((vend or {}).get("gstin", "")),
+            _safe_cell((vend or {}).get("address", "")[:20]),
+            _safe_cell(cust_id or ""), _safe_cell(cust_name or ""),
+            _safe_cell(item.get("description", "")),
+            _safe_cell(item.get("hsn_code", "") or ""),
+            _safe_cell(item.get("unit", "")),
+            qty, rate, disc,
+            round(taxable, 2), gst_pct, cgst, sgst, igst,
+            line_total, _safe_cell(narration),
+        ])
+
+    if kind == "purchase":
+        pos = await db.pos.find({"deleted": False}, {"_id": 0}).sort("date", 1).to_list(2000)
+        for p in pos:
+            vend = vendors.get(p.get("vendor_id"))
+            vdate = p["date"].strftime("%d-%m-%Y") if isinstance(p.get("date"), datetime) else str(p.get("date"))[:10]
+            for it in p.get("items", []):
+                narration = f"PO {p['po_number']} · MRF {', '.join(p.get('mrf_refs') or [])[:60]}"
+                _row("Purchase", vdate, p["po_number"], "", "", vend,
+                     p.get("customer_id"), p.get("customer_name"), it, narration)
+    else:  # invoice
+        invs = await db.invoices.find({}, {"_id": 0}).sort("created_at", 1).to_list(2000)
+        for inv in invs:
+            vend = vendors.get(inv.get("vendor_id"))
+            vdate = str(inv.get("invoice_date", ""))[:10]
+            for it in inv.get("items", []):
+                narration = f"Vendor Inv {inv.get('vendor_invoice_number','')} · PO {inv.get('po_number','')}"
+                _row("Purchase", vdate, inv["invoice_number"],
+                     inv.get("vendor_invoice_number", ""), vdate,
+                     vend, inv.get("customer_id"), inv.get("customer_name"), it, narration)
+
+    # Auto-width columns
+    for col_idx, header in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, len(header) + 2)
+
+    return _excel_response(wb, f"tally_{kind}_voucher.xlsx")
 
 # ---------------------- GRN ----------------------
 @api.get("/po/{po_id}/grns")
@@ -1996,31 +2308,30 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
                             leftMargin=15*mm, rightMargin=15*mm)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('t', parent=styles['Title'], fontSize=18, textColor=colors.HexColor('#002FA7'))
     small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
-    story = [
-        Paragraph("VASU INFOSEC", title_style),
-        Paragraph("GOODS RECEIVED NOTE", styles['Heading2']),
-        Spacer(1, 6),
-        Paragraph(f"<b>GRN Number:</b> {grn['grn_number']}   <b>Date:</b> "
-                  f"{grn['date'].strftime('%d-%b-%Y %H:%M') if isinstance(grn['date'], datetime) else str(grn['date'])}", small),
-        Paragraph(f"<b>PO Ref:</b> {grn.get('po_number','')}    <b>MRF Ref:</b> {', '.join(grn_mrf_nums)}", small),
-        Spacer(1, 6),
-        Paragraph(f"<b>Vendor:</b> {vendor.get('name','')} | GSTIN: {vendor.get('gstin','')}", small),
-        Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})", small),
-        Paragraph(f"<b>Received by:</b> {grn.get('received_by_name','')}", small),
-        Spacer(1, 8),
-    ]
+
+    # Resolve customer from PO snapshot / project
+    cid = (po or {}).get("customer_id") or project.get("customer_id")
+    cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
+
+    story = _pdf_story("GOODS RECEIVED NOTE", grn["grn_number"],
+                       grn.get("date"), project, cust, vendor,
+                       extra_ref=f"PO {grn.get('po_number','')}  ·  MRF {', '.join(grn_mrf_nums)}")
+
+    story.append(Paragraph(f"<b>Received by:</b> {grn.get('received_by_name','')}", small))
+    story.append(Spacer(1, 6))
+
     data = [["#", "Description", "Unit", "Qty Received"]]
     for idx, it in enumerate(grn.get("items", []), 1):
         data.append([str(idx), (it.get("description") or "")[:60], it.get("unit", ""), str(it.get("qty", ""))])
     tbl = Table(data, colWidths=[25, 320, 60, 80])
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor('#002FA7')),
+        ("BACKGROUND", (0, 0), (-1, 0), VASU_PRIMARY),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
         ("FONTSIZE", (0, 0), (-1, -1), 9),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor('#F7F8FC')]),
     ]))
     story.append(tbl)
     if grn.get("remarks"):
@@ -2031,7 +2342,7 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
         Paragraph("_______________________________&nbsp;&nbsp;&nbsp;&nbsp;_______________________________", small),
         Paragraph("Received By&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Vendor Signature", small),
     ]
-    doc.build(story)
+    doc.build(story, onFirstPage=_vasu_footer, onLaterPages=_vasu_footer)
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{grn["grn_number"].replace("/","_")}.pdf"'})
@@ -2256,6 +2567,8 @@ async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Hea
         "po_number": po["po_number"],
         "vendor_id": po["vendor_id"],
         "project_id": po["project_id"],
+        "customer_id": po.get("customer_id"),
+        "customer_name": po.get("customer_name"),
         "mrf_refs": po.get("mrf_refs", []),
         "items": items,
         "subtotal": round(subtotal, 2),
@@ -2325,20 +2638,15 @@ async def invoice_pdf(inv_id: str, token: Optional[str] = None,
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
                             leftMargin=15*mm, rightMargin=15*mm)
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('t', parent=styles['Title'], fontSize=18, textColor=colors.HexColor('#002FA7'))
     small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
-    story = [
-        Paragraph("VASU INFOSEC", title_style),
-        Paragraph("VENDOR INVOICE", styles['Heading2']),
-        Spacer(1, 6),
-        Paragraph(f"<b>Invoice #:</b> {inv['invoice_number']}    <b>Date:</b> {inv['invoice_date']}", small),
-        Paragraph(f"<b>Vendor Ref:</b> {inv.get('vendor_invoice_number') or '—'}    <b>PO:</b> {inv['po_number']}", small),
-        Paragraph(f"<b>MRF Refs:</b> {', '.join(mrf_nums) or '—'}", small),
-        Spacer(1, 8),
-        Paragraph(f"<b>Vendor:</b> {vendor.get('name','')} | GSTIN: {vendor.get('gstin','')} | {vendor.get('address','')}", small),
-        Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})", small),
-        Spacer(1, 8),
-    ]
+
+    cid = inv.get("customer_id") or project.get("customer_id")
+    cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
+
+    story = _pdf_story("VENDOR INVOICE", inv["invoice_number"],
+                       inv["invoice_date"], project, cust, vendor,
+                       extra_ref=f"Vendor Ref: {inv.get('vendor_invoice_number') or '—'}  ·  PO: {inv['po_number']}  ·  MRF: {', '.join(mrf_nums) or '—'}")
+
     data = [["#", "Description", "Unit", "Qty", "Rate", "Disc", "GST%", "Total"]]
     for idx, it in enumerate(inv["items"], 1):
         data.append([str(idx), (it["description"] or "")[:40], it.get("unit", ""),
@@ -2346,18 +2654,19 @@ async def invoice_pdf(inv_id: str, token: Optional[str] = None,
                      f"{it.get('gst', 0)}", f"{it.get('line_total', 0):.2f}"])
     tbl = Table(data, colWidths=[20, 180, 40, 40, 50, 40, 40, 60])
     tbl.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor('#002FA7')),
+        ("BACKGROUND", (0, 0), (-1, 0), VASU_PRIMARY),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
         ("FONTSIZE", (0, 0), (-1, -1), 8),
         ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor('#F7F8FC')]),
     ]))
     story.append(tbl)
     story.append(Spacer(1, 8))
     story.append(Paragraph(
-        f"<b>Subtotal:</b> {inv['subtotal']}  <b>GST:</b> {inv['gst_total']}  "
-        f"<b>Freight:</b> {inv.get('freight', 0)}  <b>Other:</b> {inv.get('other_charges', 0)}  "
-        f"<b>Grand Total:</b> {inv['total']}", small))
+        f"<b>Subtotal:</b> ₹{inv['subtotal']:,.2f}  <b>GST:</b> ₹{inv['gst_total']:,.2f}  "
+        f"<b>Freight:</b> ₹{inv.get('freight', 0):,.2f}  <b>Other:</b> ₹{inv.get('other_charges', 0):,.2f}  "
+        f"<b>Grand Total:</b> ₹{inv['total']:,.2f}", small))
     if inv.get("remarks"):
         story.append(Spacer(1, 6))
         story.append(Paragraph(f"<b>Remarks:</b> {inv['remarks']}", small))
@@ -2365,7 +2674,7 @@ async def invoice_pdf(inv_id: str, token: Optional[str] = None,
         Spacer(1, 30),
         Paragraph("Recorded by: " + inv.get("created_by_name", ""), small),
     ]
-    doc.build(story)
+    doc.build(story, onFirstPage=_vasu_footer, onLaterPages=_vasu_footer)
     buf.seek(0)
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{inv["invoice_number"].replace("/","_")}.pdf"'})

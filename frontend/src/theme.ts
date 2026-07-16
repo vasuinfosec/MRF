@@ -18,6 +18,16 @@ export const theme = {
   },
   status: {
     draft: { bg: "#F1F5F9", text: "#334155", border: "#94A3B8" },
+    // Canonical Phase-3 statuses
+    under_review: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },
+    authorised: { bg: "#D1FAE5", text: "#065F46", border: "#34D399" },
+    purchase_pending: { bg: "#CFFAFE", text: "#155E75", border: "#22D3EE" },
+    quotation_received: { bg: "#DBEAFE", text: "#1E40AF", border: "#60A5FA" },
+    po_pending: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },
+    po_issued: { bg: "#E0E7FF", text: "#3730A3", border: "#818CF8" },
+    fully_received: { bg: "#D1FAE5", text: "#065F46", border: "#34D399" },
+    cancelled: { bg: "#F3F4F6", text: "#4B5563", border: "#9CA3AF" },
+    // Legacy status colors (kept for backwards-compat)
     submitted: { bg: "#DBEAFE", text: "#1E40AF", border: "#60A5FA" },
     pm_review: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },
     approved: { bg: "#D1FAE5", text: "#065F46", border: "#34D399" },

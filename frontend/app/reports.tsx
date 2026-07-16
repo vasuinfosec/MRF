@@ -43,6 +43,11 @@ export default function Reports() {
     if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/${kind}?token=${t}`, "_blank");
   };
 
+  const expTally = async (kind: "purchase" | "invoice") => {
+    const t = await getToken();
+    if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/tally?kind=${kind}&token=${t}`, "_blank");
+  };
+
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
       <View style={styles.header}>
@@ -69,6 +74,13 @@ export default function Reports() {
         <View style={{ marginTop: 8, gap: 8 }}>
           <Btn testID="export-mrf-btn" title="Export MRFs to Excel" variant="primary" onPress={() => exp("mrf")} />
           <Btn testID="export-po-btn" title="Export POs to Excel" variant="primary" onPress={() => exp("po")} />
+        </View>
+
+        <H2 style={{ marginTop: 20 }}>Tally-Compatible Voucher Export</H2>
+        <Muted>Purchase-voucher rows with Customer ID, Party GSTIN, HSN, CGST/SGST/IGST split — ready for Tally XML import.</Muted>
+        <View style={{ marginTop: 8, gap: 8 }}>
+          <Btn testID="export-tally-purchase-btn" title="Tally: Purchase Voucher (from POs)" variant="action" onPress={() => expTally("purchase")} />
+          <Btn testID="export-tally-invoice-btn" title="Tally: Purchase Voucher (from Vendor Invoices)" variant="action" onPress={() => expTally("invoice")} />
         </View>
 
         <H2 style={{ marginTop: 20 }}>GRN vs PO Variance</H2>
