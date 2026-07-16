@@ -994,6 +994,10 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
         raise HTTPException(404, "PO not found")
     vendor = await db.vendors.find_one({"vendor_id": po["vendor_id"]}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": po["project_id"]}, {"_id": 0}) or {}
+    po_mrf_nums = []
+    for mid in po.get("mrf_refs") or []:
+        m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "mrf_number": 1})
+        if m: po_mrf_nums.append(m["mrf_number"])
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
@@ -1006,7 +1010,7 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
     story.append(Paragraph("PURCHASE ORDER", styles['Heading2']))
     story.append(Spacer(1, 6))
     story.append(Paragraph(f"<b>PO Number:</b> {po['po_number']}   <b>Date:</b> {po['date'].strftime('%d-%b-%Y')}", small))
-    story.append(Paragraph(f"<b>MRF Ref:</b> {', '.join(po.get('mrf_refs', []))}", small))
+    story.append(Paragraph(f"<b>MRF Ref:</b> {', '.join(po_mrf_nums)}", small))
     story.append(Spacer(1, 6))
     vendor_info = f"<b>Vendor:</b> {vendor.get('name','')}<br/>{vendor.get('address','')}<br/>GSTIN: {vendor.get('gstin','')}<br/>Contact: {vendor.get('contact','')}"
     story.append(Paragraph(vendor_info, small))
@@ -1116,6 +1120,10 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
         raise HTTPException(404, "GRN not found")
     vendor = await db.vendors.find_one({"vendor_id": grn.get("vendor_id")}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": grn.get("project_id")}, {"_id": 0}) or {}
+    grn_mrf_nums = []
+    for mid in grn.get("mrf_refs") or []:
+        m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "mrf_number": 1})
+        if m: grn_mrf_nums.append(m["mrf_number"])
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
@@ -1129,7 +1137,7 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
         Spacer(1, 6),
         Paragraph(f"<b>GRN Number:</b> {grn['grn_number']}   <b>Date:</b> "
                   f"{grn['date'].strftime('%d-%b-%Y %H:%M') if isinstance(grn['date'], datetime) else str(grn['date'])}", small),
-        Paragraph(f"<b>PO Ref:</b> {grn.get('po_number','')}    <b>MRF Ref:</b> {', '.join(grn.get('mrf_refs') or [])}", small),
+        Paragraph(f"<b>PO Ref:</b> {grn.get('po_number','')}    <b>MRF Ref:</b> {', '.join(grn_mrf_nums)}", small),
         Spacer(1, 6),
         Paragraph(f"<b>Vendor:</b> {vendor.get('name','')} | GSTIN: {vendor.get('gstin','')}", small),
         Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})", small),
@@ -1333,10 +1341,28 @@ async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Hea
     po = await db.pos.find_one({"po_id": body.po_id}, {"_id": 0})
     if not po:
         raise HTTPException(404, "PO not found")
+
+    # Validate that item_line_ids exist on this PO and per-line qty is not over-invoiced
+    po_line_map = {pit["item_line_id"]: pit for pit in po.get("items", [])}
+    already_invoiced: Dict[str, float] = {}
+    prior = await db.invoices.find({"po_id": body.po_id}, {"_id": 0}).to_list(500)
+    for iv in prior:
+        for r in iv.get("items", []):
+            key = r.get("item_line_id") or ""
+            already_invoiced[key] = already_invoiced.get(key, 0) + float(r.get("qty") or 0)
+
     subtotal = 0.0
     gst_total = 0.0
     items = []
     for it in body.items:
+        if it.item_line_id and it.item_line_id not in po_line_map:
+            raise HTTPException(400, f"Item line {it.item_line_id} not in PO {po['po_number']}")
+        if it.item_line_id:
+            po_line = po_line_map[it.item_line_id]
+            max_qty = max(0.0, float(po_line.get("qty") or 0) - already_invoiced.get(it.item_line_id, 0))
+            if it.qty > max_qty + 1e-6:
+                raise HTTPException(400,
+                    f"Qty {it.qty} exceeds remaining invoiceable qty {max_qty} for '{po_line.get('description','')}'")
         gross = it.qty * it.rate
         after_disc = gross - it.discount
         gst_amt = after_disc * it.gst / 100
@@ -1405,6 +1431,10 @@ async def invoice_pdf(inv_id: str, token: Optional[str] = None,
         raise HTTPException(404, "Invoice not found")
     vendor = await db.vendors.find_one({"vendor_id": inv["vendor_id"]}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": inv["project_id"]}, {"_id": 0}) or {}
+    mrf_nums = []
+    for mid in inv.get("mrf_refs") or []:
+        m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "mrf_number": 1})
+        if m: mrf_nums.append(m["mrf_number"])
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
@@ -1418,7 +1448,7 @@ async def invoice_pdf(inv_id: str, token: Optional[str] = None,
         Spacer(1, 6),
         Paragraph(f"<b>Invoice #:</b> {inv['invoice_number']}    <b>Date:</b> {inv['invoice_date']}", small),
         Paragraph(f"<b>Vendor Ref:</b> {inv.get('vendor_invoice_number') or '—'}    <b>PO:</b> {inv['po_number']}", small),
-        Paragraph(f"<b>MRF Refs:</b> {', '.join(inv.get('mrf_refs') or []) or '—'}", small),
+        Paragraph(f"<b>MRF Refs:</b> {', '.join(mrf_nums) or '—'}", small),
         Spacer(1, 8),
         Paragraph(f"<b>Vendor:</b> {vendor.get('name','')} | GSTIN: {vendor.get('gstin','')} | {vendor.get('address','')}", small),
         Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})", small),
