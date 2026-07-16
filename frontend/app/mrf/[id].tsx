@@ -1,13 +1,33 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput } from "react-native";
+import React, { useEffect, useState, useCallback, useMemo } from "react";
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal, TextInput, Platform } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { api } from "@/src/api";
+import { api, backendUrl, getToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Body, Loader } from "@/src/components/ui";
-import { theme, statusLabel } from "@/src/theme";
+import { theme, statusLabel, canonicalStatus } from "@/src/theme";
+
+function ownerRoleForStatus(status: string): string {
+  const s = canonicalStatus(status);
+  if (s === "draft" || s === "returned") return "site_engineer";
+  if (["submitted", "under_pm_review", "under_review", "pm_review"].includes(s)) return "pm";
+  if (["under_purchase_review", "purchase_pending", "sent_to_purchase", "quotation_received", "po_pending"].includes(s)) return "purchase";
+  if (s === "under_gm_review") return "gm";
+  if (s === "under_director_review") return "director";
+  if (s === "authorised") return "purchase";
+  return "";
+}
+
+const OWNER_LABEL: Record<string, string> = {
+  site_engineer: "Site Engineer (creator)",
+  pm: "Project Manager",
+  gm: "General Manager",
+  director: "Director",
+  purchase: "Purchase Team",
+  admin: "Administrator",
+};
 
 export default function MRFDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -17,58 +37,165 @@ export default function MRFDetail() {
 
   const [mrf, setMrf] = useState<any>(null);
   const [projects, setProjects] = useState<any[]>([]);
+  const [customer, setCustomer] = useState<any>(null);
   const [audit, setAudit] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
+  const [loadErr, setLoadErr] = useState("");
   const [action, setAction] = useState<null | "approve" | "reject" | "return">(null);
   const [comment, setComment] = useState("");
   const [itemActions, setItemActions] = useState<Record<string, { action?: string; qty_approved?: number; reason?: string }>>({});
 
   const load = useCallback(async () => {
     if (!id) return;
-    setBusy(true);
+    setBusy(true); setLoadErr("");
     try {
-      const [m, p, a] = await Promise.all([api(`/mrf/${id}`), api("/projects"), api(`/audit?entity_id=${id}`)]);
-      setMrf(m); setProjects(p); setAudit(a);
+      // Fetch MRF + projects first (critical). Audit is optional — never block.
+      const [m, p] = await Promise.all([
+        api<any>(`/mrf/${id}`),
+        api<any[]>("/projects"),
+      ]);
+      setMrf(m); setProjects(p);
       const map: any = {};
-      m.items.forEach((it: any) => { map[it.item_line_id] = { qty_approved: it.qty_approved ?? it.qty_requested }; });
+      (m.items || []).forEach((it: any) => { map[it.item_line_id] = { qty_approved: it.qty_approved ?? it.qty_requested }; });
       setItemActions(map);
-    } catch (_e) { /* noop */ }
+      // Audit — best-effort. If backend forbids, we just skip that section.
+      try {
+        const a = await api<any[]>(`/audit?entity_id=${id}`);
+        setAudit(a || []);
+      } catch { setAudit([]); }
+      // Load customer if MRF has one
+      if (m.customer_id) {
+        try {
+          const c = await api<any>(`/customers/${m.customer_id}`);
+          setCustomer(c);
+        } catch { setCustomer(null); }
+      } else { setCustomer(null); }
+    } catch (e: any) {
+      setLoadErr(e?.message || "Could not load this MRF. It may have been deleted or you may not have permission.");
+      setMrf(null);
+    }
     setBusy(false);
   }, [id]);
 
   useEffect(() => { load(); }, [load]);
 
   const project = projects.find((p) => p.project_id === mrf?.project_id);
-  const isPM = user?.role === "pm" || user?.role === "gm" || user?.role === "director" || user?.role === "admin";
-  const canSubmit = mrf && (mrf.status === "draft" || mrf.status === "returned") && (user?.user_id === mrf.created_by || user?.role === "admin");
-  const canReview = mrf && mrf.status === "pm_review" && isPM;
-  const canSendPurchase = mrf && mrf.status === "approved" && isPM;
+  const canonical = canonicalStatus(mrf?.status);
+  const owner = ownerRoleForStatus(mrf?.status || "");
+  const ownerLabel = OWNER_LABEL[owner] || "—";
+
+  const isPMRole = user?.role === "pm" || user?.role === "gm" || user?.role === "director" || user?.role === "admin";
+  const canSubmit = mrf && ["draft", "returned"].includes(canonical) && (user?.user_id === mrf.created_by || user?.role === "admin" || user?.role === "director");
+  const canEdit = canSubmit;
+  const canReview = mrf && ["under_pm_review", "under_review"].includes(canonical) && isPMRole;
+  const canSendPurchase = mrf && canonical === "authorised" && isPMRole;
+
+  const isPending = user && owner && (user.role === owner || user.role === "admin" || user.role === "director");
+  const pendingAction = useMemo(() => {
+    switch (canonical) {
+      case "draft":
+      case "returned":
+        return "Site Engineer must complete/submit the MRF";
+      case "under_pm_review":
+        return "Project Manager must authorise, reject, or return the MRF";
+      case "under_purchase_review":
+      case "purchase_pending":
+      case "quotation_received":
+      case "po_pending":
+        return "Purchase team must issue quotation / PO";
+      case "under_gm_review": return "GM approval pending";
+      case "under_director_review": return "Director approval pending";
+      case "authorised": return "Send to Purchase to begin procurement";
+      case "po_issued": return "Awaiting goods receipt";
+      case "partially_received": return "Awaiting remaining goods";
+      case "fully_received": return "Ready to close / bill";
+      case "closed":
+      case "cancelled":
+      case "rejected":
+        return "No further action required";
+      default: return "";
+    }
+  }, [canonical]);
 
   const doSubmit = async () => {
-    await api(`/mrf/${id}/submit`, { method: "POST" });
-    await load();
+    try {
+      await api(`/mrf/${id}/submit`, { method: "POST" });
+      await load();
+    } catch (e: any) { setLoadErr(e?.message || "Submit failed"); }
   };
   const doSendPurchase = async () => {
-    await api(`/mrf/${id}/send-to-purchase`, { method: "POST" });
-    await load();
+    try {
+      await api(`/mrf/${id}/send-to-purchase`, { method: "POST" });
+      await load();
+    } catch (e: any) { setLoadErr(e?.message || "Failed"); }
   };
   const doAction = async () => {
     if (!action) return;
-    const payload: any = { action, comment };
-    if (action !== "return") {
-      payload.item_actions = Object.entries(itemActions).map(([lid, v]) => ({
-        item_line_id: lid,
-        action: v.action || "approve",
-        qty_approved: v.qty_approved,
-        reason: v.reason,
-      }));
-    }
-    await api(`/mrf/${id}/approve`, { method: "POST", body: payload });
-    setAction(null); setComment("");
-    await load();
+    try {
+      const payload: any = { action, comment };
+      if (action !== "return") {
+        payload.item_actions = Object.entries(itemActions).map(([lid, v]) => ({
+          item_line_id: lid,
+          action: v.action || "approve",
+          qty_approved: v.qty_approved,
+          reason: v.reason,
+        }));
+      }
+      await api(`/mrf/${id}/approve`, { method: "POST", body: payload });
+      setAction(null); setComment("");
+      await load();
+    } catch (e: any) { setLoadErr(e?.message || "Action failed"); setAction(null); }
   };
 
-  if (!mrf) return busy ? <Loader /> : null;
+  // Print MRF (browser print)
+  const doPrint = () => {
+    if (Platform.OS === "web" && typeof window !== "undefined") window.print();
+  };
+
+  // Export MRF as PDF via backend? MRF PDF endpoint isn't present — export Excel row.
+  const doExport = async () => {
+    const t = await getToken();
+    if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/mrf?token=${t}`, "_blank");
+  };
+
+  // ---- Render states ----
+  if (busy && !mrf && !loadErr) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={{ padding: 8 }}><Ionicons name="arrow-back" size={22} color={theme.colors.text} /></TouchableOpacity>
+          <Text style={styles.title}>Loading MRF…</Text>
+          <View style={{ width: 38 }} />
+        </View>
+        <View style={{ padding: 40, alignItems: "center" }}>
+          <Loader />
+          <Muted>Fetching MRF details…</Muted>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  if (!mrf) {
+    return (
+      <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={{ padding: 8 }}><Ionicons name="arrow-back" size={22} color={theme.colors.text} /></TouchableOpacity>
+          <Text style={styles.title}>MRF Unavailable</Text>
+          <View style={{ width: 38 }} />
+        </View>
+        <View style={{ padding: 24 }}>
+          <Card testID="mrf-load-err">
+            <Text style={{ fontSize: 16, fontWeight: "700", color: theme.colors.danger }}>Unable to open MRF</Text>
+            <Muted style={{ marginTop: 6 }}>{loadErr || "MRF not found."}</Muted>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 16 }}>
+              <View style={{ flex: 1 }}><Btn testID="retry-btn" title="Retry" variant="outline" onPress={load} /></View>
+              <View style={{ flex: 1 }}><Btn testID="back-list-btn" title="Back to List" variant="primary" onPress={() => router.replace("/mrf" as any)} /></View>
+            </View>
+          </Card>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
@@ -95,6 +222,9 @@ export default function MRFDetail() {
         </View>
 
         <Card style={{ marginTop: 12 }} testID="mrf-meta-card">
+          <Row2 label="Status" value={statusLabel(mrf.status)} />
+          <Row2 label="Current Owner" value={ownerLabel} />
+          {pendingAction ? <Row2 label="Pending Action" value={pendingAction} /> : null}
           <Row2 label="Site" value={mrf.site} />
           <Row2 label="System" value={mrf.system_category} />
           <Row2 label="Requested by" value={mrf.requesting_person} />
@@ -103,6 +233,47 @@ export default function MRFDetail() {
           {mrf.remarks ? <Row2 label="Remarks" value={mrf.remarks} /> : null}
           {mrf.pm_comments ? <Row2 label="PM Comments" value={mrf.pm_comments} /> : null}
         </Card>
+
+        {/* Customer + Customer PO */}
+        {customer || mrf.customer_id ? (
+          <Card style={{ marginTop: 12 }} testID="mrf-customer-card">
+            <H2>Customer</H2>
+            <Row2 label="Customer ID" value={mrf.customer_id || "—"} />
+            <Row2 label="Name" value={customer?.name || mrf.customer_name || "—"} />
+            {customer?.gstin ? <Row2 label="GSTIN" value={customer.gstin} /> : null}
+            {customer?.billing_address ? <Row2 label="Billing" value={customer.billing_address} /> : null}
+            {customer?.contact_person ? <Row2 label="Contact" value={`${customer.contact_person} · ${customer.phone || ""}`} /> : null}
+            {(customer?.customer_pos || []).length > 0 ? (
+              <>
+                <View style={{ height: 6 }} />
+                <Label>CUSTOMER POs</Label>
+                {(customer.customer_pos || []).map((cp: any) => (
+                  <View key={cp.cpo_id} style={{ marginTop: 6, paddingVertical: 4, borderBottomWidth: 1, borderBottomColor: theme.colors.surface }}>
+                    <Text style={{ fontWeight: "700", color: theme.colors.text }}>{cp.po_number}{cp.po_date ? ` · ${cp.po_date}` : ""}</Text>
+                    <Text style={{ fontSize: 12, color: theme.colors.textMuted }}>
+                      ₹{new Intl.NumberFormat("en-IN").format(Number(cp.value || 0))}
+                      {cp.validity_till ? ` · Valid till ${cp.validity_till}` : ""}
+                    </Text>
+                    {cp.attachment_name ? <Text style={{ fontSize: 11, color: theme.colors.primary, marginTop: 2 }}>📎 {cp.attachment_name}</Text> : null}
+                  </View>
+                ))}
+              </>
+            ) : null}
+          </Card>
+        ) : null}
+
+        {/* Documents / attachments */}
+        {(mrf.attachments && mrf.attachments.length > 0) ? (
+          <Card style={{ marginTop: 12 }} testID="mrf-docs-card">
+            <H2>Documents</H2>
+            {mrf.attachments.map((a: string, i: number) => (
+              <View key={i} style={{ flexDirection: "row", alignItems: "center", paddingVertical: 6 }}>
+                <Ionicons name="document-attach-outline" size={16} color={theme.colors.primary} />
+                <Text style={{ marginLeft: 8, color: theme.colors.text, fontSize: 13 }}>{a}</Text>
+              </View>
+            ))}
+          </Card>
+        ) : null}
 
         <H2 style={{ marginTop: 20, marginBottom: 8 }}>Items ({mrf.items.length})</H2>
         {mrf.items.map((it: any, i: number) => (
@@ -180,7 +351,7 @@ export default function MRFDetail() {
           ) : null}
           {canReview ? (
             <>
-              <Btn testID="approve-mrf-btn" title="Approve MRF" variant="primary" onPress={() => setAction("approve")} />
+              <Btn testID="approve-mrf-btn" title="Authorise MRF" variant="primary" onPress={() => setAction("approve")} />
               <Btn testID="reject-mrf-btn" title="Reject MRF" variant="danger" onPress={() => setAction("reject")} />
               <Btn testID="return-mrf-btn" title="Return for Correction" variant="outline" onPress={() => setAction("return")} />
             </>
@@ -188,6 +359,12 @@ export default function MRFDetail() {
           {canSendPurchase ? (
             <Btn testID="send-purchase-btn" title="Send to Purchase" variant="action" onPress={doSendPurchase} />
           ) : null}
+          <View style={{ flexDirection: "row", gap: 8, marginTop: 4 }}>
+            {Platform.OS === "web" ? (
+              <View style={{ flex: 1 }}><Btn testID="print-btn" title="🖨 Print" variant="outline" onPress={doPrint} /></View>
+            ) : null}
+            <View style={{ flex: 1 }}><Btn testID="export-btn" title="⬇ Export (Excel)" variant="outline" onPress={doExport} /></View>
+          </View>
         </View>
 
         {/* Audit */}

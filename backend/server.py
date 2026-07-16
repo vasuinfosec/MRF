@@ -1962,13 +1962,39 @@ async def mrf_ageing(authorization: Optional[str] = Header(None)):
 
 @api.get("/audit")
 async def audit_logs(entity_id: Optional[str] = None,
+                     entity: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
+    """Audit trail.
+
+    - `entity_id` provided → any user who can access that entity can see its audit trail
+      (spec: "MRF preview and live status must be visible to all authorised users" incl.
+      authorisation & audit history).
+    - `entity_id` NOT provided → admin/director only (bulk audit view).
+    """
     u = await get_current_user(authorization)
-    if u.role != "admin":
-        raise HTTPException(403, "Only admin can view audit trail")
-    q = {}
-    if entity_id:
-        q["entity_id"] = entity_id
+    if not entity_id:
+        if u.role not in ("admin", "director"):
+            raise HTTPException(403, "Only admin/director can view full audit log")
+    else:
+        # Entity-scoped access check
+        if entity_id.startswith("mrf_"):
+            m = await db.mrfs.find_one({"mrf_id": entity_id}, {"_id": 0})
+            if not m:
+                raise HTTPException(404, "MRF not found")
+            await _check_mrf_access(u, m)
+        elif entity_id.startswith("po_"):
+            p = await db.pos.find_one({"po_id": entity_id}, {"_id": 0})
+            if not p:
+                raise HTTPException(404, "PO not found")
+            await _check_po_access(u, p)
+        else:
+            # Customer/vendor/master/etc. — restrict to admin/director/purchase/pm/gm
+            if u.role not in ("admin", "director", "purchase", "pm", "gm"):
+                raise HTTPException(403, "Not authorised to view this audit trail")
+
+    q: Dict[str, Any] = {}
+    if entity_id: q["entity_id"] = entity_id
+    if entity: q["entity"] = entity
     logs = await db.audit_logs.find(q, {"_id": 0}).sort("timestamp", -1).limit(200).to_list(200)
     return logs
 

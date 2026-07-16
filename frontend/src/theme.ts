@@ -19,6 +19,11 @@ export const theme = {
   status: {
     draft: { bg: "#F1F5F9", text: "#334155", border: "#94A3B8" },
     // Canonical Phase-3 statuses
+    submitted: { bg: "#DBEAFE", text: "#1E40AF", border: "#60A5FA" },
+    under_pm_review: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },
+    under_purchase_review: { bg: "#CFFAFE", text: "#155E75", border: "#22D3EE" },
+    under_gm_review: { bg: "#EDE9FE", text: "#5B21B6", border: "#A78BFA" },
+    under_director_review: { bg: "#FCE7F3", text: "#9D174D", border: "#F472B6" },
     under_review: { bg: "#FEF3C7", text: "#92400E", border: "#FBBF24" },
     authorised: { bg: "#D1FAE5", text: "#065F46", border: "#34D399" },
     purchase_pending: { bg: "#CFFAFE", text: "#155E75", border: "#22D3EE" },
@@ -52,5 +57,57 @@ export const theme = {
   },
 };
 
+export const STATUS_LABELS: Record<string, string> = {
+  all: "All",
+  draft: "Draft",
+  submitted: "Submitted",
+  under_review: "Under PM Review",
+  pm_review: "Under PM Review",
+  under_pm_review: "Under PM Review",
+  under_purchase_review: "Under Purchase Review",
+  under_gm_review: "Under GM Review",
+  under_director_review: "Under Director Review",
+  authorised: "Authorised",
+  approved: "Authorised",
+  rejected: "Rejected",
+  returned: "Returned for Correction",
+  purchase_pending: "Purchase Pending",
+  sent_to_purchase: "Purchase Pending",
+  quotation_received: "Quotation Received",
+  po_pending: "PO Pending",
+  po_issued: "PO Issued",
+  partially_ordered: "PO Issued",
+  fully_ordered: "PO Issued",
+  partially_received: "Partially Received",
+  fully_received: "Fully Received",
+  received: "Fully Received",
+  closed: "Closed",
+  cancelled: "Cancelled",
+};
+
 export const statusLabel = (s: string) =>
-  s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  STATUS_LABELS[s] || s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+// Full canonical status list (17 statuses per Phase 3b spec)
+export const MRF_ALL_STATUSES = [
+  "draft", "submitted", "under_pm_review",
+  "under_purchase_review", "under_gm_review", "under_director_review",
+  "authorised", "rejected", "returned",
+  "purchase_pending", "quotation_received", "po_pending",
+  "po_issued", "partially_received", "fully_received",
+  "closed", "cancelled",
+];
+
+// Legacy → canonical alias (mirrors backend MRF_STATUS_ALIAS)
+export const STATUS_ALIAS: Record<string, string> = {
+  submitted: "under_pm_review",
+  pm_review: "under_pm_review",
+  under_review: "under_pm_review",
+  approved: "authorised",
+  sent_to_purchase: "purchase_pending",
+  partially_ordered: "po_issued",
+  fully_ordered: "po_issued",
+  received: "fully_received",
+};
+export const canonicalStatus = (s?: string) =>
+  s ? (STATUS_ALIAS[s] || s) : "";

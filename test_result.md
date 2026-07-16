@@ -456,3 +456,80 @@ test_plan:
 agent_communication:
     -agent: "main"
     -message: "Phase 3a implemented. Manual e2e: SE creates MRF with material_id/make/model/priority — OK. SE edits draft — OK. SE submits → status pm_review — edit blocked (400). PM returns → SE can edit again — OK. Different SE forbidden — 403. Please regress: PUT /api/mrf/{id} — happy path (draft edit by creator, 200); denied after submit (400); allowed after return; RBAC (creator vs other SE vs admin); make sure customer_id snapshot updates if project changes."
+
+## Phase 3b — MRF-opening bug + comprehensive detail view
+
+backend:
+  - task: "Audit endpoint entity-scoped access (fix MRF opening bug)"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "ROOT CAUSE: GET /api/audit was admin-only, so PM/GM/Director/Purchase opening any MRF triggered a 403 that broke the whole detail page (blank state). Fixed: /api/audit?entity_id=<x> now uses per-entity access check (via _check_mrf_access / _check_po_access), and bulk audit (no entity_id) still requires admin/director. Also added entity= filter."
+
+frontend:
+  - task: "MRF list — 17-status filters, customer badges, pending count, new-tab open"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/mrf/index.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Rebuilt with all 17 canonical statuses + Pending Action filter (badge count per role owner mapping). Customer ID + Name shown on each card. YOUR ACTION badge on pending rows. On web, tapping a row opens the MRF in a NEW TAB (window.open) — falls back to router.push if popup blocked; on mobile it navigates full-screen."
+
+  - task: "MRF detail — Customer/POs/Owner/Pending action/Print/Export + never-blank error UI"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/mrf/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Complete rewrite. Load errors now surface a proper 'Unable to open MRF' card with Retry + Back to List (never blank). Audit fetch is best-effort and non-blocking. New sections: Status / Current Owner / Pending Action rows in meta; Customer card with GSTIN + Customer POs; Documents card; Print (web) + Export (Excel) buttons; new canonical status handling via canonicalStatus helper."
+
+  - task: "STATUS_LABELS + status colors for 17 canonical statuses"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/theme.ts"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "STATUS_LABELS map covers all 17 canonical + legacy aliases. Added color scheme for under_pm_review/purchase_review/gm_review/director_review. canonicalStatus() helper for legacy->canonical translation on the client."
+
+  - task: "Empty component accepts title/subtitle in addition to msg"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/src/components/ui.tsx"
+    stuck_count: 0
+    priority: "low"
+    needs_retesting: false
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Backwards compat: accepts either msg or title+subtitle."
+
+test_plan:
+  current_focus:
+    - "Audit endpoint entity-scoped access (fix MRF opening bug)"
+    - "MRF list — 17-status filters, customer badges, pending count, new-tab open"
+    - "MRF detail — Customer/POs/Owner/Pending action/Print/Export + never-blank error UI"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: "PM/GM/Director MRF-opening bug fixed at the root (audit endpoint scoping). Verified via UI: PM can now open any accessible MRF and see Status / Current Owner / Pending Action / Customer with POs / Items grid / all action buttons (Authorise/Reject/Return/Print/Export) / Audit Trail. Regression targets: (1) GET /api/audit?entity_id=<mrf_id> now works for any user with MRF access; (2) GET /api/audit?entity_id=<po_id> for anyone with PO access; (3) GET /api/audit without entity_id still 403 for non-admin/director; (4) /api/audit?entity_id=<mrf_id> as unrelated site_engineer returns 403 (project scoping); (5) MRF list uses canonical status filters and returns matching sets; (6) Confirm no other endpoint regressions."

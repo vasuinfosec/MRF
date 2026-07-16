@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 14 — Backend regression for GET /api/audit scoping fix (root-cause fix for MRF-opening bug). Ran 30 pytest cases against the preview URL covering ALL 22 review-request scenarios (some split into sub-cases for full role-matrix coverage). 28/30 PASSED (93.3%). All entity-scoped audit cases (mrf_/po_/other) work exactly as specified: SE can see own MRF audit, unrelated SE gets 403, PM in project 200, purchase/gm/director/admin unconditional 200, non-existent mrf_/po_ IDs correctly return 404 (not 403), cust_-style IDs allow admin/director/purchase/pm/gm but 403 for SE & store. MRF sanity (PM /api/mrf/<mid>) returns full payload with customer_id/customer_name/items. Audit-filter verification confirms every returned row matches entity_id + entity name filter. The 2 failing cases are the BULK-audit path (admin & director, no entity_id) which return 500 due to a PRE-EXISTING serialization bug: 3 legacy audit_logs entries contain nested MongoDB ObjectId at details.new._id / new_value._id. The current fix's `{\"_id\": 0}` projection strips only the top-level _id, and FastAPI's jsonable_encoder crashes on the nested ObjectId. Bug pre-dates this iteration (July-2026 fixture inserts of TEST-NEW-1 customer stored the whole insert-response dict) but it now blocks Director from using bulk audit (previously admin-only and equally broken). The scoping-fix behavior itself is 100% correct; only the underlying bulk endpoint has a latent MongoDB-serialization bug that must be fixed separately.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "GET /api/audit (bulk, no entity_id)",
+        "issue": "Returns 500 'Internal Server Error' for admin AND director because 3 legacy audit_logs entries contain nested ObjectId at `details.new._id` and `new_value._id`. Projection `{\"_id\": 0}` at server.py:1998 only strips top-level _id. FastAPI's jsonable_encoder raises `TypeError(\"'ObjectId' object is not iterable\")`. This is not a regression from the scoping fix, but the fix widened access from admin-only to admin+director, so it must be fixed for the bulk view to work. Simplest fix: after `find(...).to_list(...)`, recursively strip ObjectId instances (or `json.loads(bson.json_util.dumps(logs))`). Alternative: clean the 3 offending rows (entity=customer, entity_id=TEST-NEW-1 and similar TEST fixture rows from ~2026-07-16).",
+        "priority": "CRITICAL"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_audit_scoping_iter14.py",
+    "/app/test_reports/pytest/audit_scoping_iter14.xml"
+  ],
+  "action_items": [
+    "CRITICAL — Fix bulk `GET /api/audit` 500. In server.py around line 1995-1999 add a recursive ObjectId sanitizer before returning `logs`, e.g. use `json.loads(bson.json_util.dumps(logs))` (already imported bson via motor), OR walk each doc and drop `_id` keys from nested `details` / `new_value` / `old_value`. Same fix should be applied to any other endpoint that returns raw audit rows. This is a latent bug — the 3 corrupt rows were inserted by a prior code path that stored the insert-response dict (including ObjectId) into audit `details.new` / `new_value`.",
+    "OPTIONAL — Prevent future bad rows: in the `audit()` helper (search for `await db.audit_logs.insert_one(...)` in server.py), ensure `details` / `old` / `new` values are sanitized before insert (drop `_id` or use bson.json_util-clean copy).",
+    "OPTIONAL — Data cleanup one-off: `db.audit_logs.updateMany({\"details.new._id\": {$exists: true}}, {$unset: {\"details.new._id\": \"\", \"new_value._id\": \"\"}})` — 3 rows affected (TEST-NEW-1 customer + master.gst inserts from 2026-07-16)."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1963-1999 `audit_logs` — scoping logic is CORRECT and matches the spec exactly. `entity_id` prefix branching (mrf_ / po_ / else) correctly delegates to `_check_mrf_access` / `_check_po_access`, and 404 is raised BEFORE the access check when the entity is missing (matches review case #12 and #18: 404 not 403).",
+    "server.py:1975-1977 bulk-view gate `u.role not in ('admin','director')` — correctly denies GM/PM/purchase/SE/store (review cases #3, #4). PM/purchase/SE 403 verified in tests.",
+    "server.py:1990-1993 fallback for non-mrf/non-po entity_id — admin/director/purchase/pm/gm allowed, SE/store 403. Verified for cust_ IDs (cases #19 and #20).",
+    "server.py:1995-1998 query building — supports optional `entity` name filter AND `entity_id` filter combined. Returns [] gracefully for unknown entity_id (no false-error). Verified in test_22b.",
+    "server.py:1998 `{\"_id\": 0}` projection — insufficient. Only strips top-level _id, NOT nested ObjectIds inside `details`. Root cause of the 500 above. RECOMMEND recursive sanitization.",
+    "server.py:1183-1224 `_check_mrf_access` / `_check_po_access` — reuse across mrf/po/audit endpoints is DRY-correct. SE PO-check walks `mrf_refs` to allow SE who created the source MRF (case #16 verified: SE sees audit for PO built from their MRF)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_audit_scoping_iter14.py (new — 30 pytest cases covering all 22 review scenarios)"
+  ],
+  "success_rate": {
+    "backend": "93.3% (28/30). Both failures are the same latent bulk-audit serialization bug (admin & director hit the same 500). Scoping fix itself: 100% correct.",
+    "frontend": "not tested (backend-only per request)"
+  },
+  "seed_data_creation": "Yes — 2 TEST projects (TP-A14-* on Pune, TP-B14-* on Bangalore), 2 TEST customers (TESTCUSTA14-*, TESTCUSTB14-*), 1 TEST vendor (TESTVEND14-*), plus MRFs/PO created during fixture. All rows are TEST-prefixed; not cleaned up (pytest session-scope). Safe to leave — used for future regression runs.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "After main agent fixes the nested-ObjectId serialization bug in /api/audit (bulk view), re-run `EXPO_PUBLIC_BACKEND_URL=<preview-url> pytest /app/backend/tests/test_audit_scoping_iter14.py -v` and expect 30/30. Do NOT delete the TEST fixtures — the fixture chain (project_a → mrf_se_a → approved_mrf_a → po_a) creates a full MRF→approve→send-to-purchase→PO chain that other iterations can reuse.",
+  "rca_of_issue": "BUG (unrelated to scoping fix but exposed by it): GET /api/audit (bulk) returns 500 for admin and director. Reproduction: `curl -H 'Authorization: Bearer <admin-token>' <base>/api/audit` -> 500. Root cause: 3 rows in audit_logs collection (from ~2026-07-16 test-fixture inserts, entity=customer entity_id=TEST-NEW-1 and entity=master.gst) contain nested MongoDB ObjectId at `details.new._id` and `new_value._id`. The endpoint's `find(..., {'_id': 0})` projection strips only the top-level _id; nested ObjectId instances pass through and cause FastAPI's jsonable_encoder to raise `TypeError(\"'ObjectId' object is not iterable\")` while serializing the response list. Entity-scoped audit calls happen to work today because none of the currently-scoped queries hit those 3 rows. Mitigation (either works): (a) sanitize on read — `import bson.json_util; return json.loads(bson.json_util.dumps(logs))` in the audit endpoint, or (b) sanitize at write in the `audit()` helper by stripping `_id` from any dict values in `details`/`old`/`new`, plus a one-off cleanup query on the 3 legacy rows. Recommend (a) for defence-in-depth."
+}

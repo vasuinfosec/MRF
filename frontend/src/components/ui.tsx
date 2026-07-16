@@ -81,10 +81,12 @@ export function Loader() {
   return <View style={{ padding: 24, alignItems: "center" }}><ActivityIndicator color={theme.colors.primary} /></View>;
 }
 
-export function Empty({ msg, testID }: { msg: string; testID?: string }) {
+export function Empty({ msg, title, subtitle, testID }: { msg?: string; title?: string; subtitle?: string; testID?: string }) {
+  const primary = title || msg || "Nothing here yet.";
   return (
     <View style={s.empty} testID={testID}>
-      <Text style={{ color: theme.colors.textMuted, textAlign: "center" }}>{msg}</Text>
+      <Text style={{ color: theme.colors.text, textAlign: "center", fontWeight: "600", marginBottom: subtitle ? 6 : 0 }}>{primary}</Text>
+      {subtitle ? <Text style={{ color: theme.colors.textMuted, textAlign: "center", fontSize: 12 }}>{subtitle}</Text> : null}
     </View>
   );
 }
