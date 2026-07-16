@@ -1,0 +1,77 @@
+{
+  "summary": "Phase 1 follow-up backend retest: 40/43 PASSED (93%). Bug (a) FIXED: POST /api/po/{id}/received now correctly returns 200 for director/purchase/admin and 403 for pm/gm. Bug (b) FIXED: submit_mrf now notifies role='pm' — pm@vasu.dev receives an 'MRF pending review' notification with link pointing to the newly submitted MRF (verified via GET /api/notifications). Regression suite (test_phase1_role_reshuffle.py) fully green (28/28), including director/gm login, legacy migration (site_engineer/project_manager->pm, billing->purchase), PM-on-project constraint, /audit admin-only, /users email redaction, seed idempotency. HOWEVER the claim 'Deduplicated all (purchase,purchase,admin) tuples to (purchase,director,admin) across server.py' is INCOMPLETE — 3 director-access gates still fail: /po POST (line 874), /po/{id}/pdf (via _check_po_access line 746), /billing/items GET (line 1086). Two more duplicated tuples not covered by tests but likely affected: /billing/update (line 1118, missing director), and _check_mrf_access (line 727).",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/po",
+        "issue": "server.py:874 gate is `if u.role not in ['purchase', 'admin']` — director is missing. Director gets 403 'Only purchase/admin' when creating a PO. Spec requires director allowed. Fix: `['purchase', 'director', 'admin']`.",
+        "priority": "HIGH"
+      },
+      {
+        "endpoint": "GET /api/po/{po_id}/pdf",
+        "issue": "Routes through _check_po_access at server.py:745. Line 746 still has `if u.role in ('admin', 'purchase', 'purchase')` — director not included, so director falls through pm branches and gets 403 'Not allowed'. Spec requires director allowed. Fix: `('admin', 'purchase', 'director')`.",
+        "priority": "HIGH"
+      },
+      {
+        "endpoint": "GET /api/billing/items",
+        "issue": "server.py:1086 gate is `if u.role not in ('purchase', 'admin', 'purchase')` — duplicated 'purchase', director missing. Returns 403 'Only billing/purchase/admin' for director. Spec requires director allowed. Fix: `('purchase', 'director', 'admin')`.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": [
+      {
+        "endpoint": "_check_mrf_access helper",
+        "issue": "server.py:727 still has `('admin', 'purchase', 'purchase')` — duplicated. Director accessing an MRF via any endpoint that uses this helper (e.g. GET /mrf/{id}) will fall through to pm branches and get 403 unless they happen to be created_by. Not covered by the requested test slice but is the same bug class as the reported /po/pdf failure."
+      },
+      {
+        "endpoint": "POST /api/billing/update",
+        "issue": "server.py:1118 gate is `['purchase', 'admin']` — director missing. Same pattern as /po create; likely intended to include director per the deduplication effort."
+      },
+      {
+        "endpoint": "POST /api/import/mrf",
+        "issue": "server.py:1567 gate is `['admin', 'pm', 'pm']` — duplicated 'pm'. Harmless functionally (still allows admin+pm) but signals the deduplication was incomplete; likely the second 'pm' was meant to be 'director' or 'purchase'."
+      },
+      {
+        "endpoint": "_check_mrf_access & _check_po_access",
+        "issue": "server.py:729 has `if u.role == 'pm':` immediately followed by `if u.role == 'pm':` at line 738 (same for _check_po_access at 748/752). These are dead-code branches leftover from the site_engineer->pm rename that produce two identical guard blocks. The second block is unreachable. Same pattern at server.py 405/412, 715/717."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase1_followup.py",
+    "/app/backend/tests/test_phase1_role_reshuffle.py",
+    "/app/test_reports/pytest/phase1_followup.xml"
+  ],
+  "action_items": [
+    "server.py:874 — change `['purchase', 'admin']` to `['purchase', 'director', 'admin']` for POST /po create.",
+    "server.py:746 — change `('admin', 'purchase', 'purchase')` to `('admin', 'purchase', 'director')` in _check_po_access (fixes director on /po/{id}/pdf and any other endpoint routed through this helper).",
+    "server.py:1086 — change `('purchase', 'admin', 'purchase')` to `('purchase', 'director', 'admin')` for GET /billing/items.",
+    "server.py:727 — change `('admin', 'purchase', 'purchase')` to `('admin', 'purchase', 'director')` in _check_mrf_access for consistency.",
+    "server.py:1118 — change `['purchase', 'admin']` to `['purchase', 'director', 'admin']` for POST /billing/update (parity with /billing/items and /invoice create).",
+    "server.py:1567 — replace duplicated `['admin', 'pm', 'pm']` with the correct roles; check original intent (probably included 'director' or 'purchase').",
+    "Clean up dead-code duplicate role branches: server.py 405/412, 715/717, 729/738, 748/752 — these `if u.role == 'pm'` doubles are legacy artefacts from the mechanical site_engineer->pm rename."
+  ],
+  "critical_code_review_comments": [
+    "The 'deduplicated all (purchase,purchase,admin) tuples' claim is not fully honoured: at least 4 occurrences still have the stale duplicated 'purchase' or a missing director in list-form gates. A single regex search-and-replace across server.py would have caught these — grep -nE \"\\('purchase',\\s*'purchase'|'admin', *'purchase',\\s*'purchase'\" server.py returns matches at 727, 746, 1086.",
+    "Role gates are inconsistent — some use tuples ('purchase','director','admin'), some use lists ['purchase','admin'], some include admin twice, some omit director. Recommend a single ALLOW_PURCHASE_AND_APPROVERS = ('purchase', 'director', 'admin') constant reused across the file.",
+    "Dead-code duplicate `if u.role == 'pm':` blocks remain in _check_mrf_access, _check_po_access, list_mrf, and list_projects. Each pair is a rename collision that produces one reachable and one unreachable branch. Fix by unioning the two conditions into a single explicit block per canonical role."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase1_followup.py (new)"
+  ],
+  "success_rate": {
+    "backend": "93.0% (40/43 across new followup + phase1 regression)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Reused POST /api/seed (idempotent, admin token). Test data prefixed TEST_. New pytest fixtures create fresh MRFs/POs/invoices per test class; TEST_fresh_pm_* users are seeded via /auth/dev-login as unrelated pm and are not cleaned up (harmless — do not appear on any project's project_managers).",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run `EXPO_BACKEND_URL=http://localhost:8001 MONGO_URL=mongodb://localhost:27017 DB_NAME=test_database python -m pytest /app/backend/tests/test_phase1_followup.py /app/backend/tests/test_phase1_role_reshuffle.py -v --tb=short`. After main agent applies the 3 line-level role-gate fixes (lines 874, 746, 1086), all 3 currently-failing tests should flip to green and success_rate should reach 100%. The notification-test in test_phase1_followup.py (TestSubmitMRFNotifiesPM) depends on server.py:782 keeping role='pm' (do not revert). ENABLE_DEV_LOGIN=1 must remain in /app/backend/.env.",
+  "rca_of_issue": "The problem statement asserts 'Deduplicated all (purchase,purchase,admin) tuples to (purchase,director,admin) across server.py' but grep of server.py shows the deduplication only touched line 974 (/po/received) — 3 other duplicated-tuple gates (727, 746, 1086) and 2 list-form gates missing director (874, 1118) were left untouched, plus one duplicated ('admin','pm','pm') at 1567. The two headline bug fixes (a) director on /po/received and (b) notification role='pm' are both correctly applied and verified. Repro for the remaining failures: dev-login director@vasu.dev role=director; POST /api/po with any valid body -> 403; GET /api/po/{id}/pdf -> 403; GET /api/billing/items -> 403. Mitigation: apply the 3 one-line fixes in action_items."
+}

@@ -779,7 +779,7 @@ async def submit_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
     )
     await audit("mrf", mrf_id, "submit", u)
     # Notify PMs
-    pms = await db.users.find({"role": "project_manager"}, {"_id": 0, "user_id": 1}).to_list(50)
+    pms = await db.users.find({"role": "pm"}, {"_id": 0, "user_id": 1}).to_list(50)
     await notify([p["user_id"] for p in pms], "MRF pending review",
                  f"{d['mrf_number']} needs your review", f"/mrf/{mrf_id}")
     return {"ok": True}
@@ -971,7 +971,7 @@ async def get_po(po_id: str, authorization: Optional[str] = Header(None)):
 @api.post("/po/{po_id}/received")
 async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "purchase", "admin"):
+    if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin can record receipt")
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
@@ -1358,7 +1358,7 @@ async def export_mrf(token: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "purchase", "admin", "pm"):
+    if u.role not in ("purchase", "director", "admin", "pm"):
         raise HTTPException(403, "Not allowed")
     mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
     wb = openpyxl.Workbook()
@@ -1385,7 +1385,7 @@ async def export_po(token: Optional[str] = None,
                     authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "purchase", "admin"):
+    if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Not allowed")
     pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(1000)
     wb = openpyxl.Workbook()
@@ -1417,7 +1417,7 @@ async def list_grns_for_po(po_id: str, authorization: Optional[str] = Header(Non
 @api.get("/grns")
 async def list_all_grns(authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "purchase", "admin"):
+    if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     return await db.grns.find({}, {"_id": 0}).sort("date", -1).to_list(500)
 
@@ -1432,7 +1432,7 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
     po = await db.pos.find_one({"po_id": grn.get("po_id")}, {"_id": 0})
     if po:
         await _check_po_access(u, po)
-    elif u.role not in ("purchase", "purchase", "admin"):
+    elif u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Not allowed")
     vendor = await db.vendors.find_one({"vendor_id": grn.get("vendor_id")}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": grn.get("project_id")}, {"_id": 0}) or {}
@@ -1662,7 +1662,7 @@ class InvoiceCreate(BaseModel):
 @api.post("/invoice")
 async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["purchase", "purchase", "admin"]:
+    if u.role not in ["purchase", "director", "admin"]:
         raise HTTPException(403, "Only purchase/billing/admin")
     po = await db.pos.find_one({"po_id": body.po_id}, {"_id": 0})
     if not po:
@@ -1728,7 +1728,7 @@ async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Hea
 async def list_invoices(po_id: Optional[str] = None,
                         authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "purchase", "admin"):
+    if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     q = {}
     if po_id:
@@ -1739,7 +1739,7 @@ async def list_invoices(po_id: Optional[str] = None,
 @api.get("/invoice/{inv_id}")
 async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "purchase", "admin"):
+    if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     d = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
     if not d:
@@ -1749,7 +1749,7 @@ async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
 @api.get("/po/{po_id}/invoices")
 async def list_po_invoices(po_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "purchase", "admin"):
+    if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     return await db.invoices.find({"po_id": po_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
 
@@ -1758,7 +1758,7 @@ async def invoice_pdf(inv_id: str, token: Optional[str] = None,
                       authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "purchase", "admin"):
+    if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")
     inv = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
     if not inv:
