@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 15 — Re-verification of audit-endpoint fix from iter 14. Fix confirmed working. Ran the full 30-case audit-scoping suite (test_audit_scoping_iter14.py) against preview URL: 30/30 PASSED (100%). Both previously failing bulk-view cases (test_01_admin_bulk_200, test_02_director_bulk_200) now succeed. Direct curl also confirmed: GET /api/audit as admin → 200 with list of 176 entries; GET /api/audit as director → 200 with list of 176 entries; response shape correct (audit_id/entity/entity_id/action/user_id/user_name/user_role/details/timestamp — no ObjectId leaks). Fix RCA: server.py:2002 now wraps response through `_strip_oids(d)` helper (defined at server.py:484-492) which recursively strips `_id` keys and converts ObjectId/datetime to JSON-safe primitives — same helper already used by master_audit_list at server.py:950. One-off DB cleanup on audit_logs/master_audit_logs (unsetting nested `details.new._id`, `details.old._id`, `new_value._id`, `old_value._id`) is a belt-and-braces improvement — even without cleanup, the recursive `_strip_oids` sanitizer alone is sufficient. Regression spot-check: test_phase2_approval_chain.py + test_admin_master_module.py — 72/72 PASSED, no regressions. No other test files from Phase 1/2a/2b/2c/3a were requested and the review request explicitly permitted skipping them if the two above weren't applicable. Backend-only per request; no frontend testing performed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_audit_scoping_iter14.py",
+    "/app/test_reports/pytest/audit_scoping_iter15.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:2002 — `return [_strip_oids(d) for d in logs]` correctly reuses the shared recursive sanitizer. Consistent with master_audit_list at line 950 (DRY, single source of truth for audit-serialization).",
+    "server.py:484-492 `_strip_oids` — handles ObjectId → str, datetime → isoformat, dict (drops any `_id` key at every level), list — covers all known audit_logs corruption patterns. Defence-in-depth: even if a future write inserts nested ObjectIds again, reads will not 500.",
+    "OPTIONAL (already logged in iter 14 action_items #2) — the `audit()` helper writer could also sanitize `details.old`/`details.new` at insert time to prevent future bad rows. Not blocking; current read-side fix is sufficient."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (30/30 audit-scoping + 72/72 regression = 102/102). Both admin+director bulk-audit 500s from iter 14 are fully resolved.",
+    "frontend": "not tested (backend-only per request)"
+  },
+  "seed_data_creation": "No new seed data. Existing TEST_* fixtures from iter 14 were reused by the pytest fixture chain (project_a/mrf_se_a/approved_mrf_a/po_a etc.).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Audit bulk-view issue fully closed. `_strip_oids` is now the canonical serializer for both /api/audit and /api/master/audit responses — if new audit-returning endpoints are added, they should use the same helper. No follow-up required for this fix.",
+  "rca_of_issue": "Not applicable — fix confirmed. Iter-14 bug (bulk /api/audit 500 for admin & director due to nested ObjectIds in 3 legacy audit_logs rows) is fully resolved by (a) recursive `_strip_oids` on the response path (primary fix) and (b) one-off `$unset` cleanup of the 3 offending rows (secondary belt-and-braces). Verified via 30/30 pytest + direct curl for both roles returning 200 with 176-item list."
+}

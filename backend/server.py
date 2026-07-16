@@ -1996,7 +1996,10 @@ async def audit_logs(entity_id: Optional[str] = None,
     if entity_id: q["entity_id"] = entity_id
     if entity: q["entity"] = entity
     logs = await db.audit_logs.find(q, {"_id": 0}).sort("timestamp", -1).limit(200).to_list(200)
-    return logs
+    # Defensive: audit_logs may historically contain nested ObjectIds inside
+    # details/new_value/old_value (e.g. from motor's insert_one mutation of
+    # request dicts). Strip recursively so responses are always JSON-safe.
+    return [_strip_oids(d) for d in logs]
 
 # ---------------------- Settings: Purchase Thresholds ----------------------
 @api.get("/settings/thresholds")
