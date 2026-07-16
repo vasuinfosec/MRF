@@ -3193,7 +3193,7 @@ async def export_po(token: Optional[str] = None,
                     authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
-    if u.role not in ("purchase", "director", "admin", "gm"):
+    if u.role not in ("purchase", "director", "admin", "gm", "pm"):
         raise HTTPException(403, "Not allowed")
     pos = await db.pos.find({"deleted": False}, {"_id": 0}).sort("date", -1).to_list(2000)
     wb = await _po_excel_workbook(pos, single=False)
