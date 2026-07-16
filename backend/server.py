@@ -922,12 +922,25 @@ async def create_po(body: POCreate, authorization: Optional[str] = Header(None))
 @api.get("/po")
 async def list_pos(project_id: Optional[str] = None,
                    authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
     q: Dict[str, Any] = {"deleted": False}
     if project_id:
         q["project_id"] = project_id
     docs = await db.pos.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
-    return docs
+    if u.role in ("admin", "purchase", "billing"):
+        return docs
+    if u.role == "project_manager":
+        prjs = await db.projects.find({"project_managers": u.user_id},
+                                      {"_id": 0, "project_id": 1}).to_list(500)
+        allowed = {p["project_id"] for p in prjs}
+        return [p for p in docs if p.get("project_id") in allowed]
+    if u.role == "site_engineer":
+        # Only POs whose mrf_refs include an MRF created by this user
+        my = await db.mrfs.find({"created_by": u.user_id},
+                                {"_id": 0, "mrf_id": 1}).to_list(2000)
+        my_ids = {m["mrf_id"] for m in my}
+        return [p for p in docs if my_ids.intersection(p.get("mrf_refs") or [])]
+    return []
 
 @api.get("/po/{po_id}")
 async def get_po(po_id: str, authorization: Optional[str] = Header(None)):
@@ -1245,10 +1258,11 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
                  authorization: Optional[str] = Header(None)):
     # Allow token via query for browser download
     auth = authorization or (f"Bearer {token}" if token else None)
-    await get_current_user(auth)
+    u = await get_current_user(auth)
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(404, "PO not found")
+    await _check_po_access(u, po)
     vendor = await db.vendors.find_one({"vendor_id": po["vendor_id"]}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": po["project_id"]}, {"_id": 0}) or {}
     po_mrf_nums = []
@@ -1394,10 +1408,15 @@ async def list_all_grns(authorization: Optional[str] = Header(None)):
 async def grn_pdf(grn_id: str, token: Optional[str] = None,
                   authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
-    await get_current_user(auth)
+    u = await get_current_user(auth)
     grn = await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
     if not grn:
         raise HTTPException(404, "GRN not found")
+    po = await db.pos.find_one({"po_id": grn.get("po_id")}, {"_id": 0})
+    if po:
+        await _check_po_access(u, po)
+    elif u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Not allowed")
     vendor = await db.vendors.find_one({"vendor_id": grn.get("vendor_id")}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": grn.get("project_id")}, {"_id": 0}) or {}
     grn_mrf_nums = []
@@ -1721,7 +1740,9 @@ async def list_po_invoices(po_id: str, authorization: Optional[str] = Header(Non
 async def invoice_pdf(inv_id: str, token: Optional[str] = None,
                       authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
-    await get_current_user(auth)
+    u = await get_current_user(auth)
+    if u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Only purchase/billing/admin")
     inv = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
     if not inv:
         raise HTTPException(404, "Invoice not found")

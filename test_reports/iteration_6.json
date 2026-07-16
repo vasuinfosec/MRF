@@ -1,0 +1,35 @@
+{
+  "summary": "Iteration 8 — SEC-002 follow-up verification. Added test_sec002_pdf_scoping.py with 27 focused tests validating: (a) GET /api/po list role/project scoping for admin/purchase/billing (full), project_manager (their-projects-only), site_engineer (only POs whose mrf_refs include an MRF they created), stranger SE/PM (empty); (b) GET /api/po/{id}/pdf enforces _check_po_access — stranger SE and stranger PM 403, creator SE and admin/purchase/billing 200 application/pdf; (c) GET /api/grn/{id}/pdf resolves underlying PO and calls _check_po_access — stranger 403, related SE and privileged roles 200 application/pdf; (d) GET /api/invoice/{id}/pdf restricts to purchase/billing/admin — site_engineer / project_manager / strangers all 403, privileged roles 200 application/pdf. Full regression run: 174/174 passed (147 prior + 27 new). No product bugs found.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_sec002_pdf_scoping.py",
+    "/app/test_reports/pytest/pytest_sec002_iter8.xml",
+    "/app/test_reports/pytest/pytest_all_iter8.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "SEC-002 (list_pos, /app/backend/server.py:923): For site_engineer, the query fetches up to 2000 MRF ids and 500 POs then does an in-memory intersection. For larger tenants, prefer a single Mongo query with {\"mrf_refs\": {\"$in\": my_ids}} at DB level and skip the 500-row limit or paginate.",
+    "SEC-002 (_check_po_access, server.py:729): site_engineer access is granted only if they *created* one of the linked MRFs. Other SEs on the same project team who did not create the MRF cannot view the PO/GRN. This matches the spec (creator-scoped) but should be documented explicitly.",
+    "SEC-002 (grn_pdf, server.py:1407): If the underlying PO has been hard-deleted (po is None) the code falls through to the `elif u.role not in privileged` branch. This is safe (non-privileged get 403), but consider returning 404 or reconciling the orphan GRN.",
+    "SEC-002 (invoice_pdf, server.py:1739): Role check happens BEFORE the 404 existence check, so a non-authorized role always sees 403 even for unknown ids (correct: avoids existence oracle). Confirm this is the intended contract for invoice PDF.",
+    "server.py is 1994 lines — still worth splitting into routers/modules (open from prior iterations)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_sec002_pdf_scoping.py (new — 27 tests)"
+  ],
+  "success_rate": {"backend": "100% (174/174: 27 new SEC-002 follow-up + 147 prior regression)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "Uses admin-authenticated POST /api/seed. Also creates ephemeral users via /api/auth/dev-login (stranger_<hex>@vasu.dev site_engineer, pmstranger_<hex>@vasu.dev project_manager, se2_<hex>@vasu.dev site_engineer). Creates one TEST_ MRF + PO + GRN + Invoice per module run for scoping validation. No destructive changes to seeded data.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 8 SEC-002 follow-up passes. Notes for next agent: (1) /api/po list uses two Mongo queries + in-memory intersection for site_engineer scoping — watch performance if fixture data grows past ~500 POs. (2) /api/grn/{id}/pdf resolves the parent PO then calls _check_po_access — if the parent PO is deleted, non-privileged roles still get 403 via the elif fallback. (3) /api/invoice/{id}/pdf does role-check before 404, which is fine but different from other endpoints. (4) All PDF endpoints support ?token= query for browser download; playwright-based frontend tests should use that pattern.",
+  "rca_of_issue": "N/A — SEC-002 follow-up fix is correctly implemented. No product bugs found. During test authoring one initial negative test attempted to create an MRF as a fresh SE not on any project which correctly returned 403 (\"You are not assigned to this project\"); simplified the test to just assert the fresh SE with zero MRFs sees no PO in list — this was a test-only adjustment, not a product fix."
+}
