@@ -438,6 +438,16 @@ async def next_grn_number() -> str:
     seq = r["seq"] if r else 1
     return f"GRN/{year}/{seq:04d}"
 
+async def next_invoice_number() -> str:
+    year = datetime.now().year
+    r = await db.counters.find_one_and_update(
+        {"_id": f"inv_{year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True, return_document=True
+    )
+    seq = r["seq"] if r else 1
+    return f"INV/{year}/{seq:04d}"
+
 @api.post("/mrf")
 async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
@@ -1294,6 +1304,219 @@ async def import_mrf(file: UploadFile = File(...), authorization: Optional[str] 
         created.append(mrf.mrf_number)
 
     return {"created": created, "errors": errors, "count": len(created)}
+
+# ---------------------- Invoice ----------------------
+class InvoiceItemIn(BaseModel):
+    mrf_id: Optional[str] = ""
+    item_line_id: Optional[str] = ""
+    description: str
+    unit: str = "Nos"
+    qty: float
+    rate: float
+    discount: float = 0
+    gst: float = 18
+
+class InvoiceCreate(BaseModel):
+    po_id: str
+    vendor_invoice_number: Optional[str] = ""
+    invoice_date: Optional[str] = ""
+    items: List[InvoiceItemIn]
+    freight: float = 0
+    other_charges: float = 0
+    remarks: Optional[str] = ""
+
+@api.post("/invoice")
+async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ["purchase", "billing", "admin"]:
+        raise HTTPException(403, "Only purchase/billing/admin")
+    po = await db.pos.find_one({"po_id": body.po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO not found")
+    subtotal = 0.0
+    gst_total = 0.0
+    items = []
+    for it in body.items:
+        gross = it.qty * it.rate
+        after_disc = gross - it.discount
+        gst_amt = after_disc * it.gst / 100
+        subtotal += after_disc
+        gst_total += gst_amt
+        items.append({**it.model_dump(), "line_total": round(after_disc + gst_amt, 2)})
+    total = round(subtotal + gst_total + body.freight + body.other_charges, 2)
+    inv = {
+        "invoice_id": gid("inv"),
+        "invoice_number": await next_invoice_number(),
+        "vendor_invoice_number": body.vendor_invoice_number or "",
+        "invoice_date": body.invoice_date or now_utc().strftime("%Y-%m-%d"),
+        "po_id": body.po_id,
+        "po_number": po["po_number"],
+        "vendor_id": po["vendor_id"],
+        "project_id": po["project_id"],
+        "mrf_refs": po.get("mrf_refs", []),
+        "items": items,
+        "subtotal": round(subtotal, 2),
+        "gst_total": round(gst_total, 2),
+        "freight": body.freight,
+        "other_charges": body.other_charges,
+        "total": total,
+        "remarks": body.remarks or "",
+        "status": "recorded",
+        "created_by": u.user_id,
+        "created_by_name": u.name,
+        "created_at": now_utc(),
+    }
+    await db.invoices.insert_one(inv)
+    await audit("invoice", inv["invoice_id"], "create", u,
+                {"invoice_number": inv["invoice_number"], "total": total})
+    inv.pop("_id", None)
+    return inv
+
+@api.get("/invoice")
+async def list_invoices(po_id: Optional[str] = None,
+                        authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    q = {}
+    if po_id:
+        q["po_id"] = po_id
+    docs = await db.invoices.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
+    return docs
+
+@api.get("/invoice/{inv_id}")
+async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    d = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
+    if not d:
+        raise HTTPException(404, "Invoice not found")
+    return d
+
+@api.get("/po/{po_id}/invoices")
+async def list_po_invoices(po_id: str, authorization: Optional[str] = Header(None)):
+    await get_current_user(authorization)
+    return await db.invoices.find({"po_id": po_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
+
+@api.get("/invoice/{inv_id}/pdf")
+async def invoice_pdf(inv_id: str, token: Optional[str] = None,
+                      authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    await get_current_user(auth)
+    inv = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
+    if not inv:
+        raise HTTPException(404, "Invoice not found")
+    vendor = await db.vendors.find_one({"vendor_id": inv["vendor_id"]}, {"_id": 0}) or {}
+    project = await db.projects.find_one({"project_id": inv["project_id"]}, {"_id": 0}) or {}
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                            leftMargin=15*mm, rightMargin=15*mm)
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('t', parent=styles['Title'], fontSize=18, textColor=colors.HexColor('#002FA7'))
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
+    story = [
+        Paragraph("VASU INFOSEC", title_style),
+        Paragraph("VENDOR INVOICE", styles['Heading2']),
+        Spacer(1, 6),
+        Paragraph(f"<b>Invoice #:</b> {inv['invoice_number']}    <b>Date:</b> {inv['invoice_date']}", small),
+        Paragraph(f"<b>Vendor Ref:</b> {inv.get('vendor_invoice_number') or '—'}    <b>PO:</b> {inv['po_number']}", small),
+        Paragraph(f"<b>MRF Refs:</b> {', '.join(inv.get('mrf_refs') or []) or '—'}", small),
+        Spacer(1, 8),
+        Paragraph(f"<b>Vendor:</b> {vendor.get('name','')} | GSTIN: {vendor.get('gstin','')} | {vendor.get('address','')}", small),
+        Paragraph(f"<b>Project:</b> {project.get('name','')} ({project.get('code','')})", small),
+        Spacer(1, 8),
+    ]
+    data = [["#", "Description", "Unit", "Qty", "Rate", "Disc", "GST%", "Total"]]
+    for idx, it in enumerate(inv["items"], 1):
+        data.append([str(idx), (it["description"] or "")[:40], it.get("unit", ""),
+                     str(it["qty"]), f"{it['rate']}", f"{it.get('discount', 0)}",
+                     f"{it.get('gst', 0)}", f"{it.get('line_total', 0):.2f}"])
+    tbl = Table(data, colWidths=[20, 180, 40, 40, 50, 40, 40, 60])
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor('#002FA7')),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    story.append(tbl)
+    story.append(Spacer(1, 8))
+    story.append(Paragraph(
+        f"<b>Subtotal:</b> {inv['subtotal']}  <b>GST:</b> {inv['gst_total']}  "
+        f"<b>Freight:</b> {inv.get('freight', 0)}  <b>Other:</b> {inv.get('other_charges', 0)}  "
+        f"<b>Grand Total:</b> {inv['total']}", small))
+    if inv.get("remarks"):
+        story.append(Spacer(1, 6))
+        story.append(Paragraph(f"<b>Remarks:</b> {inv['remarks']}", small))
+    story += [
+        Spacer(1, 30),
+        Paragraph("Recorded by: " + inv.get("created_by_name", ""), small),
+    ]
+    doc.build(story)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{inv["invoice_number"].replace("/","_")}.pdf"'})
+
+# ---------------------- GRN vs PO Variance Report ----------------------
+@api.get("/reports/grn-variance")
+async def grn_variance(
+    project_id: Optional[str] = None,
+    vendor_id: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
+):
+    await get_current_user(authorization)
+    q: Dict[str, Any] = {"deleted": False}
+    if project_id:
+        q["project_id"] = project_id
+    if vendor_id:
+        q["vendor_id"] = vendor_id
+    pos = await db.pos.find(q, {"_id": 0}).to_list(1000)
+    # Preload invoice totals per PO
+    inv_totals: Dict[str, float] = {}
+    inv_docs = await db.invoices.find({}, {"_id": 0}).to_list(2000)
+    for iv in inv_docs:
+        inv_totals[iv["po_id"]] = inv_totals.get(iv["po_id"], 0) + float(iv.get("total") or 0)
+    out = []
+    for p in pos:
+        po_val_ord = 0.0
+        po_val_recv = 0.0
+        short_lines = 0
+        line_count = len(p.get("items", []))
+        for it in p.get("items", []):
+            qty = float(it.get("qty") or 0)
+            recv = float(it.get("qty_received") or 0)
+            rate = float(it.get("rate") or 0)
+            disc = float(it.get("discount") or 0)
+            gst = float(it.get("gst") or 0)
+            ord_val = qty * rate - disc
+            ord_val = ord_val + ord_val * gst / 100
+            recv_val = 0.0
+            if qty > 0:
+                recv_val = ord_val * (recv / qty)
+            po_val_ord += ord_val
+            po_val_recv += recv_val
+            if recv < qty:
+                short_lines += 1
+        po_val_ord += float(p.get("freight") or 0) + float(p.get("other_charges") or 0)
+        po_val_recv += float(p.get("freight") or 0) + float(p.get("other_charges") or 0) if p.get("status") == "received" else 0
+        inv_total = inv_totals.get(p["po_id"], 0)
+        variance = round(po_val_ord - po_val_recv, 2)
+        invoice_variance = round(inv_total - po_val_recv, 2)
+        out.append({
+            "po_id": p["po_id"],
+            "po_number": p["po_number"],
+            "date": p["date"].strftime("%Y-%m-%d") if isinstance(p["date"], datetime) else str(p["date"]),
+            "vendor_id": p.get("vendor_id"),
+            "project_id": p.get("project_id"),
+            "status": p.get("status", "issued"),
+            "line_count": line_count,
+            "short_lines": short_lines,
+            "value_ordered": round(po_val_ord, 2),
+            "value_received": round(po_val_recv, 2),
+            "variance": variance,
+            "invoice_total": round(inv_total, 2),
+            "invoice_variance": invoice_variance,
+        })
+    out.sort(key=lambda r: (-abs(r["variance"]), r["po_number"]))
+    return out
 
 # ---------------------- Seed ----------------------
 @api.post("/seed")

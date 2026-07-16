@@ -18,6 +18,16 @@ export default function PODetail() {
   const [vendor, setVendor] = useState<any>(null);
   const [project, setProject] = useState<any>(null);
   const [grns, setGrns] = useState<any[]>([]);
+  const [invoices, setInvoices] = useState<any[]>([]);
+  const [invoiceOpen, setInvoiceOpen] = useState(false);
+  const [invLines, setInvLines] = useState<Record<string, { qty: string; rate: string; discount: string; gst: string }>>({});
+  const [vendorInvNo, setVendorInvNo] = useState("");
+  const [invDate, setInvDate] = useState("");
+  const [invFreight, setInvFreight] = useState("0");
+  const [invOther, setInvOther] = useState("0");
+  const [invRemarks, setInvRemarks] = useState("");
+  const [invSaving, setInvSaving] = useState(false);
+  const [invErr, setInvErr] = useState("");
   const [mrfNumbers, setMrfNumbers] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [receiveOpen, setReceiveOpen] = useState(false);
@@ -31,12 +41,13 @@ export default function PODetail() {
     try {
       const p = await api<any>(`/po/${id}`);
       setPo(p);
-      const [v, pr, gs] = await Promise.all([
+      const [v, pr, gs, ivs] = await Promise.all([
         api<any[]>("/vendors").then((vs) => vs.find((x) => x.vendor_id === p.vendor_id)),
         api<any[]>("/projects").then((ps) => ps.find((x) => x.project_id === p.project_id)),
         api<any[]>(`/po/${id}/grns`),
+        api<any[]>(`/po/${id}/invoices`),
       ]);
-      setVendor(v); setProject(pr); setGrns(gs);
+      setVendor(v); setProject(pr); setGrns(gs); setInvoices(ivs);
       // Resolve MRF ids -> mrf_number for display
       const refs: string[] = p.mrf_refs || [];
       const map: Record<string, string> = {};
@@ -64,6 +75,7 @@ export default function PODetail() {
       initial[it.item_line_id] = String(remaining);
     });
     setReceiveQty(initial);
+    setReceiveRemarks("");
     setErr("");
     setReceiveOpen(true);
   };
@@ -77,12 +89,80 @@ export default function PODetail() {
         qty: Number(receiveQty[it.item_line_id] || 0),
       })).filter((r: any) => r.qty > 0);
       if (!items.length) { setErr("Enter at least one quantity to receive."); setSaving(false); return; }
-      await api(`/po/${id}/received`, { method: "POST", body: { items } });
+      await api(`/po/${id}/received`, { method: "POST", body: { items, remarks: receiveRemarks } });
       setReceiveOpen(false);
       load();
     } catch (e: any) { setErr(e.message || "Failed"); }
     setSaving(false);
   };
+
+  const downloadGRN = async (grn_id: string) => {
+    const t = await getToken();
+    if (typeof window !== "undefined") window.open(`${backendUrl}/api/grn/${grn_id}/pdf?token=${t}`, "_blank");
+  };
+
+  const downloadInvoice = async (inv_id: string) => {
+    const t = await getToken();
+    if (typeof window !== "undefined") window.open(`${backendUrl}/api/invoice/${inv_id}/pdf?token=${t}`, "_blank");
+  };
+
+  const openInvoice = () => {
+    const map: Record<string, any> = {};
+    (po.items || []).forEach((it: any) => {
+      const already = (invoices || []).reduce((s: number, iv: any) => {
+        return s + (iv.items || []).filter((r: any) => r.item_line_id === it.item_line_id)
+          .reduce((ss: number, r: any) => ss + Number(r.qty || 0), 0);
+      }, 0);
+      const remaining = Math.max(0, Number(it.qty || 0) - already);
+      map[it.item_line_id] = {
+        qty: String(remaining),
+        rate: String(it.rate || 0),
+        discount: String(it.discount || 0),
+        gst: String(it.gst || 0),
+      };
+    });
+    setInvLines(map);
+    setVendorInvNo(""); setInvDate(new Date().toISOString().slice(0, 10));
+    setInvFreight(String(po.freight || 0));
+    setInvOther(String(po.other_charges || 0));
+    setInvRemarks(""); setInvErr("");
+    setInvoiceOpen(true);
+  };
+
+  const submitInvoice = async () => {
+    setInvSaving(true); setInvErr("");
+    try {
+      const items = (po.items || []).map((it: any) => {
+        const l = invLines[it.item_line_id];
+        return {
+          mrf_id: it.mrf_id, item_line_id: it.item_line_id,
+          description: it.description, unit: it.unit,
+          qty: Number(l?.qty || 0), rate: Number(l?.rate || 0),
+          discount: Number(l?.discount || 0), gst: Number(l?.gst || 0),
+        };
+      }).filter((r: any) => r.qty > 0);
+      if (!items.length) { setInvErr("Enter qty > 0 on at least one line."); setInvSaving(false); return; }
+      await api("/invoice", { method: "POST", body: {
+        po_id: id, vendor_invoice_number: vendorInvNo, invoice_date: invDate,
+        items, freight: Number(invFreight) || 0, other_charges: Number(invOther) || 0,
+        remarks: invRemarks,
+      } });
+      setInvoiceOpen(false);
+      load();
+    } catch (e: any) { setInvErr(e.message || "Failed"); }
+    setInvSaving(false);
+  };
+
+  const invoiceTotal = React.useMemo(() => {
+    let sub = 0, gstTot = 0;
+    Object.values(invLines).forEach((l) => {
+      const g = Number(l.qty) * Number(l.rate);
+      const ad = g - Number(l.discount);
+      sub += ad;
+      gstTot += ad * Number(l.gst) / 100;
+    });
+    return sub + gstTot + (Number(invFreight) || 0) + (Number(invOther) || 0);
+  }, [invLines, invFreight, invOther]);
 
   if (!po) return busy ? <Loader /> : null;
 
@@ -191,7 +271,36 @@ export default function PODetail() {
         <View style={{ marginTop: 16, gap: 8 }}>
           <Btn testID="pdf-download-btn" title="Download PDF" variant="primary" onPress={downloadPDF} />
           {canReceive ? <Btn testID="mark-received-btn" title="Receive Items" variant="action" onPress={markReceived} /> : null}
+          {(user?.role === "purchase" || user?.role === "billing" || user?.role === "admin") ? (
+            <Btn testID="record-invoice-btn" title="Record Vendor Invoice" variant="outline" onPress={openInvoice} />
+          ) : null}
         </View>
+
+        {invoices.length > 0 ? (
+          <>
+            <H2 style={{ marginTop: 20, marginBottom: 8 }}>Vendor Invoices ({invoices.length})</H2>
+            {invoices.map((iv) => (
+              <Card key={iv.invoice_id} style={{ marginBottom: 8 }} testID={`inv-${iv.invoice_number.replace(/\//g, "-")}`}>
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={{ fontWeight: "700", color: theme.colors.primary }}>{iv.invoice_number}</Text>
+                    <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+                      {iv.invoice_date} · Vendor Ref: {iv.vendor_invoice_number || "—"}
+                    </Text>
+                    <Text style={{ fontSize: 13, fontWeight: "700", marginTop: 4, color: theme.colors.text }}>
+                      ₹ {new Intl.NumberFormat("en-IN").format(Math.round(iv.total || 0))}
+                    </Text>
+                  </View>
+                  <TouchableOpacity testID={`inv-pdf-${iv.invoice_number.replace(/\//g, "-")}`}
+                    onPress={() => downloadInvoice(iv.invoice_id)} style={styles.grnPdfBtn}>
+                    <Ionicons name="document-outline" size={18} color="#fff" />
+                    <Text style={{ color: "#fff", fontWeight: "700", fontSize: 12, marginLeft: 4 }}>PDF</Text>
+                  </TouchableOpacity>
+                </View>
+              </Card>
+            ))}
+          </>
+        ) : null}
 
         {grns.length > 0 ? (
           <>
@@ -275,6 +384,74 @@ export default function PODetail() {
           </View>
         </View>
       </Modal>
+
+      {/* Vendor Invoice Modal */}
+      <Modal visible={invoiceOpen} transparent animationType="fade" onRequestClose={() => setInvoiceOpen(false)}>
+        <View style={styles.modalBg}>
+          <View style={[styles.modal, { paddingBottom: 16 + insets.bottom, maxHeight: "90%" }]}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+              <Text style={{ fontWeight: "800", fontSize: 16 }}>Record Vendor Invoice</Text>
+              <TouchableOpacity testID="close-invoice-btn" onPress={() => setInvoiceOpen(false)}>
+                <Ionicons name="close" size={22} />
+              </TouchableOpacity>
+            </View>
+            <ScrollView style={{ marginTop: 6 }}>
+              <View style={{ flexDirection: "row", gap: 8 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.miniLbl}>Vendor Invoice #</Text>
+                  <TextInput testID="vendor-inv-no" value={vendorInvNo} onChangeText={setVendorInvNo} placeholder="e.g. HW-2026-0451" style={styles.miniInp} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.miniLbl}>Date</Text>
+                  <TextInput testID="inv-date" value={invDate} onChangeText={setInvDate} placeholder="YYYY-MM-DD" style={styles.miniInp} />
+                </View>
+              </View>
+
+              {(po.items || []).map((it: any, i: number) => {
+                const l = invLines[it.item_line_id] || { qty: "0", rate: "0", discount: "0", gst: "0" };
+                return (
+                  <View key={it.item_line_id} style={styles.recvRow}>
+                    <View style={{ flex: 1, paddingRight: 6 }}>
+                      <Text style={{ fontWeight: "700", fontSize: 13 }} numberOfLines={2}>{it.description}</Text>
+                      <Text style={{ fontSize: 10, color: theme.colors.textMuted }}>PO qty {it.qty} · rate {it.rate}</Text>
+                    </View>
+                    <View style={{ flexDirection: "row", gap: 4 }}>
+                      <TextInput testID={`inv-qty-${i}`} value={l.qty} onChangeText={(v) => setInvLines((s) => ({ ...s, [it.item_line_id]: { ...s[it.item_line_id], qty: v } }))} keyboardType="decimal-pad" style={styles.tinyInp} />
+                      <TextInput testID={`inv-rate-${i}`} value={l.rate} onChangeText={(v) => setInvLines((s) => ({ ...s, [it.item_line_id]: { ...s[it.item_line_id], rate: v } }))} keyboardType="decimal-pad" style={styles.tinyInp} />
+                      <TextInput testID={`inv-gst-${i}`} value={l.gst} onChangeText={(v) => setInvLines((s) => ({ ...s, [it.item_line_id]: { ...s[it.item_line_id], gst: v } }))} keyboardType="decimal-pad" style={styles.tinyInp} />
+                    </View>
+                  </View>
+                );
+              })}
+
+              <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.miniLbl}>Freight</Text>
+                  <TextInput testID="inv-freight" value={invFreight} onChangeText={setInvFreight} keyboardType="decimal-pad" style={styles.miniInp} />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={styles.miniLbl}>Other</Text>
+                  <TextInput testID="inv-other" value={invOther} onChangeText={setInvOther} keyboardType="decimal-pad" style={styles.miniInp} />
+                </View>
+              </View>
+              <TextInput testID="inv-remarks" value={invRemarks} onChangeText={setInvRemarks} placeholder="Remarks (optional)" style={[styles.remarksInp, { marginTop: 8 }]} multiline />
+              <View style={{ marginTop: 10, padding: 10, backgroundColor: theme.colors.surface, borderRadius: 6, flexDirection: "row", justifyContent: "space-between" }}>
+                <Text style={{ fontWeight: "700" }}>Invoice Total</Text>
+                <Text testID="inv-total" style={{ fontWeight: "800", fontSize: 16, color: theme.colors.primary }}>
+                  ₹ {new Intl.NumberFormat("en-IN").format(Math.round(invoiceTotal))}
+                </Text>
+              </View>
+              {invErr ? <Text testID="inv-err" style={{ color: theme.colors.danger, marginTop: 6 }}>{invErr}</Text> : null}
+            </ScrollView>
+            <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+              <View style={{ flex: 1 }}><Btn title="Cancel" variant="outline" onPress={() => setInvoiceOpen(false)} /></View>
+              <View style={{ flex: 1 }}>
+                <Btn testID="submit-invoice-btn" title={invSaving ? "Saving…" : "Save Invoice"} variant="action" onPress={submitInvoice} disabled={invSaving} />
+              </View>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -302,4 +479,7 @@ const styles = StyleSheet.create({
   receiptQty: { fontSize: 12, fontWeight: "700", color: theme.colors.success, marginHorizontal: 8 },
   receiptUser: { fontSize: 11, color: theme.colors.textMuted, minWidth: 60, textAlign: "right" },
   grnPdfBtn: { flexDirection: "row", alignItems: "center", backgroundColor: theme.colors.primary, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6 },
+  miniLbl: { fontSize: 10, fontWeight: "700", color: theme.colors.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 4 },
+  miniInp: { borderWidth: 1, borderColor: theme.colors.borderStrong, borderRadius: 6, paddingHorizontal: 10, paddingVertical: 8, backgroundColor: "#fff", fontSize: 13 },
+  tinyInp: { width: 54, borderWidth: 1, borderColor: theme.colors.borderStrong, borderRadius: 4, paddingHorizontal: 6, paddingVertical: 6, textAlign: "right", fontSize: 12, backgroundColor: "#fff" },
 });

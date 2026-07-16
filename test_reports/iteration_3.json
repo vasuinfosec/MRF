@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 3: Focused testing of Vendor Invoice + GRN vs PO Variance features on top of previously verified MRF/PO/GRN/import flows. Backend: 19/19 NEW pytest cases pass (test_invoice_variance.py) and full regression 64/64 green across all three suites. Frontend mobile-web preview verified end-to-end: PO detail /po/[id] shows 'Record Vendor Invoice' button (record-invoice-btn); modal opens with per-line qty/rate/gst inputs, freight/other, remarks and live Invoice Total; submitting creates the invoice (auto-numbered INV/2026/####) and it appears immediately in the 'Vendor Invoices (n)' list with a per-invoice PDF button (inv-pdf-INV-YYYY-NNNN). /reports now shows a 'GRN vs PO Variance' section with per-PO cards rendering Ordered / Received / Variance / Invoiced / Inv. Var stats plus status pill (variance-PO-YYYY-NNNN cards, 11 rows visible). Backend behavior confirmed: POST /api/invoice — 403 for site_engineer, 200 for purchase/billing/admin; auto-numbers INV/YYYY/####; stores vendor_id, project_id, mrf_refs, items[], subtotal, gst_total, freight, other_charges, total, created_by_name, status='recorded'; returns 404 for missing po_id. GET /api/invoice (with optional ?po_id filter), GET /api/invoice/{id} (404 on missing), GET /api/po/{po_id}/invoices — all return validated shapes. GET /api/invoice/{id}/pdf?token= returns real application/pdf starting with %PDF and 401 without token/header. GET /api/reports/grn-variance returns rows with keys {po_id, po_number, date, vendor_id, project_id, status, line_count, short_lines, value_ordered, value_received, variance, invoice_total, invoice_variance}, sorted by |variance| desc; project_id and vendor_id query filters both honored; requires auth. Numeric math on our seeded PO verified end-to-end: value_ordered 2410, value_received 1652, variance 758, invoice_total 1795, short_lines 1. Regression: existing 45 tests (MRF/PO/GRN/import) still pass. Only carry-over warning is the RN-Web pointerEvents deprecation from a library (already noted in prior iterations).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "PO detail (/po/[id])", "issues": ["(Carried over from iteration 2) 'MRF Refs' still renders the raw MRF UUID rather than the human MRF/YYYY/#### number. The new Invoice document also copies po.mrf_refs (server.py line 1356), so invoice PDFs may inherit the same raw-id display. Reference: /app/frontend/app/po/[id].tsx around line 106 and /app/backend/server.py line 1356."]}
+    ],
+    "react_native_issues": [
+      {"component": "RN Web (framework-level)", "issue": "Deprecation warning: props.pointerEvents is deprecated. Use style.pointerEvents. Originates from RN Web / library, not app code. Reference: browser console during load."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_invoice_variance.py",
+    "/app/backend/tests/test_grn_and_import.py",
+    "/app/backend/tests/test_mrf_po_workflow.py",
+    "/app/test_reports/pytest/pytest_invoice_variance.xml",
+    "/app/test_reports/pytest/pytest_all.xml"
+  ],
+  "action_items": [
+    "(Nice-to-have, non-blocking) Resolve po.mrf_refs to MRF numbers (MRF/YYYY/####) before rendering on the PO detail screen AND when copying into new Invoice documents (server.py create_invoice). Prevents cryptic 'mrf_xxxx' strings on both the PO screen and printed invoice PDFs.",
+    "(Consideration) POST /api/invoice does NOT validate that invoice qty per line ≤ (po qty − already invoiced qty). Frontend openInvoice() computes remaining and pre-fills, but a hand-crafted API call could over-invoice. Consider server-side clamp/reject similar to how mark_po_received clamps qty.",
+    "(Consideration) POST /api/invoice does NOT verify that the referenced po item_line_id / mrf_id actually belong to the given po_id — mismatched ids would still get stored. Low-risk since UI drives the values, but worth a light guard.",
+    "(Carried over) pointerEvents deprecation warning from RN Web/library."
+  ],
+  "critical_code_review_comments": [
+    "server.py 1459-1519 grn_variance: freight/other_charges are added to value_ordered always but only to value_received when status=='received'. This is correct for the final row but means a partially_received PO shows freight in the ordered side without any corresponding received-side allocation — the 'variance' includes freight even while goods are still coming. Might want to prorate freight by qty_received/qty like line items are, or document the intent.",
+    "server.py 1476 preloads ALL invoices with .to_list(2000) then aggregates in Python. Fine at current scale, but if invoice count grows this becomes O(N*M). Consider a $group aggregation grouped by po_id.",
+    "server.py 1329-1373 create_invoice: no validation that body.items is non-empty, so a client could POST an invoice with items=[] and get a zero-total invoice recorded. Recommend requiring len(items) >= 1.",
+    "server.py 1345 InvoiceItemIn discount default is 0 but there is no clamp; a negative discount would inflate line_total. Recommend Field(ge=0) on discount, qty, rate.",
+    "frontend/app/po/[id].tsx openInvoice() uses invoices.reduce over already-invoiced qty per line, but the fallback description/rate come from po.items only (not from mrf approved items). Works because PO already carries description+rate, but worth confirming the invoice modal never shows stale rates if the PO is edited (edit-po flow, if any).",
+    "frontend/app/po/[id].tsx submitInvoice sends only lines with qty>0. Good. But there is no confirmation that vendor_invoice_number is unique across invoices — duplicates for the same physical vendor bill are silently accepted."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% new (19/19) + 100% regression (45/45) = 64/64",
+    "frontend": "100% of tested flows (login as purchase, tab-po, PO detail load, record-invoice-btn opens modal, submit creates invoice, invoice appears in list with PDF btn, /reports variance section renders 11 per-PO cards with all stats)"
+  },
+  "seed_data_creation": "POST /api/seed re-called (idempotent). One TEST MRF + PO + partial GRN + two invoices (INV/2026/0004 & 0005 via API) plus one invoice INV/2026/0006 via frontend UI submission on PO/2026/0010.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Three backend suites now live at /app/backend/tests/: test_mrf_po_workflow.py (27), test_grn_and_import.py (18), test_invoice_variance.py (19) — total 64, all pass with `pytest /app/backend/tests/ -v` in ~77s. Frontend testIDs to remember for iteration 3: on PO detail — record-invoice-btn, close-invoice-btn, submit-invoice-btn, inv-<INV-YYYY-NNNN>, inv-pdf-<INV-YYYY-NNNN>. On /reports — variance-<PO-YYYY-NNNN> cards. Invoice PDF endpoint is auth-gated with ?token=<jwt> query (uses Bearer fallback), same pattern as GRN PDF. Backend base https://purchase-workflow-10.preview.emergentagent.com. Demo users: site@vasu.dev / pm@vasu.dev / purchase@vasu.dev / billing@vasu.dev / admin@vasu.dev via POST /api/auth/dev-login.",
+  "rca_of_issue": "No new bugs found in this iteration."
+}

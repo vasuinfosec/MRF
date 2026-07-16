@@ -13,6 +13,9 @@ export default function Reports() {
   const router = useRouter();
   const { user } = useAuth();
   const [ageing, setAgeing] = useState<any[]>([]);
+  const [variance, setVariance] = useState<any[]>([]);
+  const [projects, setProjects] = useState<any[]>([]);
+  const [vendors, setVendors] = useState<any[]>([]);
   const [dash, setDash] = useState<any>(null);
   const [busy, setBusy] = useState(false);
 
@@ -20,11 +23,20 @@ export default function Reports() {
   const load = async () => {
     setBusy(true);
     try {
-      const [a, d] = await Promise.all([api("/reports/mrf-ageing"), api("/reports/dashboard")]);
-      setAgeing(a); setDash(d);
+      const [a, d, v, p, vn] = await Promise.all([
+        api("/reports/mrf-ageing"),
+        api("/reports/dashboard"),
+        api("/reports/grn-variance"),
+        api("/projects"),
+        api("/vendors"),
+      ]);
+      setAgeing(a); setDash(d); setVariance(v); setProjects(p); setVendors(vn);
     } catch (_e) { /* noop */ }
     setBusy(false);
   };
+
+  const pName = (id: string) => projects.find((p) => p.project_id === id)?.code || "—";
+  const vName = (id: string) => vendors.find((v) => v.vendor_id === id)?.name || "—";
 
   const exp = async (kind: "mrf" | "po") => {
     const t = await getToken();
@@ -59,6 +71,32 @@ export default function Reports() {
           <Btn testID="export-po-btn" title="Export POs to Excel" variant="primary" onPress={() => exp("po")} />
         </View>
 
+        <H2 style={{ marginTop: 20 }}>GRN vs PO Variance</H2>
+        <Muted>Sorted by highest absolute variance. Negative invoice variance = under-invoiced.</Muted>
+        {variance.length ? variance.map((v) => (
+          <Card key={v.po_id} style={{ marginTop: 8 }} testID={`variance-${v.po_number.replace(/\//g, "-")}`}>
+            <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <View style={{ flex: 1 }}>
+                <Text style={{ fontWeight: "700" }}>{v.po_number}</Text>
+                <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+                  {pName(v.project_id)} · {vName(v.vendor_id)}
+                </Text>
+                <Text style={{ fontSize: 11, color: theme.colors.textMuted, marginTop: 2 }}>
+                  {v.short_lines} of {v.line_count} line(s) short · Date {v.date}
+                </Text>
+              </View>
+              <Pill status={v.status === "issued" ? "sent_to_purchase" : v.status} />
+            </View>
+            <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+              <VStat label="Ordered" v={v.value_ordered} />
+              <VStat label="Received" v={v.value_received} />
+              <VStat label="Variance" v={v.variance} tone={v.variance !== 0 ? "warn" : "ok"} />
+              <VStat label="Invoiced" v={v.invoice_total} />
+              <VStat label="Inv. Var" v={v.invoice_variance} tone={Math.abs(v.invoice_variance) > 0.5 ? "warn" : "ok"} />
+            </View>
+          </Card>
+        )) : <Empty msg="No POs to compare yet." testID="variance-empty" />}
+
         <H2 style={{ marginTop: 20 }}>MRF Ageing</H2>
         {busy && !ageing.length ? <Loader /> : null}
         {ageing.length ? ageing.map((m) => (
@@ -79,6 +117,17 @@ export default function Reports() {
         )) : <Empty msg="No ageing items." testID="ageing-empty" />}
       </ScrollView>
     </SafeAreaView>
+  );
+}
+
+function VStat({ label, v, tone }: { label: string; v: number; tone?: "warn" | "ok" }) {
+  const fmt = new Intl.NumberFormat("en-IN").format(Math.round(v || 0));
+  const color = tone === "warn" ? theme.colors.danger : tone === "ok" ? theme.colors.success : theme.colors.text;
+  return (
+    <View style={{ minWidth: 70, flex: 1, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 4, padding: 6 }}>
+      <Text style={{ fontSize: 9, color: theme.colors.textMuted, textTransform: "uppercase", letterSpacing: 1 }}>{label}</Text>
+      <Text style={{ fontSize: 12, fontWeight: "700", marginTop: 2, color }}>₹ {fmt}</Text>
+    </View>
   );
 }
 const styles = StyleSheet.create({
