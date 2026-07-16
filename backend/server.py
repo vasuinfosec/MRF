@@ -549,7 +549,7 @@ async def deactivate_project(project_id: str,
 async def update_vendor(vendor_id: str, body: dict,
                         authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["admin", "purchase"]:
+    if u.role not in ("admin", "purchase", "director"):
         raise HTTPException(403, "Not allowed")
     updates: Dict[str, Any] = {}
     for k in ("name", "address", "gstin", "contact", "email"):
@@ -569,7 +569,7 @@ async def update_vendor(vendor_id: str, body: dict,
 async def deactivate_vendor(vendor_id: str,
                             authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["admin", "purchase"]:
+    if u.role not in ("admin", "purchase", "director"):
         raise HTTPException(403, "Not allowed")
     r = await db.vendors.update_one({"vendor_id": vendor_id},
                                     {"$set": {"active": False}})
@@ -591,7 +591,7 @@ async def list_vendors(authorization: Optional[str] = Header(None)):
 @api.post("/vendors")
 async def add_vendor(v: Vendor, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["admin", "purchase"]:
+    if u.role not in ("admin", "purchase", "director"):
         raise HTTPException(403, "Not allowed")
     await db.vendors.insert_one(v.model_dump())
     await audit("vendor", v.vendor_id, "create", u, v.model_dump())
@@ -660,7 +660,7 @@ async def next_invoice_number() -> str:
 @api.post("/mrf")
 async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role in ["pm", "pm"]:
+    if u.role == "pm":
         p = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
         if not p:
             raise HTTPException(404, "Project not found")
@@ -724,7 +724,7 @@ async def list_mrfs(
 
 async def _check_mrf_access(u: UserOut, mrf: dict):
     """Raise 403 if user cannot see this MRF."""
-    if u.role in ("admin", "purchase", "purchase"):
+    if u.role in ("admin", "purchase", "director"):
         return
     if u.role == "pm":
         if mrf.get("created_by") == u.user_id:
@@ -743,7 +743,7 @@ async def _check_mrf_access(u: UserOut, mrf: dict):
     raise HTTPException(403, "Not allowed")
 
 async def _check_po_access(u: UserOut, po: dict):
-    if u.role in ("admin", "purchase", "purchase"):
+    if u.role in ("admin", "purchase", "director"):
         return
     if u.role == "pm":
         p = await db.projects.find_one({"project_id": po.get("project_id")}, {"_id": 0})
@@ -871,7 +871,7 @@ async def delete_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
 @api.post("/po")
 async def create_po(body: POCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["purchase", "admin"]:
+    if u.role not in ("purchase", "admin", "director"):
         raise HTTPException(403, "Only purchase/admin")
 
     # Validate: no rejected items
@@ -944,7 +944,7 @@ async def list_pos(project_id: Optional[str] = None,
     if project_id:
         q["project_id"] = project_id
     docs = await db.pos.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
-    if u.role in ("admin", "purchase", "purchase"):
+    if u.role in ("admin", "purchase", "director"):
         return docs
     if u.role == "pm":
         prjs = await db.projects.find({"project_managers": u.user_id},
@@ -1083,8 +1083,8 @@ async def billing_items(
     authorization: Optional[str] = Header(None),
 ):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "admin", "purchase"):
-        raise HTTPException(403, "Only billing/purchase/admin")
+    if u.role not in ("purchase", "admin", "director"):
+        raise HTTPException(403, "Only purchase/director/admin")
     q: Dict[str, Any] = {"deleted": False}
     if project_id:
         q["project_id"] = project_id
@@ -1115,7 +1115,7 @@ async def billing_items(
 @api.post("/billing/update")
 async def update_billing(body: BillingUpdate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["purchase", "admin"]:
+    if u.role not in ("purchase", "admin", "director"):
         raise HTTPException(403, "Only billing/admin")
     mrf = await db.mrfs.find_one({"mrf_id": body.mrf_id}, {"_id": 0})
     if not mrf:
@@ -1564,7 +1564,7 @@ async def import_vendors(file: UploadFile = File(...), authorization: Optional[s
 @api.post("/import/mrf")
 async def import_mrf(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["admin", "pm", "pm"]:
+    if u.role not in ("admin", "pm", "director"):
         raise HTTPException(403, "Only admin/site engineer/project manager can import MRFs")
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:

@@ -1,0 +1,47 @@
+{
+  "summary": "Phase 1 follow-up #2 backend retest. 47/47 in-scope tests PASSED (100%) after applying 1 line-level fix. Ran test_phase1_followup.py (15/15), test_phase1_role_reshuffle.py (28/28) regression, and new test_phase1_followup2.py (4/4) covering the additional endpoints in the review request: /po/{id}/grns, /grns, /invoice list, /billing/update as director. All previously-flagged director-access gates now return 200 (POST /po, GET /po/{id}/pdf, GET /billing/items, GET /po/{id}/grns, GET /grns, GET /invoice, GET /invoice/{id}/pdf, POST /billing/update). Regression is green: PM-off-project MRF approve 403, PM-on-project 200, /audit admin-only, /users email redaction (admin sees emails, others empty), /po/{id}/received still 403 for pm/gm and 200 for director/purchase/admin, submit_mrf notifies role='pm'. No lingering 500s on current server; historical 500s in err.log pre-date iteration 9 (older _check_po_access NameError already resolved).",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "GET /api/billing/items",
+        "issue": "The problem statement claimed this was already fixed in iteration 9, but server.py:1086 still had `('purchase', 'admin', 'purchase')` (duplicated 'purchase', missing director). Fixed in-place by test agent to `('purchase', 'admin', 'director')` and error message updated from 'Only billing/purchase/admin' to 'Only purchase/director/admin'. Retested: director now 200; fresh pm still 403."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase1_followup.py",
+    "/app/backend/tests/test_phase1_followup2.py",
+    "/app/backend/tests/test_phase1_role_reshuffle.py",
+    "/app/test_reports/pytest/phase1_followup_iter9.xml",
+    "/app/test_reports/pytest/phase1_full_iter9.xml"
+  ],
+  "action_items": [
+    "Legacy test suites (test_security_hardening.py, test_sec002_pdf_scoping.py, test_mrf_po_workflow.py) are STALE — they call /auth/dev-login with roles 'site_engineer', 'project_manager', 'billing' which were retired in Phase 1 role reshuffle. Dev-login now returns 400 'invalid role'. These are pre-existing failures unrelated to the current review; they should either be updated to use the canonical roles (pm/purchase) or be deleted since the same coverage exists in test_phase1_role_reshuffle.py. Not blocking.",
+    "Consider extracting shared role tuples into named constants (e.g. ALLOW_PURCHASE_AND_APPROVERS = ('purchase', 'director', 'admin')) to prevent recurrence of the duplicated-role-tuple bug class that has appeared in 3 consecutive iterations. Recommended for main agent Phase 1 cleanup pass 3.",
+    "Dead-code duplicate `if u.role == 'pm':` blocks remain at server.py 405/412, 715/717, 729/738, 748/752 (legacy site_engineer->pm rename artefacts). The second block in each pair is unreachable. Safe to remove but purely cosmetic."
+  ],
+  "critical_code_review_comments": [
+    "Line 1086 role-gate fix (`('purchase', 'admin', 'purchase')` -> `('purchase', 'admin', 'director')`) was explicitly listed as done in the problem statement but was in fact still present. Recommend the main agent add a grep-verification step to the PR checklist: `grep -nE \"'purchase',\\s*'purchase'|'pm',\\s*'pm'\" backend/server.py` should return zero results.",
+    "The unused role-tuple duplicates are all in server.py; no other file has the pattern. A single file-scoped constant would eliminate the bug class entirely."
+  ],
+  "updated_files": [
+    "/app/backend/server.py (1 line — fixed /billing/items role tuple at line 1086)",
+    "/app/backend/tests/test_phase1_followup2.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (47/47 in-scope: 15 followup + 28 role_reshuffle + 4 followup2)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Reused POST /api/seed (idempotent). Test data prefixed TEST_. New pytest fixtures create fresh MRFs/POs/invoices per test class.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run `EXPO_BACKEND_URL=http://localhost:8001 python -m pytest /app/backend/tests/test_phase1_followup.py /app/backend/tests/test_phase1_followup2.py /app/backend/tests/test_phase1_role_reshuffle.py -v --tb=short`. Expect 47/47 pass. Do NOT run test_security_hardening.py / test_sec002_pdf_scoping.py / test_mrf_po_workflow.py without first updating them — they use retired role names (site_engineer, project_manager, billing) and will produce 100+ errors that are stale-suite failures, not code regressions. ENABLE_DEV_LOGIN=1 must remain in /app/backend/.env.",
+  "rca_of_issue": "Root cause of the remaining follow-up failure: server.py:1086 role-gate on GET /api/billing/items was left as `('purchase', 'admin', 'purchase')` — a copy-paste duplicated 'purchase' with director omitted. Iteration 8 report flagged this explicitly and the follow-up commit was supposed to fix it, but the fix was not applied. Repro (before): dev-login director@vasu.dev role=director; GET /api/billing/items -> 403 {\"detail\":\"Only billing/purchase/admin\"}. Mitigation applied by test agent: changed the tuple to `('purchase', 'admin', 'director')` and the error message to `'Only purchase/director/admin'`. Verified: director 200 (returns list); fresh pm 403 unchanged."
+}
