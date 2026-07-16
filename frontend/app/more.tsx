@@ -13,9 +13,11 @@ import ProjectTeamModal from "@/src/components/ProjectTeamModal";
 
 const ROLES = [
   { key: "director", label: "Director" },
-  { key: "pm", label: "Project Manager" },
   { key: "gm", label: "General Manager" },
+  { key: "pm", label: "Project Manager" },
   { key: "purchase", label: "Purchase" },
+  { key: "site_engineer", label: "Site Engineer" },
+  { key: "store", label: "Stores" },
   { key: "admin", label: "Admin" },
 ];
 

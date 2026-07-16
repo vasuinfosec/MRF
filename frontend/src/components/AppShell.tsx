@@ -9,11 +9,11 @@ import { useAuth } from "@/src/auth";
 
 type Tab = { key: string; label: string; icon: keyof typeof Ionicons.glyphMap; path: string; roles: string[] };
 const TABS: Tab[] = [
-  { key: "home", label: "Home", icon: "grid-outline", path: "/home", roles: ["director","pm","gm","purchase","admin"] },
-  { key: "mrf", label: "MRF", icon: "document-text-outline", path: "/mrf", roles: ["director","pm","gm","purchase","admin"] },
-  { key: "po", label: "PO", icon: "cart-outline", path: "/po", roles: ["director","pm","gm","purchase","admin"] },
+  { key: "home", label: "Home", icon: "grid-outline", path: "/home", roles: ["director","pm","gm","purchase","admin","site_engineer","store"] },
+  { key: "mrf", label: "MRF", icon: "document-text-outline", path: "/mrf", roles: ["director","pm","gm","purchase","admin","site_engineer","store"] },
+  { key: "po", label: "PO", icon: "cart-outline", path: "/po", roles: ["director","pm","gm","purchase","admin","site_engineer","store"] },
   { key: "billing", label: "Billing", icon: "cash-outline", path: "/billing", roles: ["director","purchase","admin","gm"] },
-  { key: "more", label: "More", icon: "menu-outline", path: "/more", roles: ["director","pm","gm","purchase","admin"] },
+  { key: "more", label: "More", icon: "menu-outline", path: "/more", roles: ["director","pm","gm","purchase","admin","site_engineer","store"] },
 ];
 
 export function AppShell({ children, title, right, testID }: { children: React.ReactNode; title: string; right?: React.ReactNode; testID?: string }) {
@@ -76,8 +76,9 @@ export function roleLabel(role: string) {
     gm: "General Manager",
     purchase: "Purchase",
     admin: "Admin",
+    site_engineer: "Site Engineer",
+    store: "Stores",
     // legacy fallbacks
-    site_engineer: "Project Manager",
     project_manager: "Project Manager",
     billing: "Purchase",
   } as Record<string, string>)[role] || role;

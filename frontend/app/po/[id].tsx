@@ -166,7 +166,21 @@ export default function PODetail() {
 
   if (!po) return busy ? <Loader /> : null;
 
-  const canReceive = (po.status === "issued" || po.status === "partially_received") && (user?.role === "purchase" || user?.role === "director" || user?.role === "admin");
+  const canReceive = (po.status === "issued" || po.status === "partially_received") &&
+    (user?.role === "purchase" || user?.role === "director" || user?.role === "admin" ||
+     user?.role === "site_engineer" || user?.role === "store" || user?.role === "pm");
+  const isPendingGM = po.status === "pending_gm_approval";
+  const isPendingDir = po.status === "pending_director_approval";
+  const canApprovePO =
+    (isPendingGM && (user?.role === "gm" || user?.role === "director" || user?.role === "admin")) ||
+    (isPendingDir && (user?.role === "director" || user?.role === "admin"));
+
+  const doApprovePO = async (action: "approve" | "reject") => {
+    try {
+      await api(`/po/${id}/approve`, { method: "POST", body: { action } });
+      load();
+    } catch (e: any) { setErr(e.message || "Failed"); }
+  };
 
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
@@ -270,6 +284,17 @@ export default function PODetail() {
 
         <View style={{ marginTop: 16, gap: 8 }}>
           <Btn testID="pdf-download-btn" title="Download PDF" variant="primary" onPress={downloadPDF} />
+          {canApprovePO ? (
+            <>
+              <Btn testID="po-approve-btn" title={`Approve PO (₹${new Intl.NumberFormat("en-IN").format(po.total || 0)})`} variant="action" onPress={() => doApprovePO("approve")} />
+              <Btn testID="po-reject-btn" title="Reject PO" variant="outline" onPress={() => doApprovePO("reject")} />
+            </>
+          ) : null}
+          {isPendingGM || isPendingDir ? (
+            <Text style={{ color: theme.colors.textMuted, fontSize: 12, textAlign: "center", marginTop: 2 }}>
+              {isPendingDir ? "Awaiting Director approval" : "Awaiting GM approval"} · Receipts blocked until approved
+            </Text>
+          ) : null}
           {canReceive ? <Btn testID="mark-received-btn" title="Receive Items" variant="action" onPress={markReceived} /> : null}
           {(user?.role === "purchase" || user?.role === "director" || user?.role === "admin") ? (
             <Btn testID="record-invoice-btn" title="Record Vendor Invoice" variant="outline" onPress={openInvoice} />

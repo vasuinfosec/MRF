@@ -101,3 +101,103 @@
 #====================================================================================================
 # Testing Data - Main Agent and testing sub agent both should log testing data below this section
 #====================================================================================================
+## user_problem_statement (Phase 2 — Approval Chain & Thresholds)
+Enforce strict Vasu operational workflow: Site Engineer → Project Manager → Purchase → GM → Director.
+Restore `site_engineer` as a distinct role (was previously merged into pm).
+Add editable Purchase Approval Thresholds (GM / Director) in Masters.
+Preserve existing users and data (no rebuild).
+
+backend:
+  - task: "Restore site_engineer role and permission matrix"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "ROLES now includes site_engineer + store. Legacy site_engineer→pm mapping REMOVED. create_mrf allows site_engineer (project team check), approve_mrf explicitly excludes site_engineer, _check_mrf_access and _check_po_access have separate branches for site_engineer vs pm. list_mrfs shows own-only for SE, project-scoped for PM. mark_po_received allows site_engineer/store/purchase/pm/director/admin. Manual curl smoke test passed for full chain: SE-create → PM-approve → Purchase-PO → GRN."
+
+  - task: "PO threshold-based approval flow"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New endpoints: GET/PUT /api/settings/thresholds (director/admin only). create_po now computes initial status via _po_initial_status(total, gm_t, dir_t). Statuses: issued (≤GM), pending_gm_approval (GM<x≤Director), pending_director_approval (>Director). New POST /api/po/{id}/approve endpoint (GM approves GM-tier, Director approves both tiers). MRF qty_ordered rollup is DEFERRED until PO is approved. mark_po_received blocks PO in pending states. Manual curl test passed for small PO auto-issue, GM-tier requires GM, Director-tier rejects GM approval, Director approves it."
+
+  - task: "Seed real Vasu Infosec users"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Added Vivek (Director), Balkrishna (GM), Saket Iyer (PM), Himanshu (PM) with @vasuinfosec.com emails alongside dev demo users. Idempotent seed preserves manually-adjusted roles. Site engineer demo user added as siteeng@vasu.dev. Project team seed assigns saket+himanshu as project_managers on all seed projects."
+
+frontend:
+  - task: "Role-based UI for site_engineer and new chain"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/(various)"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "AppShell tabs, roleLabel, home Quick Actions, MRF list canCreate, PO list canCreate, PO detail approve/reject/receive buttons, Masters ROLES dropdown, ProjectTeamModal engineer filter, login demo users — all updated to include site_engineer + store."
+
+  - task: "PO approval workflow UI (GM/Director)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/po/[id].tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "PO detail shows Approve/Reject buttons when status is pending_gm_approval (for GM/Dir/Admin) or pending_director_approval (for Dir/Admin only). Receipt button unavailable while PO is in pending state. Added quick action 'POs Awaiting My Approval' on home for gm/director/admin."
+
+  - task: "PO Thresholds editor in Masters"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/masters.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New 'PO Thresholds' tab in Masters visible only to Director/Admin. Two numeric fields (GM, Director), save button hits PUT /api/settings/thresholds with validation (director >= gm)."
+
+metadata:
+  created_by: "main_agent"
+  version: "2.0"
+  test_sequence: 1
+  run_ui: true
+
+test_plan:
+  current_focus:
+    - "Restore site_engineer role and permission matrix"
+    - "PO threshold-based approval flow"
+    - "Role-based UI for site_engineer and new chain"
+    - "PO approval workflow UI (GM/Director)"
+    - "PO Thresholds editor in Masters"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: "Phase 2 (approval chain + thresholds) implemented. Backend RBAC completely reshuffled: site_engineer is now a first-class role, PO creation goes through threshold gates, GM/Director approve high-value POs. Please run comprehensive RBAC regression tests across all six roles (site_engineer, pm, purchase, gm, director, admin) covering: MRF create/submit/approve/reject/return, PO create with three threshold tiers, GM approve of GM-tier PO, GM reject of Director-tier PO, Director approve of both tiers, GRN receipt by site_engineer/purchase, and Threshold PUT restricted to director/admin. Dev-login endpoint is available at /api/auth/dev-login (ENABLE_DEV_LOGIN=1). See /app/memory/test_credentials.md for seeded users."

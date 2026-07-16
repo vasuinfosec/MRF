@@ -11,6 +11,7 @@ import { Btn, Card, H1, Muted, Label, Input, Body } from "@/src/components/ui";
 import { api } from "@/src/api";
 
 const DEMO = [
+  { email: "siteeng@vasu.dev", role: "site_engineer", label: "Site Engineer" },
   { email: "pm@vasu.dev", role: "pm", label: "Project Manager" },
   { email: "gm@vasu.dev", role: "gm", label: "General Manager" },
   { email: "purchase@vasu.dev", role: "purchase", label: "Purchase Dept." },
@@ -128,11 +129,14 @@ export default function Login() {
         <Card style={{ marginTop: 16, backgroundColor: theme.colors.surface }} testID="roles-info">
           <Label>ROLES IN THIS APP</Label>
           <Body style={{ marginTop: 6 }}>
-            • PM — creates & authorises MRFs{"\n"}
-            • GM — approves Material Library changes{"\n"}
-            • Purchase — processes POs from authorised MRFs{"\n"}
-            • Director — full override & authority{"\n"}
-            • Admin — master data & user management
+            Approval chain: Site Engineer → PM → Purchase → GM → Director{"\n"}
+            {"\n"}
+            • Site Engineer — drafts & submits MRFs; records GRN{"\n"}
+            • PM — authorises MRFs for their projects{"\n"}
+            • Purchase — issues POs (auto-issued below GM threshold){"\n"}
+            • GM — approves POs above GM threshold{"\n"}
+            • Director — approves POs above Director threshold, full override{"\n"}
+            • Admin — masters, users, thresholds (no approval authority)
           </Body>
         </Card>
       </ScrollView>

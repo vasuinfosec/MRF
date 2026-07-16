@@ -31,7 +31,7 @@ export default function POList() {
   const vName = (id: string) => vendors.find((v) => v.vendor_id === id)?.name || id;
   const pName = (id: string) => projects.find((p) => p.project_id === id)?.code || id;
 
-  const canCreate = user?.role === "purchase" || user?.role === "admin";
+  const canCreate = user?.role === "purchase" || user?.role === "director" || user?.role === "admin";
 
   const exportExcel = async () => {
     const t = await getToken();

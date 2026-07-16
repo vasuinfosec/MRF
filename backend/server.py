@@ -40,10 +40,12 @@ app = FastAPI(title="Vasu Infosec MRF & PO System")
 api = APIRouter(prefix="/api")
 
 # ---------------------- Constants ----------------------
-# Roles: Director/PM/GM/Purchase/Admin. Legacy roles auto-migrated.
-ROLES = ["director", "pm", "gm", "purchase", "admin"]
+# Vasu operational chain: Site Engineer -> PM -> Purchase -> GM -> Director.
+# Admin is a system-management role and NOT part of the approval chain by default.
+ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "admin", "store"]
 LEGACY_ROLE_MAP = {
-    "site_engineer": "pm",
+    # Historic aliases -> canonical roles. site_engineer is now a first-class role
+    # and MUST NOT be mapped to pm any more.
     "project_manager": "pm",
     "billing": "purchase",
 }
@@ -51,7 +53,29 @@ def _canon_role(r: str) -> str:
     return LEGACY_ROLE_MAP.get(r, r) if r in LEGACY_ROLE_MAP else r
 
 MRF_APPROVERS = {"pm", "gm", "director", "admin"}
-MRF_EDITORS = {"pm", "gm", "purchase", "director", "admin"}
+MRF_EDITORS = {"site_engineer", "pm", "gm", "purchase", "director", "admin"}
+MRF_CREATORS = {"site_engineer", "pm", "director", "admin"}
+GRN_ROLES = {"site_engineer", "store", "purchase", "pm", "director", "admin"}
+
+# --- Purchase approval thresholds (INR). Editable via /api/settings/thresholds ---
+DEFAULT_THRESHOLD_GM = 50000.0        # PO value above this needs GM approval
+DEFAULT_THRESHOLD_DIRECTOR = 500000.0  # PO value above this needs Director approval
+
+async def get_thresholds() -> Dict[str, float]:
+    doc = await db.settings.find_one({"_id": "thresholds"}, {"_id": 0})
+    if not doc:
+        return {"gm": DEFAULT_THRESHOLD_GM, "director": DEFAULT_THRESHOLD_DIRECTOR}
+    return {
+        "gm": float(doc.get("gm", DEFAULT_THRESHOLD_GM)),
+        "director": float(doc.get("director", DEFAULT_THRESHOLD_DIRECTOR)),
+    }
+
+def _po_initial_status(total: float, gm_t: float, dir_t: float) -> str:
+    if total > dir_t:
+        return "pending_director_approval"
+    if total > gm_t:
+        return "pending_gm_approval"
+    return "issued"
 SYSTEMS = ["Fire Alarm", "Fire Fighting", "Gas Suppression", "Water Mist",
            "CCTV", "Access Control", "Structured Cabling", "Electrical", "Other"]
 MRF_STATUS = ["draft", "submitted", "pm_review", "approved", "rejected",
@@ -71,7 +95,7 @@ class UserOut(BaseModel):
     email: str
     name: str
     picture: Optional[str] = None
-    role: str = "pm"
+    role: str = "site_engineer"
     is_active: bool = True
 
 class RoleUpdate(BaseModel):
@@ -271,12 +295,17 @@ async def create_session(body: SessionRequest):
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
         user_id = existing["user_id"]
-        role = existing.get("role", "pm")
+        role = existing.get("role", "site_engineer")
+        # Canonicalize legacy role on login
+        if role in LEGACY_ROLE_MAP:
+            role = LEGACY_ROLE_MAP[role]
+            await db.users.update_one({"email": email}, {"$set": {"role": role}})
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
-        # First user becomes admin
+        # First user becomes admin; subsequent unknown users default to site_engineer
+        # (lowest-privilege in the approval chain).
         count = await db.users.count_documents({})
-        role = "admin" if count == 0 else "pm"
+        role = "admin" if count == 0 else "site_engineer"
         await db.users.insert_one({
             "user_id": user_id,
             "email": email,
@@ -399,10 +428,12 @@ async def list_projects(all: Optional[bool] = False,
     u = await get_current_user(authorization)
     q: Dict[str, Any] = {"active": True}
     docs = await db.projects.find(q, {"_id": 0}).to_list(500)
-    # Purchase/billing/admin see all. Site engineer + PM see only assigned unless all=1 (admin only).
+    # Purchase/GM/Director/Admin see all projects.
     if all and u.role == "admin":
         return docs
-    if u.role == "pm":
+    if u.role in ("purchase", "gm", "director", "admin"):
+        return docs
+    if u.role == "site_engineer":
         docs = [
             p for p in docs
             if u.user_id in (p.get("site_engineers") or [])
@@ -411,6 +442,14 @@ async def list_projects(all: Optional[bool] = False,
         ]
     elif u.role == "pm":
         docs = [p for p in docs if u.user_id in (p.get("project_managers") or [])]
+    elif u.role == "store":
+        # Store users see projects where they're listed as site_engineer (they work at a site)
+        docs = [
+            p for p in docs
+            if u.user_id in (p.get("site_engineers") or [])
+            or any(u.user_id in (s.get("site_engineers") or [])
+                   for s in (p.get("sites") or []) if s.get("active", True))
+        ]
     return docs
 
 # --- Site management (sub-master under Project) ---
@@ -660,19 +699,22 @@ async def next_invoice_number() -> str:
 @api.post("/mrf")
 async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role == "pm":
+    if u.role not in MRF_CREATORS:
+        raise HTTPException(403, "Not allowed to create MRF")
+    # Project team assignment check (admin/director bypass)
+    if u.role in ("site_engineer", "pm"):
         p = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
         if not p:
             raise HTTPException(404, "Project not found")
-        if u.role == "pm":
+        if u.role == "site_engineer":
             in_project = u.user_id in (p.get("site_engineers") or [])
             in_any_site = any(u.user_id in (s.get("site_engineers") or [])
                               for s in (p.get("sites") or []) if s.get("active", True))
             if not (in_project or in_any_site):
                 raise HTTPException(403, "You are not assigned to this project")
-        else:
+        else:  # pm
             if u.user_id not in (p.get("project_managers") or []):
-                raise HTTPException(403, "You are not assigned to this project")
+                raise HTTPException(403, "You are not the PM for this project")
     items = []
     for i in body.items:
         d = i.model_dump()
@@ -711,12 +753,24 @@ async def list_mrfs(
         q["project_id"] = project_id
     if system_category:
         q["system_category"] = system_category
-    # Site engineers only see their own; PMs only see MRFs from their assigned projects
-    if u.role == "pm":
+    # Role-based visibility:
+    # site_engineer -> only MRFs they created
+    # pm -> MRFs from projects where they are project_manager
+    # purchase/gm/director/admin -> all
+    if u.role == "site_engineer":
         q["created_by"] = u.user_id
     elif u.role == "pm":
         prjs = await db.projects.find(
             {"project_managers": u.user_id}, {"_id": 0, "project_id": 1}
+        ).to_list(500)
+        q["project_id"] = {"$in": [p["project_id"] for p in prjs]}
+    elif u.role == "store":
+        # Store user: see MRFs for the projects/sites they're posted at (via site_engineers list)
+        prjs = await db.projects.find(
+            {"$or": [
+                {"site_engineers": u.user_id},
+                {"sites.site_engineers": u.user_id},
+            ]}, {"_id": 0, "project_id": 1}
         ).to_list(500)
         q["project_id"] = {"$in": [p["project_id"] for p in prjs]}
     docs = await db.mrfs.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
@@ -724,36 +778,45 @@ async def list_mrfs(
 
 async def _check_mrf_access(u: UserOut, mrf: dict):
     """Raise 403 if user cannot see this MRF."""
-    if u.role in ("admin", "purchase", "director"):
+    if u.role in ("admin", "purchase", "gm", "director"):
         return
-    if u.role == "pm":
+    if u.role == "site_engineer":
         if mrf.get("created_by") == u.user_id:
             return
+        raise HTTPException(403, "Not allowed")
+    if u.role == "pm":
+        p = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0})
+        if p and u.user_id in (p.get("project_managers") or []):
+            return
+        raise HTTPException(403, "Not allowed")
+    if u.role == "store":
         p = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0})
         if p and (u.user_id in (p.get("site_engineers") or []) or
                   any(u.user_id in (s.get("site_engineers") or [])
                       for s in (p.get("sites") or []) if s.get("active", True))):
             return
         raise HTTPException(403, "Not allowed")
-    if u.role == "pm":
-        p = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0})
-        if p and u.user_id in (p.get("project_managers") or []):
-            return
-        raise HTTPException(403, "Not allowed")
     raise HTTPException(403, "Not allowed")
 
 async def _check_po_access(u: UserOut, po: dict):
-    if u.role in ("admin", "purchase", "director"):
+    if u.role in ("admin", "purchase", "gm", "director"):
         return
     if u.role == "pm":
         p = await db.projects.find_one({"project_id": po.get("project_id")}, {"_id": 0})
         if p and u.user_id in (p.get("project_managers") or []):
             return
-    if u.role == "pm":
+    if u.role == "site_engineer":
+        # Site engineer can see POs originating from MRFs they created
         for mid in po.get("mrf_refs") or []:
             m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "created_by": 1})
             if m and m.get("created_by") == u.user_id:
                 return
+    if u.role == "store":
+        p = await db.projects.find_one({"project_id": po.get("project_id")}, {"_id": 0})
+        if p and (u.user_id in (p.get("site_engineers") or []) or
+                  any(u.user_id in (s.get("site_engineers") or [])
+                      for s in (p.get("sites") or []) if s.get("active", True))):
+            return
     raise HTTPException(403, "Not allowed")
 
 @api.get("/mrf/{mrf_id}")
@@ -771,6 +834,9 @@ async def submit_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
     d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "MRF not found")
+    # Only creator (site engineer/pm) or admin can submit
+    if u.role not in ("admin", "director") and d.get("created_by") != u.user_id:
+        raise HTTPException(403, "Only the MRF creator (or admin) can submit")
     if d["status"] not in ["draft", "returned"]:
         raise HTTPException(400, "Cannot submit from current status")
     await db.mrfs.update_one(
@@ -778,9 +844,13 @@ async def submit_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
         {"$set": {"status": "pm_review", "updated_at": now_utc()}}
     )
     await audit("mrf", mrf_id, "submit", u)
-    # Notify PMs
-    pms = await db.users.find({"role": "pm"}, {"_id": 0, "user_id": 1}).to_list(50)
-    await notify([p["user_id"] for p in pms], "MRF pending review",
+    # Notify PMs of this project (fallback: all PMs)
+    proj = await db.projects.find_one({"project_id": d["project_id"]}, {"_id": 0}) or {}
+    pm_ids = list(proj.get("project_managers") or [])
+    if not pm_ids:
+        pms = await db.users.find({"role": "pm"}, {"_id": 0, "user_id": 1}).to_list(50)
+        pm_ids = [p["user_id"] for p in pms]
+    await notify(pm_ids, "MRF pending review",
                  f"{d['mrf_number']} needs your review", f"/mrf/{mrf_id}")
     return {"ok": True}
 
@@ -849,7 +919,7 @@ async def approve_mrf(mrf_id: str, body: ApprovalAction, authorization: Optional
 @api.post("/mrf/{mrf_id}/send-to-purchase")
 async def send_to_purchase(mrf_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ["pm", "admin"]:
+    if u.role not in ("pm", "gm", "director", "admin"):
         raise HTTPException(403, "Not allowed")
     d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not d or d["status"] != "approved":
@@ -872,7 +942,7 @@ async def delete_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
 async def create_po(body: POCreate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
     if u.role not in ("purchase", "admin", "director"):
-        raise HTTPException(403, "Only purchase/admin")
+        raise HTTPException(403, "Only purchase/admin/director can create POs")
 
     # Validate: no rejected items
     mrf_refs = set()
@@ -894,6 +964,10 @@ async def create_po(body: POCreate, authorization: Optional[str] = Header(None))
         total += after_disc + gst_amt
     total += body.freight + body.other_charges
 
+    # Threshold-based approval flow
+    thresholds = await get_thresholds()
+    initial_status = _po_initial_status(total, thresholds["gm"], thresholds["director"])
+
     po = PO(
         po_number=await next_po_number(),
         vendor_id=body.vendor_id,
@@ -912,29 +986,107 @@ async def create_po(body: POCreate, authorization: Optional[str] = Header(None))
         created_by=u.user_id,
     )
     po_doc = po.model_dump()
+    po_doc["status"] = initial_status
     # items -> as dict
     po_doc["items"] = [i.model_dump() if hasattr(i, "model_dump") else i for i in body.items]
+    po_doc["approval_history"] = []
+    po_doc["thresholds_applied"] = {"gm": thresholds["gm"], "director": thresholds["director"]}
     await db.pos.insert_one(po_doc)
 
-    # Update MRF item qty_ordered and MRF status
-    for it in body.items:
-        mrf = await db.mrfs.find_one({"mrf_id": it.mrf_id}, {"_id": 0})
-        items = mrf["items"]
-        for mi in items:
-            if mi["item_line_id"] == it.item_line_id:
-                mi["qty_ordered"] = (mi.get("qty_ordered") or 0) + it.qty
-        all_ordered = all(
-            (mi.get("qty_ordered") or 0) >= (mi.get("qty_approved") or 0)
-            for mi in items if mi["status"] != "rejected"
-        )
-        any_ordered = any((mi.get("qty_ordered") or 0) > 0 for mi in items)
-        new_status = "fully_ordered" if all_ordered else ("partially_ordered" if any_ordered else mrf["status"])
-        await db.mrfs.update_one({"mrf_id": it.mrf_id},
-                                 {"$set": {"items": items, "status": new_status, "updated_at": now_utc()}})
+    # Update MRF item qty_ordered and MRF status ONLY if PO is issued (auto-approved).
+    # For pending_gm/director_approval, we hold the MRF status until PO is approved.
+    if initial_status == "issued":
+        for it in body.items:
+            mrf = await db.mrfs.find_one({"mrf_id": it.mrf_id}, {"_id": 0})
+            items = mrf["items"]
+            for mi in items:
+                if mi["item_line_id"] == it.item_line_id:
+                    mi["qty_ordered"] = (mi.get("qty_ordered") or 0) + it.qty
+            all_ordered = all(
+                (mi.get("qty_ordered") or 0) >= (mi.get("qty_approved") or 0)
+                for mi in items if mi["status"] != "rejected"
+            )
+            any_ordered = any((mi.get("qty_ordered") or 0) > 0 for mi in items)
+            new_status = "fully_ordered" if all_ordered else ("partially_ordered" if any_ordered else mrf["status"])
+            await db.mrfs.update_one({"mrf_id": it.mrf_id},
+                                     {"$set": {"items": items, "status": new_status, "updated_at": now_utc()}})
 
-    await audit("po", po.po_id, "create", u, {"po_number": po.po_number, "total": total})
+    # Notify approvers if threshold not met
+    if initial_status == "pending_gm_approval":
+        approvers = await db.users.find({"role": {"$in": ["gm", "director"]}},
+                                        {"_id": 0, "user_id": 1}).to_list(50)
+        await notify([a["user_id"] for a in approvers], "PO pending GM approval",
+                     f"{po.po_number} (₹{total:,.2f}) awaits GM approval", f"/po/{po.po_id}")
+    elif initial_status == "pending_director_approval":
+        approvers = await db.users.find({"role": "director"},
+                                        {"_id": 0, "user_id": 1}).to_list(50)
+        await notify([a["user_id"] for a in approvers], "PO pending Director approval",
+                     f"{po.po_number} (₹{total:,.2f}) awaits Director approval", f"/po/{po.po_id}")
+
+    await audit("po", po.po_id, "create", u, {"po_number": po.po_number, "total": total,
+                                               "initial_status": initial_status})
     po_doc.pop("_id", None)
     return po_doc
+
+@api.post("/po/{po_id}/approve")
+async def approve_po(po_id: str, body: Optional[dict] = None,
+                     authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("gm", "director", "admin"):
+        raise HTTPException(403, "Only GM/Director/Admin can approve POs")
+    body = body or {}
+    action = (body.get("action") or "approve").lower()
+    comment = body.get("comment") or ""
+    po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO not found")
+    cur = po.get("status", "issued")
+    if cur not in ("pending_gm_approval", "pending_director_approval"):
+        raise HTTPException(400, f"PO is not awaiting approval (status={cur})")
+    # Director-level POs require director (GM cannot approve those)
+    if cur == "pending_director_approval" and u.role == "gm":
+        raise HTTPException(403, "This PO exceeds GM threshold — Director approval required")
+
+    if action == "reject":
+        new_status = "rejected"
+    else:
+        new_status = "issued"
+
+    hist_entry = {
+        "user_id": u.user_id, "user_name": u.name, "user_role": u.role,
+        "action": action, "comment": comment, "timestamp": now_utc().isoformat(),
+    }
+    await db.pos.update_one(
+        {"po_id": po_id},
+        {"$set": {"status": new_status}, "$push": {"approval_history": hist_entry}},
+    )
+
+    # If approved, apply MRF qty_ordered updates (deferred from creation)
+    if new_status == "issued":
+        for it in po.get("items", []):
+            mrf = await db.mrfs.find_one({"mrf_id": it.get("mrf_id")}, {"_id": 0})
+            if not mrf:
+                continue
+            items = mrf["items"]
+            for mi in items:
+                if mi["item_line_id"] == it.get("item_line_id"):
+                    mi["qty_ordered"] = (mi.get("qty_ordered") or 0) + float(it.get("qty") or 0)
+            all_ordered = all(
+                (mi.get("qty_ordered") or 0) >= (mi.get("qty_approved") or 0)
+                for mi in items if mi["status"] != "rejected"
+            )
+            any_ordered = any((mi.get("qty_ordered") or 0) > 0 for mi in items)
+            mrf_new = "fully_ordered" if all_ordered else ("partially_ordered" if any_ordered else mrf["status"])
+            await db.mrfs.update_one({"mrf_id": mrf["mrf_id"]},
+                                     {"$set": {"items": items, "status": mrf_new, "updated_at": now_utc()}})
+
+    await audit("po", po_id, f"po_{action}", u, {"comment": comment, "new_status": new_status})
+    # Notify creator
+    creator = po.get("created_by")
+    if creator:
+        await notify([creator], f"PO {new_status}",
+                     f"{po['po_number']} was {action}d by {u.name}", f"/po/{po_id}")
+    return {"ok": True, "status": new_status}
 
 @api.get("/po")
 async def list_pos(project_id: Optional[str] = None,
@@ -944,19 +1096,27 @@ async def list_pos(project_id: Optional[str] = None,
     if project_id:
         q["project_id"] = project_id
     docs = await db.pos.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
-    if u.role in ("admin", "purchase", "director"):
+    if u.role in ("admin", "purchase", "gm", "director"):
         return docs
     if u.role == "pm":
         prjs = await db.projects.find({"project_managers": u.user_id},
                                       {"_id": 0, "project_id": 1}).to_list(500)
         allowed = {p["project_id"] for p in prjs}
         return [p for p in docs if p.get("project_id") in allowed]
-    if u.role == "pm":
+    if u.role == "site_engineer":
         # Only POs whose mrf_refs include an MRF created by this user
         my = await db.mrfs.find({"created_by": u.user_id},
                                 {"_id": 0, "mrf_id": 1}).to_list(2000)
         my_ids = {m["mrf_id"] for m in my}
         return [p for p in docs if my_ids.intersection(p.get("mrf_refs") or [])]
+    if u.role == "store":
+        prjs = await db.projects.find(
+            {"$or": [
+                {"site_engineers": u.user_id},
+                {"sites.site_engineers": u.user_id},
+            ]}, {"_id": 0, "project_id": 1}).to_list(500)
+        allowed = {p["project_id"] for p in prjs}
+        return [p for p in docs if p.get("project_id") in allowed]
     return []
 
 @api.get("/po/{po_id}")
@@ -971,11 +1131,15 @@ async def get_po(po_id: str, authorization: Optional[str] = Header(None)):
 @api.post("/po/{po_id}/received")
 async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "director", "admin"):
-        raise HTTPException(403, "Only purchase/billing/admin can record receipt")
+    if u.role not in GRN_ROLES:
+        raise HTTPException(403, "Only site engineer/store/purchase/PM/director/admin can record receipt")
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(404, "PO not found")
+    if po.get("status") in ("pending_gm_approval", "pending_director_approval", "rejected"):
+        raise HTTPException(400, f"PO not yet approved (status={po.get('status')})")
+    # Access check for non-admin/purchase
+    await _check_po_access(u, po)
 
     # Body may include: {"items": [{"mrf_id": ..., "item_line_id": ..., "qty": <n>}]}
     # If no per-line qty provided, receive full remaining qty of every PO line.
@@ -1269,6 +1433,38 @@ async def audit_logs(entity_id: Optional[str] = None,
     logs = await db.audit_logs.find(q, {"_id": 0}).sort("timestamp", -1).limit(200).to_list(200)
     return logs
 
+# ---------------------- Settings: Purchase Thresholds ----------------------
+@api.get("/settings/thresholds")
+async def get_settings_thresholds(authorization: Optional[str] = Header(None)):
+    """Any authenticated user can read thresholds (UI needs it to show approval hints)."""
+    await get_current_user(authorization)
+    return await get_thresholds()
+
+@api.put("/settings/thresholds")
+async def update_settings_thresholds(body: dict, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("director", "admin"):
+        raise HTTPException(403, "Only Director/Admin can change purchase thresholds")
+    gm = body.get("gm")
+    dr = body.get("director")
+    if gm is None or dr is None:
+        raise HTTPException(400, "Both 'gm' and 'director' threshold values required")
+    try:
+        gm = float(gm); dr = float(dr)
+    except Exception:
+        raise HTTPException(400, "Thresholds must be numeric")
+    if gm < 0 or dr < 0:
+        raise HTTPException(400, "Thresholds must be non-negative")
+    if dr < gm:
+        raise HTTPException(400, "Director threshold must be >= GM threshold")
+    await db.settings.update_one(
+        {"_id": "thresholds"},
+        {"$set": {"gm": gm, "director": dr, "updated_by": u.user_id, "updated_at": now_utc()}},
+        upsert=True,
+    )
+    await audit("settings", "thresholds", "update", u, {"gm": gm, "director": dr})
+    return {"gm": gm, "director": dr}
+
 # ---------------------- PDF ----------------------
 @api.get("/po/{po_id}/pdf")
 async def po_pdf(po_id: str, token: Optional[str] = None,
@@ -1417,8 +1613,8 @@ async def list_grns_for_po(po_id: str, authorization: Optional[str] = Header(Non
 @api.get("/grns")
 async def list_all_grns(authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("purchase", "director", "admin"):
-        raise HTTPException(403, "Only purchase/billing/admin")
+    if u.role not in ("purchase", "gm", "director", "admin", "pm"):
+        raise HTTPException(403, "Only purchase/pm/gm/director/admin")
     return await db.grns.find({}, {"_id": 0}).sort("date", -1).to_list(500)
 
 @api.get("/grn/{grn_id}/pdf")
@@ -1564,7 +1760,7 @@ async def import_vendors(file: UploadFile = File(...), authorization: Optional[s
 @api.post("/import/mrf")
 async def import_mrf(file: UploadFile = File(...), authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role not in ("admin", "pm", "director"):
+    if u.role not in ("admin", "site_engineer", "pm", "director"):
         raise HTTPException(403, "Only admin/site engineer/project manager can import MRFs")
     content = await file.read()
     if len(content) > MAX_UPLOAD_BYTES:
@@ -1893,13 +2089,20 @@ async def seed_data(authorization: Optional[str] = Header(None)):
         if u.role != "admin":
             raise HTTPException(403, "Only admin can seed once users exist")
     # (Otherwise: no users yet, allow unauthenticated bootstrap.)
-    # Users
+    # Users — legacy demo (dev/QA) + real Vasu Infosec roster
     demo_users = [
-        {"email": "director@vasu.dev", "name": "Vishal (Director)", "role": "director"},
-        {"email": "pm@vasu.dev", "name": "Priya (PM)", "role": "pm"},
-        {"email": "gm@vasu.dev", "name": "Girish (GM)", "role": "gm"},
-        {"email": "purchase@vasu.dev", "name": "Kumar (Purchase)", "role": "purchase"},
+        # Legacy demo users (kept for dev-login & smoke tests)
+        {"email": "director@vasu.dev", "name": "Vishal (Director demo)", "role": "director"},
+        {"email": "pm@vasu.dev", "name": "Priya (PM demo)", "role": "pm"},
+        {"email": "gm@vasu.dev", "name": "Girish (GM demo)", "role": "gm"},
+        {"email": "purchase@vasu.dev", "name": "Kumar (Purchase demo)", "role": "purchase"},
         {"email": "admin@vasu.dev", "name": "Master Admin", "role": "admin"},
+        {"email": "siteeng@vasu.dev", "name": "Sanjay (Site Engineer demo)", "role": "site_engineer"},
+        # Real Vasu Infosec roster (Google-sign-in enabled). Roles pre-assigned.
+        {"email": "vivek@vasuinfosec.com", "name": "Vivek (Director)", "role": "director"},
+        {"email": "balkrishna@vasuinfosec.com", "name": "Balkrishna (GM)", "role": "gm"},
+        {"email": "saket.iyer@vasuinfosec.com", "name": "Saket Iyer (PM · Pune)", "role": "pm"},
+        {"email": "himanshu@vasuinfosec.com", "name": "Himanshu (PM · Delhi)", "role": "pm"},
     ]
     for u in demo_users:
         existing = await db.users.find_one({"email": u["email"]}, {"_id": 0})
@@ -1910,7 +2113,18 @@ async def seed_data(authorization: Optional[str] = Header(None)):
                 "role": u["role"], "is_active": True, "created_at": now_utc(),
             })
         else:
-            await db.users.update_one({"email": u["email"]}, {"$set": {"role": u["role"]}})
+            # Only backfill display name; do NOT overwrite an already-set role
+            # (admins may have adjusted roles in the UI).
+            await db.users.update_one(
+                {"email": u["email"]},
+                {"$set": {"name": u["name"]},
+                 "$setOnInsert": {"role": u["role"]}}
+            )
+            # If existing role is legacy or missing, canonicalize
+            cur = existing.get("role")
+            if not cur or cur in LEGACY_ROLE_MAP:
+                await db.users.update_one({"email": u["email"]},
+                                          {"$set": {"role": u["role"]}})
 
     # Projects
     projects = [
@@ -1924,15 +2138,24 @@ async def seed_data(authorization: Optional[str] = Header(None)):
             await db.projects.insert_one({"project_id": gid("prj"), **p, "active": True,
                                           "site_engineers": [], "project_managers": []})
 
-    # Seed team: assign seeded PM (site engineer role removed) to all seeded projects (idempotent)
+    # Seed team assignments (idempotent)
+    # - site_engineer demo user -> site_engineers on all seed projects
+    # - pm demo + real PMs (saket, himanshu) -> project_managers on all seed projects
+    se_user = await db.users.find_one({"email": "siteeng@vasu.dev"}, {"_id": 0, "user_id": 1})
     pm_user = await db.users.find_one({"email": "pm@vasu.dev"}, {"_id": 0, "user_id": 1})
-    if pm_user:
+    saket = await db.users.find_one({"email": "saket.iyer@vasuinfosec.com"}, {"_id": 0, "user_id": 1})
+    himanshu = await db.users.find_one({"email": "himanshu@vasuinfosec.com"}, {"_id": 0, "user_id": 1})
+    se_ids = [x["user_id"] for x in (se_user, pm_user) if x]  # legacy pm@ kept as SE for backwards compat
+    pm_ids = [x["user_id"] for x in (pm_user, saket, himanshu) if x]
+    if se_ids or pm_ids:
+        add_ops: Dict[str, Any] = {}
+        if se_ids:
+            add_ops["site_engineers"] = {"$each": se_ids}
+        if pm_ids:
+            add_ops["project_managers"] = {"$each": pm_ids}
         await db.projects.update_many(
             {"code": {"$in": [p["code"] for p in projects]}},
-            {"$addToSet": {
-                "site_engineers": pm_user["user_id"],
-                "project_managers": pm_user["user_id"],
-            }},
+            {"$addToSet": add_ops},
         )
 
     # Vendors

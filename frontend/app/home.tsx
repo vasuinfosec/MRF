@@ -71,7 +71,7 @@ export default function Home() {
       <Card style={{ marginTop: 16 }} testID="quick-actions">
         <H2>Quick Actions</H2>
         <View style={{ marginTop: 12, gap: 8 }}>
-          {(role === "pm" || role === "director" || role === "admin") ? (
+          {(role === "site_engineer" || role === "pm" || role === "director" || role === "admin") ? (
             <Btn testID="quick-create-mrf" title="+ Create New MRF" variant="action" onPress={() => router.push("/mrf/create")} />
           ) : null}
           <Btn testID="quick-view-mrf" title="View MRF List" variant="outline" onPress={() => router.push("/mrf")} />
@@ -80,6 +80,9 @@ export default function Home() {
           ) : null}
           {(role === "purchase" || role === "director" || role === "admin") ? (
             <Btn testID="quick-po-create" title="Create Purchase Order" variant="primary" onPress={() => router.push("/po/create")} />
+          ) : null}
+          {(role === "gm" || role === "director" || role === "admin") ? (
+            <Btn testID="quick-po-approvals" title="POs Awaiting My Approval" variant="primary" onPress={() => router.push("/po?filter=pending_approval")} />
           ) : null}
           {(role === "purchase" || role === "gm" || role === "director" || role === "admin") ? (
             <Btn testID="quick-billing" title="Billing Dashboard" variant="primary" onPress={() => router.push("/billing")} />
@@ -98,21 +101,25 @@ export default function Home() {
 
 function roleWelcome(role: string) {
   return ({
-    director: "Full override authority across all MRFs, POs and masters.",
-    pm: "Create and authorise MRFs for your projects.",
-    gm: "Approve Material Library and authorise MRFs.",
-    purchase: "Process authorised MRFs into POs and record receipts.",
-    admin: "Manage users, customers, masters and system settings.",
+    director: "Full override authority · approve high-value POs · edit thresholds.",
+    pm: "Review site engineer MRFs · authorise · assign purchase.",
+    gm: "Approve mid-value POs · authorise MRFs · portfolio oversight.",
+    purchase: "Issue POs · manage vendors · record invoices · low-value POs auto-issued.",
+    admin: "Manage users, projects, masters and thresholds. No approval authority.",
+    site_engineer: "Draft & submit MRFs for your project · record goods received.",
+    store: "Record goods received at your site.",
   } as Record<string, string>)[role] || "";
 }
 
 function roleAccess(role: string) {
   return ({
-    director: "All permissions · Override any workflow step · Full audit view",
-    pm: "Create · Edit · Authorise MRFs · Assign teams · Track project material",
-    gm: "Approve Material Library · Authorise MRFs · Review purchase reports",
-    purchase: "Edit MRFs · Create POs · Update quotations / vendors · Mark receipts",
-    admin: "Customers · Projects · Vendors · Materials · Users & Roles (no MRF authority)",
+    director: "All permissions · Approve POs > Director threshold · Edit thresholds · Full audit",
+    pm: "Authorise MRFs on your projects · Track project material · Escalate to purchase",
+    gm: "Approve POs > GM threshold · Authorise MRFs · Portfolio reports",
+    purchase: "Issue POs (auto below GM threshold) · Manage vendors · Record invoices & receipts",
+    admin: "Users · Projects · Vendors · Materials · Thresholds · No MRF/PO approval authority",
+    site_engineer: "Create Draft MRF · Submit for PM review · Record GRN on your site",
+    store: "Record GRN at your site · View site MRFs/POs (read-only)",
   } as Record<string, string>)[role] || "";
 }
 

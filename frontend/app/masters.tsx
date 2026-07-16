@@ -10,14 +10,15 @@ import { Btn, Card, H1, H2, Label, Muted, Empty } from "@/src/components/ui";
 import { theme } from "@/src/theme";
 import ProjectTeamModal from "@/src/components/ProjectTeamModal";
 
-type Tab = "projects" | "vendors" | "sites" | "units" | "brands" | "materials";
-const TABS: { key: Tab; label: string }[] = [
+type Tab = "projects" | "vendors" | "sites" | "units" | "brands" | "materials" | "thresholds";
+const TABS: { key: Tab; label: string; roles?: string[] }[] = [
   { key: "projects", label: "Projects" },
   { key: "vendors", label: "Vendors" },
   { key: "sites", label: "Sites" },
   { key: "units", label: "Units" },
   { key: "brands", label: "Brands" },
   { key: "materials", label: "Materials" },
+  { key: "thresholds", label: "PO Thresholds", roles: ["director", "admin"] },
 ];
 
 // System category shorthand map
@@ -58,7 +59,32 @@ export default function Masters() {
   const [mf, setMf] = useState("");
 
   const isAdmin = user?.role === "admin";
+  const isDirectorOrAdmin = isAdmin || user?.role === "director";
   const canVendor = isAdmin || user?.role === "purchase";
+
+  // Filter tabs by role
+  const visibleTabs = TABS.filter((t) => !t.roles || t.roles.includes(user?.role || ""));
+
+  // PO threshold state
+  const [thresholds, setThresholds] = useState<{ gm: string; director: string }>({ gm: "50000", director: "500000" });
+  const [thrSaving, setThrSaving] = useState(false);
+  const [thrMsg, setThrMsg] = useState("");
+  const loadThresholds = useCallback(async () => {
+    try {
+      const t = await api<{ gm: number; director: number }>("/settings/thresholds");
+      setThresholds({ gm: String(t.gm), director: String(t.director) });
+    } catch (_e) { /* noop */ }
+  }, []);
+  const saveThresholds = async () => {
+    setThrSaving(true); setThrMsg("");
+    try {
+      await api("/settings/thresholds", { method: "PUT", body: {
+        gm: Number(thresholds.gm), director: Number(thresholds.director),
+      } });
+      setThrMsg("Thresholds updated.");
+    } catch (e: any) { setThrMsg(e.message || "Failed"); }
+    setThrSaving(false);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -73,6 +99,7 @@ export default function Masters() {
   }, [isAdmin]);
 
   useEffect(() => { if (user) load(); }, [user, load]);
+  useEffect(() => { if (tab === "thresholds" && isDirectorOrAdmin) loadThresholds(); }, [tab, isDirectorOrAdmin, loadThresholds]);
 
   // Clear tab-scoped state when switching
   useEffect(() => { setErr(""); setQ(""); }, [tab]);
@@ -186,7 +213,7 @@ export default function Masters() {
 
         <ScrollView horizontal showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipRow} style={{ marginTop: 14, marginHorizontal: -16, paddingHorizontal: 16 }}>
-          {TABS.map((t) => {
+          {visibleTabs.map((t) => {
             const active = tab === t.key;
             return (
               <TouchableOpacity key={t.key} testID={`mtab-${t.key}`} onPress={() => setTab(t.key)}
@@ -379,9 +406,48 @@ export default function Masters() {
           </>
         ) : null}
 
-        {/* MASTERS: UNITS/BRANDS/MATERIALS */}
-        {currentMasterKey ? (
+        {/* PO THRESHOLDS */}
+        {tab === "thresholds" && isDirectorOrAdmin ? (
           <>
+            <Card style={{ marginTop: 12 }} testID="thresholds-card">
+              <H2>Purchase Order Approval Thresholds</H2>
+              <Muted style={{ marginTop: 6 }}>
+                POs at or below ₹{new Intl.NumberFormat("en-IN").format(Number(thresholds.gm) || 0)} are auto-issued by Purchase.
+                {"\n"}Between GM threshold and Director threshold require GM approval.
+                {"\n"}Above Director threshold require Director approval.
+              </Muted>
+              <View style={{ height: 12 }} />
+              <Label>GM APPROVAL THRESHOLD (₹)</Label>
+              <TextInput
+                testID="thr-gm"
+                value={thresholds.gm}
+                onChangeText={(v) => setThresholds((s) => ({ ...s, gm: v.replace(/[^0-9.]/g, "") }))}
+                placeholder="50000"
+                keyboardType="numeric"
+                style={styles.inp}
+              />
+              <View style={{ height: 10 }} />
+              <Label>DIRECTOR APPROVAL THRESHOLD (₹)</Label>
+              <TextInput
+                testID="thr-director"
+                value={thresholds.director}
+                onChangeText={(v) => setThresholds((s) => ({ ...s, director: v.replace(/[^0-9.]/g, "") }))}
+                placeholder="500000"
+                keyboardType="numeric"
+                style={styles.inp}
+              />
+              {thrMsg ? (
+                <Text testID="thr-msg" style={{ marginTop: 8, color: thrMsg.includes("updated") ? theme.colors.success : theme.colors.danger }}>
+                  {thrMsg}
+                </Text>
+              ) : null}
+              <Btn testID="thr-save" title={thrSaving ? "Saving…" : "Save Thresholds"} variant="action" onPress={saveThresholds} style={{ marginTop: 14 }} disabled={thrSaving} />
+            </Card>
+          </>
+        ) : null}
+
+        {/* MASTERS: UNITS/BRANDS/MATERIALS */}
+        {currentMasterKey ? (          <>
             {isAdmin ? (
               <Card style={{ marginTop: 12 }} testID={`add-${currentMasterKey}-card`}>
                 <H2>Add {TABS.find((t) => t.key === tab)?.label.slice(0, -1)}</H2>
