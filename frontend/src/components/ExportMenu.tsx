@@ -15,7 +15,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { backendUrl, getToken } from "@/src/api";
 import { theme } from "@/src/theme";
 
-export type ExportEntity = "po" | "mrf" | "grn" | "invoice";
+export type ExportEntity = "po" | "mrf" | "grn" | "invoice" | "dc" | "comparative_statement" | string;
 export type ExportFormat = "pdf" | "excel" | "tally";
 
 export interface ExportMenuProps {

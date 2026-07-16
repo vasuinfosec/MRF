@@ -88,6 +88,9 @@ export default function Home() {
             <Btn testID="quick-billing" title="Billing Dashboard" variant="primary" onPress={() => router.push("/billing")} />
           ) : null}
           <Btn testID="quick-reports" title="Reports" variant="outline" onPress={() => router.push("/reports")} />
+          <Btn testID="quick-grn" title="Goods Received Notes" variant="outline" onPress={() => router.push("/grn")} />
+          <Btn testID="quick-dc" title="Delivery Challans" variant="outline" onPress={() => router.push("/dc")} />
+          <Btn testID="quick-cs" title="Comparative Statements" variant="outline" onPress={() => router.push("/comparative-statement")} />
         </View>
       </Card>
 

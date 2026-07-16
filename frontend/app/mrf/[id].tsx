@@ -371,6 +371,15 @@ export default function MRFDetail() {
         <View style={{ marginTop: 20 }} testID="audit-card">
           <AuditTrail entityId={String(id || "")} title="Audit Trail" limit={100} />
         </View>
+
+        <View style={{ marginTop: 12 }}>
+          <Btn
+            testID="cs-btn-mrf"
+            title="View / Attach Comparative Statement"
+            variant="outline"
+            onPress={() => router.push({ pathname: "/comparative-statement", params: { mrf_id: String(id || "") } })}
+          />
+        </View>
       </ScrollView>
 
       {/* Action Modal */}

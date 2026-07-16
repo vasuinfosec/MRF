@@ -367,6 +367,15 @@ export default function PODetail() {
         <View style={{ marginTop: 20 }}>
           <AuditTrail entityId={String(id || "")} title="Audit Trail" limit={100} />
         </View>
+
+        <View style={{ marginTop: 12 }}>
+          <Btn
+            testID="cs-btn-po"
+            title="View / Attach Comparative Statement"
+            variant="outline"
+            onPress={() => router.push({ pathname: "/comparative-statement", params: { po_id: String(id || "") } })}
+          />
+        </View>
       </ScrollView>
 
       {/* Per-line receipt modal */}

@@ -12,7 +12,7 @@ from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Literal, Dict, Any
 
 import httpx
-from fastapi import FastAPI, APIRouter, HTTPException, Header, Request, Response, UploadFile, File
+from fastapi import FastAPI, APIRouter, HTTPException, Header, Request, Response, UploadFile, File, Body
 from fastapi.responses import StreamingResponse, JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
@@ -321,6 +321,96 @@ class ApprovalAction(BaseModel):
     action: str  # approve/reject/return
     comment: Optional[str] = ""
     item_actions: Optional[List[Dict[str, Any]]] = None  # [{item_line_id, action, qty_approved, reason}]
+
+# ---------------------- Delivery Challan ----------------------
+class DCItemIn(BaseModel):
+    """One line on a Delivery Challan."""
+    description: str
+    unit: str = "nos"
+    qty: float
+    material_uid: Optional[str] = ""
+    variant_uid: Optional[str] = ""
+    make: Optional[str] = ""
+    model: Optional[str] = ""
+    remarks: Optional[str] = ""
+    # optional back-links so we can trace DC back to source records
+    mrf_id: Optional[str] = ""
+    po_id: Optional[str] = ""
+    grn_id: Optional[str] = ""
+    item_line_id: Optional[str] = ""
+
+class DCCreate(BaseModel):
+    dc_type: str = "outbound"  # inbound | outbound
+    po_id: Optional[str] = ""
+    grn_id: Optional[str] = ""
+    mrf_refs: List[str] = []
+    project_id: str
+    customer_id: Optional[str] = ""
+    vendor_id: Optional[str] = ""
+    from_location: str
+    to_location: str
+    dispatch_date: str
+    vehicle_no: Optional[str] = ""
+    driver_name: Optional[str] = ""
+    driver_contact: Optional[str] = ""
+    transporter: Optional[str] = ""
+    e_way_bill_no: Optional[str] = ""
+    e_way_bill_date: Optional[str] = ""
+    items: List[DCItemIn]
+    remarks: Optional[str] = ""
+    authorised_signatory: Optional[str] = ""
+    vendor_dc_ref: Optional[str] = ""  # for inbound DC — vendor's DC number
+
+class DC(DCCreate):
+    dc_id: str = Field(default_factory=lambda: gid("dc"))
+    dc_number: str
+    date: datetime = Field(default_factory=now_utc)
+    status: str = "issued"  # issued | in_transit | delivered | cancelled
+    customer_name: Optional[str] = ""
+    vendor_name: Optional[str] = ""
+    created_by: str
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: Optional[datetime] = None
+    deleted: bool = False
+
+# ---------------------- Comparative Statement (import-only) ----------------------
+class ComparativeVendorQuote(BaseModel):
+    vendor_id: Optional[str] = ""
+    vendor_name: str
+    quote_number: Optional[str] = ""
+    quote_date: Optional[str] = ""
+    amount: float = 0.0
+    gst_incl: bool = False
+    validity: Optional[str] = ""
+    remarks: Optional[str] = ""
+
+class ComparativeStatementCreate(BaseModel):
+    mrf_id: Optional[str] = ""
+    po_id: Optional[str] = ""
+    project_id: Optional[str] = ""
+    customer_id: Optional[str] = ""
+    title: str
+    remarks: Optional[str] = ""
+    prepared_by: Optional[str] = ""  # who created it outside the app
+    prepared_on: Optional[str] = ""
+    vendors: List[ComparativeVendorQuote] = []
+    l1_vendor: Optional[str] = ""
+    l1_amount: Optional[float] = 0
+    selected_vendor: Optional[str] = ""
+    selection_reason: Optional[str] = ""
+    file_name: str
+    mime_type: str
+    file_base64: str  # base64-encoded attachment
+
+class ComparativeStatement(ComparativeStatementCreate):
+    cs_id: str = Field(default_factory=lambda: gid("cs"))
+    cs_number: str
+    uploaded_by: str
+    uploaded_by_name: Optional[str] = ""
+    uploaded_at: datetime = Field(default_factory=now_utc)
+    file_size: int = 0
+    status: str = "active"  # active | superseded | cancelled
+    deleted: bool = False
 
 # ---------------------- Auth ----------------------
 async def get_current_user(authorization: Optional[str] = Header(None)) -> UserOut:
@@ -1467,6 +1557,26 @@ async def next_invoice_number() -> str:
     )
     seq = r["seq"] if r else 1
     return f"INV/{year}/{seq:04d}"
+
+async def next_dc_number() -> str:
+    year = datetime.now().year
+    r = await db.counters.find_one_and_update(
+        {"_id": f"dc_{year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True, return_document=True,
+    )
+    seq = r["seq"] if r else 1
+    return f"DC/{year}/{seq:04d}"
+
+async def next_cs_number() -> str:
+    year = datetime.now().year
+    r = await db.counters.find_one_and_update(
+        {"_id": f"cs_{year}"},
+        {"$inc": {"seq": 1}},
+        upsert=True, return_document=True,
+    )
+    seq = r["seq"] if r else 1
+    return f"CS/{year}/{seq:04d}"
 
 @api.post("/mrf")
 async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None)):
@@ -3596,6 +3706,7 @@ async def list_all_grns(authorization: Optional[str] = Header(None)):
 
 @api.get("/grn/{grn_id}/pdf")
 async def grn_pdf(grn_id: str, token: Optional[str] = None,
+                  force: Optional[int] = 0,
                   authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
     u = await get_current_user(auth)
@@ -3605,7 +3716,7 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
     po = await db.pos.find_one({"po_id": grn.get("po_id")}, {"_id": 0})
     if po:
         await _check_po_access(u, po)
-    elif u.role not in ("purchase", "director", "admin"):
+    elif u.role not in ("purchase", "director", "admin", "store"):
         raise HTTPException(403, "Not allowed")
     vendor = await db.vendors.find_one({"vendor_id": grn.get("vendor_id")}, {"_id": 0}) or {}
     project = await db.projects.find_one({"project_id": grn.get("project_id")}, {"_id": 0}) or {}
@@ -3614,33 +3725,53 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
         m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "mrf_number": 1})
         if m: grn_mrf_nums.append(m["mrf_number"])
 
-    buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
-                            leftMargin=15*mm, rightMargin=15*mm)
     styles = getSampleStyleSheet()
-    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=9)
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=8, leading=10)
+    smallb = ParagraphStyle('sb', parent=styles['Normal'], fontSize=8, leading=10,
+                            fontName="Helvetica-Bold")
 
     # Resolve customer from PO snapshot / project
     cid = (po or {}).get("customer_id") or project.get("customer_id")
     cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) if cid else None
 
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                            leftMargin=15*mm, rightMargin=15*mm)
     story = _pdf_story("GOODS RECEIVED NOTE", grn["grn_number"],
                        grn.get("date"), project, cust, vendor,
                        extra_ref=f"PO {grn.get('po_number','')}  ·  MRF {', '.join(grn_mrf_nums)}")
 
     story.append(Paragraph(f"<b>Received by:</b> {grn.get('received_by_name','')}", small))
+    if grn.get("vehicle_no"):
+        story.append(Paragraph(f"<b>Vehicle:</b> {grn['vehicle_no']}  ·  "
+                               f"<b>Driver:</b> {grn.get('driver_name','')}", small))
+    if grn.get("vendor_dc_ref"):
+        story.append(Paragraph(f"<b>Vendor DC/Invoice ref:</b> {grn['vendor_dc_ref']}", small))
     story.append(Spacer(1, 6))
 
-    data = [["#", "Description", "Unit", "Qty Received"]]
+    header = ["#", "MAT / VAR", "Description", "Make / Model", "HSN", "Unit", "Qty Received", "Remarks"]
+    data = [[Paragraph(h, smallb) for h in header]]
     for idx, it in enumerate(grn.get("items", []), 1):
-        data.append([str(idx), (it.get("description") or "")[:60], it.get("unit", ""), str(it.get("qty", ""))])
-    tbl = Table(data, colWidths=[25, 320, 60, 80])
+        info = await _resolve_material_info(it)
+        mv = ((info.get("material_uid") or "-") + "\n" + (info.get("variant_uid") or "-"))
+        mm2 = ((info.get("make") or "-") + "\n" + (info.get("model") or "-"))
+        data.append([
+            Paragraph(str(idx), small),
+            Paragraph(mv, small),
+            Paragraph((it.get("description") or "")[:80], small),
+            Paragraph(mm2, small),
+            Paragraph(info.get("hsn_code") or "—", small),
+            Paragraph(it.get("unit", ""), small),
+            Paragraph(f"{float(it.get('qty') or 0):g}", small),
+            Paragraph((it.get("remarks") or "")[:40], small),
+        ])
+    tbl = Table(data, colWidths=[16, 56, 150, 68, 44, 30, 52, 88], repeatRows=1)
     tbl.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), VASU_PRIMARY),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
-        ("FONTSIZE", (0, 0), (-1, -1), 9),
-        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor('#B7BEC9')),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor('#F7F8FC')]),
     ]))
     story.append(tbl)
@@ -3648,14 +3779,698 @@ async def grn_pdf(grn_id: str, token: Optional[str] = None,
         story.append(Spacer(1, 10))
         story.append(Paragraph(f"<b>Remarks:</b> {grn['remarks']}", small))
     story += [
-        Spacer(1, 40),
+        Spacer(1, 30),
         Paragraph("_______________________________&nbsp;&nbsp;&nbsp;&nbsp;_______________________________", small),
         Paragraph("Received By&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;Vendor Signature", small),
     ]
     doc.build(story, onFirstPage=_vasu_footer, onLaterPages=_vasu_footer)
     buf.seek(0)
+    await _log_export(u, "grn", grn_id, "pdf", grn["grn_number"])
     return StreamingResponse(buf, media_type="application/pdf",
                              headers={"Content-Disposition": f'attachment; filename="{grn["grn_number"].replace("/","_")}.pdf"'})
+
+
+async def _grn_excel_workbook(grns: List[dict]) -> "openpyxl.Workbook":
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "GRN Line Items"
+    headers = [
+        "GRN#", "Date", "PO#", "MRF Refs", "Customer ID", "Customer Name",
+        "Vendor Name", "Project Code", "Site",
+        "Vehicle", "Driver", "Vendor DC/Inv Ref",
+        "Line#", "MAT UID", "VAR UID", "Description", "Make", "Model", "HSN", "Unit",
+        "Qty Received", "Remarks", "Received By",
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+    proj_map = {p["project_id"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(500)}
+    vend_map = {v["vendor_id"]: v for v in await db.vendors.find({}, {"_id": 0}).to_list(2000)}
+    cust_map = {c["customer_id"]: c for c in await db.customers.find({}, {"_id": 0}).to_list(500)}
+    for g in grns:
+        vend = vend_map.get(g.get("vendor_id")) or {}
+        proj = proj_map.get(g.get("project_id")) or {}
+        cust = cust_map.get(g.get("customer_id")) or {}
+        mrfnums = ""
+        if g.get("mrf_refs"):
+            docs = await db.mrfs.find({"mrf_id": {"$in": g["mrf_refs"]}},
+                                       {"_id": 0, "mrf_number": 1}).to_list(1000)
+            mrfnums = ", ".join(sorted([m["mrf_number"] for m in docs]))
+        gdate = g["date"].strftime("%Y-%m-%d") if isinstance(g.get("date"), datetime) else str(g.get("date", ""))[:10]
+        for idx, it in enumerate(g.get("items") or [], 1):
+            info = await _resolve_material_info(it)
+            ws.append([
+                _safe_cell(g.get("grn_number", "")), _safe_cell(gdate),
+                _safe_cell(g.get("po_number", "")),
+                _safe_cell(mrfnums),
+                _safe_cell(cust.get("customer_id") or g.get("customer_id") or ""),
+                _safe_cell(cust.get("name") or ""),
+                _safe_cell(vend.get("name") or ""),
+                _safe_cell(proj.get("code") or ""),
+                _safe_cell(g.get("delivery_site") or proj.get("site") or ""),
+                _safe_cell(g.get("vehicle_no") or ""),
+                _safe_cell(g.get("driver_name") or ""),
+                _safe_cell(g.get("vendor_dc_ref") or ""),
+                idx,
+                _safe_cell(info.get("material_uid") or ""),
+                _safe_cell(info.get("variant_uid") or ""),
+                _safe_cell(it.get("description") or ""),
+                _safe_cell(info.get("make") or ""),
+                _safe_cell(info.get("model") or ""),
+                _safe_cell(info.get("hsn_code") or ""),
+                _safe_cell(it.get("unit", "")),
+                float(it.get("qty") or 0),
+                _safe_cell(it.get("remarks") or ""),
+                _safe_cell(g.get("received_by_name") or ""),
+            ])
+    for col_idx, h in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, min(len(h) + 2, 28))
+    return wb
+
+
+def _validate_grn_for_export(grn: dict, project: Optional[dict],
+                             customer: Optional[dict], fmt: str) -> tuple:
+    missing: List[str] = []
+    warnings: List[str] = []
+    if not grn.get("grn_number"):
+        missing.append("GRN number")
+    if not project:
+        warnings.append("Project")
+    if not (customer and customer.get("customer_id")):
+        warnings.append("Customer ID (permanent)")
+    items = grn.get("items") or []
+    if not items:
+        missing.append("At least one received line")
+    for i, it in enumerate(items, 1):
+        if not (it.get("description") or "").strip():
+            missing.append(f"Item {i} description")
+        if float(it.get("qty") or 0) <= 0:
+            missing.append(f"Item {i} qty > 0")
+    return missing, warnings
+
+
+@api.get("/grn/{grn_id}/export")
+async def grn_export_dispatch(grn_id: str,
+                              format: str = "pdf",
+                              force: Optional[int] = 0,
+                              token: Optional[str] = None,
+                              authorization: Optional[str] = Header(None)):
+    fmt = (format or "pdf").lower()
+    if fmt not in ("pdf", "excel"):
+        raise HTTPException(400, "format must be 'pdf' or 'excel'")
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    grn = await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
+    if not grn:
+        raise HTTPException(404, "GRN not found")
+    po = await db.pos.find_one({"po_id": grn.get("po_id")}, {"_id": 0})
+    if po:
+        await _check_po_access(u, po)
+    elif u.role not in ("purchase", "director", "admin", "store"):
+        raise HTTPException(403, "Not allowed")
+
+    if fmt == "pdf":
+        return await grn_pdf(grn_id, token=token, force=force, authorization=authorization)
+
+    project = await db.projects.find_one({"project_id": grn.get("project_id")}, {"_id": 0}) or {}
+    cust = None
+    cid = (po or {}).get("customer_id") or project.get("customer_id") or grn.get("customer_id")
+    if cid:
+        cust = await db.customers.find_one({"customer_id": cid}, {"_id": 0})
+    missing, warnings = _validate_grn_for_export(grn, project, cust, fmt)
+    if missing and not force:
+        raise _validation_error(missing, warnings, fmt)
+    wb = await _grn_excel_workbook([grn])
+    await _log_export(u, "grn", grn_id, "excel", grn["grn_number"],
+                      {"warnings": warnings, "forced": bool(force and missing)})
+    return _excel_response(wb, f"{grn['grn_number'].replace('/', '_')}_details.xlsx")
+
+
+@api.get("/export/grn")
+async def export_grn(token: Optional[str] = None,
+                     authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    if u.role not in ("purchase", "director", "admin", "store", "pm", "gm"):
+        raise HTTPException(403, "Not allowed")
+    grns = await db.grns.find({"deleted": {"$ne": True}}, {"_id": 0}).sort("date", -1).to_list(2000)
+    wb = await _grn_excel_workbook(grns)
+    await _log_export(u, "grn", "bulk", "excel", f"count={len(grns)}")
+    return _excel_response(wb, "grn_export.xlsx")
+
+
+# ---------------------- Delivery Challan ----------------------
+def _dc_pdf_story(dc: dict, project: dict, customer: Optional[dict],
+                  vendor: Optional[dict]) -> list:
+    styles = getSampleStyleSheet()
+    small = ParagraphStyle('s', parent=styles['Normal'], fontSize=8, leading=10)
+    smallb = ParagraphStyle('sb', parent=styles['Normal'], fontSize=8, leading=10,
+                            fontName="Helvetica-Bold")
+    ttl = "DELIVERY CHALLAN"
+    if (dc.get("dc_type") or "").lower() == "inbound":
+        ttl = "DELIVERY CHALLAN (Inbound)"
+    story = _pdf_story(ttl, dc.get("dc_number", ""), dc.get("date"),
+                       project, customer, vendor,
+                       extra_ref=f"Type: {(dc.get('dc_type') or '').upper()}"
+                                 + (f"  ·  PO {dc.get('po_id','')}" if dc.get("po_id") else ""))
+    # Logistics block
+    logistics = [
+        f"<b>From:</b> {dc.get('from_location','—')}",
+        f"<b>To:</b> {dc.get('to_location','—')}",
+        f"<b>Dispatch Date:</b> {dc.get('dispatch_date','—')}",
+        f"<b>Vehicle:</b> {dc.get('vehicle_no','—')}",
+        f"<b>Driver:</b> {dc.get('driver_name','—')} ({dc.get('driver_contact','')})",
+        f"<b>Transporter:</b> {dc.get('transporter','—')}",
+    ]
+    if dc.get("e_way_bill_no"):
+        logistics.append(f"<b>E-Way Bill:</b> {dc['e_way_bill_no']}"
+                          + (f" dt {dc['e_way_bill_date']}" if dc.get("e_way_bill_date") else ""))
+    if dc.get("vendor_dc_ref"):
+        logistics.append(f"<b>Vendor DC Ref:</b> {dc['vendor_dc_ref']}")
+    for l in logistics:
+        story.append(Paragraph(l, small))
+    story.append(Spacer(1, 6))
+
+    header = ["#", "MAT / VAR", "Description", "Make / Model", "Unit", "Qty", "Remarks"]
+    data = [[Paragraph(h, smallb) for h in header]]
+    for idx, it in enumerate(dc.get("items") or [], 1):
+        mv = ((it.get("material_uid") or "-") + "\n" + (it.get("variant_uid") or "-"))
+        mm2 = ((it.get("make") or "-") + "\n" + (it.get("model") or "-"))
+        data.append([
+            Paragraph(str(idx), small),
+            Paragraph(mv, small),
+            Paragraph((it.get("description") or "")[:80], small),
+            Paragraph(mm2, small),
+            Paragraph(it.get("unit") or "", small),
+            Paragraph(f"{float(it.get('qty') or 0):g}", small),
+            Paragraph((it.get("remarks") or "")[:60], small),
+        ])
+    tbl = Table(data, colWidths=[16, 60, 170, 74, 30, 44, 110], repeatRows=1)
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), VASU_PRIMARY),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor('#B7BEC9')),
+        ("FONTSIZE", (0, 0), (-1, -1), 7.5),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor('#F7F8FC')]),
+    ]))
+    story.append(tbl)
+    if dc.get("remarks"):
+        story.append(Spacer(1, 10))
+        story.append(Paragraph(f"<b>Remarks:</b> {dc['remarks']}", small))
+    # Declaration
+    story.append(Spacer(1, 10))
+    story.append(Paragraph(
+        "<i>This is a Delivery Challan, not a tax invoice. Material dispatched for "
+        "project execution / job-work / return. Goods received in good condition unless "
+        "recorded otherwise.</i>", small))
+    story += [
+        Spacer(1, 24),
+        Paragraph(f"<b>Authorised Signatory</b> — {dc.get('authorised_signatory') or 'Vasu Infosec Pvt Ltd'}", small),
+        Spacer(1, 20),
+        Paragraph("Prepared By: __________________  &nbsp;&nbsp;&nbsp;  Driver Signature: __________________  &nbsp;&nbsp;&nbsp;  Receiver Signature: __________________", small),
+    ]
+    return story
+
+
+async def _dc_excel_workbook(dcs: List[dict]) -> "openpyxl.Workbook":
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Delivery Challan"
+    headers = [
+        "DC#", "Date", "Type", "Status", "PO#", "GRN#", "Customer ID", "Customer Name",
+        "Vendor Name", "Project Code", "From", "To", "Dispatch Date",
+        "Vehicle", "Driver", "Driver Contact", "Transporter", "E-Way Bill", "E-Way Date",
+        "Vendor DC Ref",
+        "Line#", "MAT UID", "VAR UID", "Description", "Make", "Model", "Unit", "Qty",
+        "Item Remarks", "DC Remarks", "Authorised Signatory",
+    ]
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="002FA7")
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+    proj_map = {p["project_id"]: p for p in await db.projects.find({}, {"_id": 0}).to_list(500)}
+    for dc in dcs:
+        proj = proj_map.get(dc.get("project_id")) or {}
+        ddate = dc["date"].strftime("%Y-%m-%d") if isinstance(dc.get("date"), datetime) else str(dc.get("date", ""))[:10]
+        po = None
+        if dc.get("po_id"):
+            po = await db.pos.find_one({"po_id": dc["po_id"]}, {"_id": 0, "po_number": 1})
+        grn = None
+        if dc.get("grn_id"):
+            grn = await db.grns.find_one({"grn_id": dc["grn_id"]}, {"_id": 0, "grn_number": 1})
+        for idx, it in enumerate(dc.get("items") or [], 1):
+            ws.append([
+                _safe_cell(dc.get("dc_number", "")), _safe_cell(ddate),
+                _safe_cell(dc.get("dc_type", "")),
+                _safe_cell(dc.get("status", "")),
+                _safe_cell((po or {}).get("po_number", "")),
+                _safe_cell((grn or {}).get("grn_number", "")),
+                _safe_cell(dc.get("customer_id", "")),
+                _safe_cell(dc.get("customer_name", "")),
+                _safe_cell(dc.get("vendor_name", "")),
+                _safe_cell(proj.get("code", "")),
+                _safe_cell(dc.get("from_location", "")),
+                _safe_cell(dc.get("to_location", "")),
+                _safe_cell(dc.get("dispatch_date", "")),
+                _safe_cell(dc.get("vehicle_no", "")),
+                _safe_cell(dc.get("driver_name", "")),
+                _safe_cell(dc.get("driver_contact", "")),
+                _safe_cell(dc.get("transporter", "")),
+                _safe_cell(dc.get("e_way_bill_no", "")),
+                _safe_cell(dc.get("e_way_bill_date", "")),
+                _safe_cell(dc.get("vendor_dc_ref", "")),
+                idx,
+                _safe_cell(it.get("material_uid", "")),
+                _safe_cell(it.get("variant_uid", "")),
+                _safe_cell(it.get("description", "")),
+                _safe_cell(it.get("make", "")),
+                _safe_cell(it.get("model", "")),
+                _safe_cell(it.get("unit", "")),
+                float(it.get("qty") or 0),
+                _safe_cell(it.get("remarks", "")),
+                _safe_cell(dc.get("remarks", "")),
+                _safe_cell(dc.get("authorised_signatory", "")),
+            ])
+    for col_idx, h in enumerate(headers, 1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col_idx)].width = max(12, min(len(h) + 2, 28))
+    return wb
+
+
+def _validate_dc_for_export(dc: dict, project: Optional[dict], fmt: str) -> tuple:
+    missing: List[str] = []
+    warnings: List[str] = []
+    if not dc.get("dc_number"):
+        missing.append("DC number")
+    if not project:
+        missing.append("Project")
+    if not (dc.get("from_location") or "").strip():
+        missing.append("From location")
+    if not (dc.get("to_location") or "").strip():
+        missing.append("To location")
+    if not (dc.get("dispatch_date") or "").strip():
+        missing.append("Dispatch date")
+    if not (dc.get("items") or []):
+        missing.append("At least one line item")
+    if not (dc.get("vehicle_no") or "").strip():
+        warnings.append("Vehicle number")
+    if not (dc.get("driver_name") or "").strip():
+        warnings.append("Driver name")
+    for i, it in enumerate(dc.get("items") or [], 1):
+        if not (it.get("description") or "").strip():
+            missing.append(f"Item {i} description")
+        if float(it.get("qty") or 0) <= 0:
+            missing.append(f"Item {i} qty > 0")
+    return missing, warnings
+
+
+DC_ROLES = {"purchase", "store", "pm", "director", "admin", "gm"}
+
+
+async def _check_dc_access(u: UserOut, dc: dict):
+    # Project-scoped for pm/site_engineer; open for purchase/store/director/admin/gm
+    if u.role in ("director", "admin", "purchase", "gm"):
+        return
+    if u.role == "store":
+        return
+    if u.role == "pm":
+        proj = await db.projects.find_one({"project_id": dc.get("project_id")},
+                                          {"_id": 0, "project_managers": 1})
+        if proj and u.user_id in (proj.get("project_managers") or []):
+            return
+    if u.role == "site_engineer":
+        proj = await db.projects.find_one({"project_id": dc.get("project_id")},
+                                          {"_id": 0, "site_engineers": 1})
+        if proj and u.user_id in (proj.get("site_engineers") or []):
+            return
+    raise HTTPException(403, "Not authorised for this DC")
+
+
+@api.post("/dc")
+async def create_dc(body: DCCreate, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in DC_ROLES:
+        raise HTTPException(403, "Not allowed to create DC")
+    if not body.items:
+        raise HTTPException(400, "At least one line item required")
+    proj = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
+    if not proj:
+        raise HTTPException(404, "Project not found")
+    # Access check for PM/SE
+    if u.role == "pm" and u.user_id not in (proj.get("project_managers") or []):
+        raise HTTPException(403, "Not a PM for this project")
+    if u.role == "site_engineer" and u.user_id not in (proj.get("site_engineers") or []):
+        raise HTTPException(403, "Not a Site Engineer for this project")
+
+    cust_name = ""
+    if body.customer_id:
+        c = await db.customers.find_one({"customer_id": body.customer_id}, {"_id": 0, "name": 1})
+        if c: cust_name = c.get("name") or ""
+    vend_name = ""
+    if body.vendor_id:
+        v = await db.vendors.find_one({"vendor_id": body.vendor_id}, {"_id": 0, "name": 1})
+        if v: vend_name = v.get("name") or ""
+    dc_number = await next_dc_number()
+    dc = DC(
+        **body.model_dump(),
+        dc_number=dc_number,
+        customer_name=cust_name,
+        vendor_name=vend_name,
+        created_by=u.user_id,
+    )
+    await db.dcs.insert_one(dc.model_dump())
+    await audit("dc", dc.dc_id, "create", u,
+                {"dc_number": dc.dc_number,
+                 "old_value": None,
+                 "new_value": {"status": "issued", "dc_type": dc.dc_type,
+                               "item_count": len(dc.items),
+                               "project_id": dc.project_id,
+                               "from_location": dc.from_location,
+                               "to_location": dc.to_location}})
+    return await db.dcs.find_one({"dc_id": dc.dc_id}, {"_id": 0})
+
+
+@api.get("/dc")
+async def list_dcs(project_id: Optional[str] = None,
+                   status: Optional[str] = None,
+                   dc_type: Optional[str] = None,
+                   authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    q: Dict[str, Any] = {"deleted": {"$ne": True}}
+    if project_id: q["project_id"] = project_id
+    if status: q["status"] = status
+    if dc_type: q["dc_type"] = dc_type
+    # Role-scoping
+    if u.role == "pm":
+        prjs = await db.projects.find({"project_managers": u.user_id},
+                                       {"_id": 0, "project_id": 1}).to_list(500)
+        q["project_id"] = {"$in": [p["project_id"] for p in prjs]}
+    elif u.role == "site_engineer":
+        prjs = await db.projects.find({"site_engineers": u.user_id},
+                                       {"_id": 0, "project_id": 1}).to_list(500)
+        q["project_id"] = {"$in": [p["project_id"] for p in prjs]}
+    rows = await db.dcs.find(q, {"_id": 0}).sort("date", -1).to_list(500)
+    return rows
+
+
+@api.get("/dc/{dc_id}")
+async def get_dc(dc_id: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+    if not dc: raise HTTPException(404, "DC not found")
+    await _check_dc_access(u, dc)
+    return dc
+
+
+@api.put("/dc/{dc_id}")
+async def update_dc(dc_id: str, body: Dict[str, Any] = Body(...),
+                    authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+    if not dc: raise HTTPException(404, "DC not found")
+    await _check_dc_access(u, dc)
+    if u.role not in DC_ROLES:
+        raise HTTPException(403, "Not allowed")
+    ALLOWED = {
+        "status", "dispatch_date", "vehicle_no", "driver_name", "driver_contact",
+        "transporter", "e_way_bill_no", "e_way_bill_date", "remarks",
+        "authorised_signatory", "items", "from_location", "to_location", "vendor_dc_ref",
+    }
+    updates = {k: v for k, v in body.items() if k in ALLOWED and k != "reason"}
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    old_snap = {k: dc.get(k) for k in updates.keys()}
+    updates["updated_at"] = now_utc()
+    await db.dcs.update_one({"dc_id": dc_id}, {"$set": updates})
+    await audit("dc", dc_id, "edit", u,
+                {"dc_number": dc.get("dc_number"),
+                 "old_value": old_snap, "new_value": {k: v for k, v in updates.items() if k != "updated_at"},
+                 "reason": body.get("reason") or ""})
+    return await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+
+
+@api.delete("/dc/{dc_id}")
+async def delete_dc(dc_id: str, reason: Optional[str] = None,
+                    authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director can cancel DC")
+    dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+    if not dc: raise HTTPException(404, "DC not found")
+    await db.dcs.update_one({"dc_id": dc_id},
+                            {"$set": {"deleted": True, "status": "cancelled"}})
+    await audit("dc", dc_id, "cancel", u,
+                {"dc_number": dc.get("dc_number"),
+                 "old_value": {"status": dc.get("status")},
+                 "new_value": {"status": "cancelled"},
+                 "reason": reason or ""})
+    return {"ok": True}
+
+
+@api.get("/dc/{dc_id}/pdf")
+async def dc_pdf(dc_id: str, token: Optional[str] = None,
+                 force: Optional[int] = 0,
+                 authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+    if not dc: raise HTTPException(404, "DC not found")
+    await _check_dc_access(u, dc)
+    project = await db.projects.find_one({"project_id": dc["project_id"]}, {"_id": 0}) or {}
+    cust = await db.customers.find_one({"customer_id": dc.get("customer_id")}, {"_id": 0}) if dc.get("customer_id") else None
+    vend = await db.vendors.find_one({"vendor_id": dc.get("vendor_id")}, {"_id": 0}) if dc.get("vendor_id") else None
+    missing, warnings = _validate_dc_for_export(dc, project, "pdf")
+    if missing and not force:
+        raise _validation_error(missing, warnings, "pdf")
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15*mm, bottomMargin=15*mm,
+                            leftMargin=15*mm, rightMargin=15*mm)
+    doc.build(_dc_pdf_story(dc, project, cust, vend),
+              onFirstPage=_vasu_footer, onLaterPages=_vasu_footer)
+    buf.seek(0)
+    await _log_export(u, "dc", dc_id, "pdf", dc["dc_number"],
+                      {"warnings": warnings, "forced": bool(force and missing)})
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f'attachment; filename="{dc["dc_number"].replace("/","_")}.pdf"'})
+
+
+@api.get("/dc/{dc_id}/export")
+async def dc_export_dispatch(dc_id: str,
+                             format: str = "pdf",
+                             force: Optional[int] = 0,
+                             token: Optional[str] = None,
+                             authorization: Optional[str] = Header(None)):
+    fmt = (format or "pdf").lower()
+    if fmt not in ("pdf", "excel"):
+        raise HTTPException(400, "format must be 'pdf' or 'excel'")
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
+    if not dc: raise HTTPException(404, "DC not found")
+    await _check_dc_access(u, dc)
+    if fmt == "pdf":
+        return await dc_pdf(dc_id, token=token, force=force, authorization=authorization)
+    project = await db.projects.find_one({"project_id": dc["project_id"]}, {"_id": 0}) or {}
+    missing, warnings = _validate_dc_for_export(dc, project, fmt)
+    if missing and not force:
+        raise _validation_error(missing, warnings, fmt)
+    wb = await _dc_excel_workbook([dc])
+    await _log_export(u, "dc", dc_id, "excel", dc["dc_number"],
+                      {"warnings": warnings, "forced": bool(force and missing)})
+    return _excel_response(wb, f"{dc['dc_number'].replace('/', '_')}_details.xlsx")
+
+
+@api.get("/export/dc")
+async def export_dc(token: Optional[str] = None,
+                    authorization: Optional[str] = Header(None)):
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    if u.role not in ("purchase", "director", "admin", "pm", "gm", "store"):
+        raise HTTPException(403, "Not allowed")
+    dcs = await db.dcs.find({"deleted": {"$ne": True}}, {"_id": 0}).sort("date", -1).to_list(2000)
+    wb = await _dc_excel_workbook(dcs)
+    await _log_export(u, "dc", "bulk", "excel", f"count={len(dcs)}")
+    return _excel_response(wb, "dc_export.xlsx")
+
+
+# ---------------------- Comparative Statement (import-only) ----------------------
+CS_ROLES_UPLOAD = {"purchase", "pm", "gm", "director", "admin"}
+CS_ROLES_VIEW = {"purchase", "pm", "gm", "director", "admin", "site_engineer"}
+
+
+@api.post("/comparative-statement")
+async def create_cs(body: ComparativeStatementCreate,
+                    authorization: Optional[str] = Header(None)):
+    """Import a Comparative Statement prepared outside the app (Excel/PDF).
+    File is stored inline as base64. Metadata (L1/L2/L3, selected vendor, remarks)
+    accepted alongside. Attach via mrf_id or po_id (or both)."""
+    u = await get_current_user(authorization)
+    if u.role not in CS_ROLES_UPLOAD:
+        raise HTTPException(403, "Not allowed to upload Comparative Statement")
+    if not body.file_base64:
+        raise HTTPException(400, "file_base64 is required")
+    if not (body.mrf_id or body.po_id):
+        raise HTTPException(400, "Attach to either mrf_id or po_id")
+
+    # Try to compute size from base64 (approximate)
+    try:
+        import base64 as _b64
+        raw = _b64.b64decode((body.file_base64.split(",", 1)[-1]).encode("utf-8"), validate=False)
+        size = len(raw)
+    except Exception:
+        size = 0
+    if size > 15 * 1024 * 1024:
+        raise HTTPException(413, "File exceeds 15 MB")
+
+    # Resolve project/customer from attached record if not supplied
+    project_id = body.project_id
+    customer_id = body.customer_id
+    if body.mrf_id and not project_id:
+        m = await db.mrfs.find_one({"mrf_id": body.mrf_id},
+                                    {"_id": 0, "project_id": 1, "customer_id": 1})
+        if m:
+            project_id = m.get("project_id") or project_id
+            customer_id = m.get("customer_id") or customer_id
+    if body.po_id and not project_id:
+        p = await db.pos.find_one({"po_id": body.po_id},
+                                   {"_id": 0, "project_id": 1, "customer_id": 1})
+        if p:
+            project_id = p.get("project_id") or project_id
+            customer_id = p.get("customer_id") or customer_id
+
+    cs_number = await next_cs_number()
+    cs = ComparativeStatement(
+        **body.model_dump(exclude={"project_id", "customer_id"}),
+        project_id=project_id or "",
+        customer_id=customer_id or "",
+        cs_number=cs_number,
+        uploaded_by=u.user_id,
+        uploaded_by_name=u.name,
+        file_size=size,
+    )
+    doc = cs.model_dump()
+    await db.comparative_statements.insert_one(dict(doc))
+    await audit("comparative_statement", cs.cs_id, "upload", u,
+                {"cs_number": cs.cs_number, "record_number": cs.cs_number,
+                 "old_value": None,
+                 "new_value": {"mrf_id": cs.mrf_id, "po_id": cs.po_id,
+                               "title": cs.title, "file_name": cs.file_name,
+                               "l1_vendor": cs.l1_vendor,
+                               "selected_vendor": cs.selected_vendor,
+                               "size": size},
+                 "reason": body.remarks or ""})
+    # Return without the base64 payload
+    out = await db.comparative_statements.find_one(
+        {"cs_id": cs.cs_id}, {"_id": 0, "file_base64": 0}
+    )
+    return _strip_oids(out)
+
+
+@api.get("/comparative-statement")
+async def list_cs(mrf_id: Optional[str] = None,
+                  po_id: Optional[str] = None,
+                  project_id: Optional[str] = None,
+                  customer_id: Optional[str] = None,
+                  authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in CS_ROLES_VIEW:
+        raise HTTPException(403, "Not allowed")
+    q: Dict[str, Any] = {"deleted": {"$ne": True}}
+    if mrf_id: q["mrf_id"] = mrf_id
+    if po_id: q["po_id"] = po_id
+    if project_id: q["project_id"] = project_id
+    if customer_id: q["customer_id"] = customer_id
+    if u.role == "site_engineer":
+        # SEs only see CS for MRFs they raised
+        mrf_ids = [m["mrf_id"] for m in await db.mrfs.find(
+            {"created_by": u.user_id}, {"_id": 0, "mrf_id": 1}).to_list(5000)]
+        q["mrf_id"] = {"$in": mrf_ids}
+    # Never ship base64 payloads in the list
+    rows = await db.comparative_statements.find(q, {"_id": 0, "file_base64": 0}).sort("uploaded_at", -1).to_list(500)
+    return rows
+
+
+@api.get("/comparative-statement/{cs_id}")
+async def get_cs(cs_id: str, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in CS_ROLES_VIEW:
+        raise HTTPException(403, "Not allowed")
+    cs = await db.comparative_statements.find_one({"cs_id": cs_id},
+                                                    {"_id": 0, "file_base64": 0})
+    if not cs: raise HTTPException(404, "CS not found")
+    return cs
+
+
+@api.get("/comparative-statement/{cs_id}/download")
+async def download_cs(cs_id: str, token: Optional[str] = None,
+                      authorization: Optional[str] = Header(None)):
+    """Return the original imported file as an attachment."""
+    auth = authorization or (f"Bearer {token}" if token else None)
+    u = await get_current_user(auth)
+    if u.role not in CS_ROLES_VIEW:
+        raise HTTPException(403, "Not allowed")
+    cs = await db.comparative_statements.find_one({"cs_id": cs_id}, {"_id": 0})
+    if not cs: raise HTTPException(404, "CS not found")
+    import base64 as _b64
+    b64 = cs.get("file_base64") or ""
+    if not b64:
+        raise HTTPException(404, "No file attached to this CS")
+    try:
+        raw = _b64.b64decode((b64.split(",", 1)[-1]).encode("utf-8"), validate=False)
+    except Exception:
+        raise HTTPException(500, "Corrupt attachment")
+    fname = cs.get("file_name") or f"{cs.get('cs_number','CS').replace('/','_')}.bin"
+    mime = cs.get("mime_type") or "application/octet-stream"
+    await _log_export(u, "comparative_statement", cs_id,
+                      "download", cs.get("cs_number", ""))
+    return StreamingResponse(io.BytesIO(raw), media_type=mime,
+                             headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@api.put("/comparative-statement/{cs_id}")
+async def update_cs(cs_id: str, body: Dict[str, Any] = Body(...),
+                    authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in CS_ROLES_UPLOAD:
+        raise HTTPException(403, "Not allowed")
+    cs = await db.comparative_statements.find_one({"cs_id": cs_id}, {"_id": 0, "file_base64": 0})
+    if not cs: raise HTTPException(404, "CS not found")
+    ALLOWED = {"title", "remarks", "vendors", "l1_vendor", "l1_amount",
+               "selected_vendor", "selection_reason", "status"}
+    updates = {k: v for k, v in body.items() if k in ALLOWED}
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    old_snap = {k: cs.get(k) for k in updates.keys()}
+    await db.comparative_statements.update_one({"cs_id": cs_id}, {"$set": updates})
+    await audit("comparative_statement", cs_id, "edit", u,
+                {"cs_number": cs.get("cs_number"),
+                 "old_value": old_snap,
+                 "new_value": updates,
+                 "reason": body.get("reason") or ""})
+    return await db.comparative_statements.find_one({"cs_id": cs_id},
+                                                     {"_id": 0, "file_base64": 0})
+
+
+@api.delete("/comparative-statement/{cs_id}")
+async def delete_cs(cs_id: str, reason: Optional[str] = None,
+                    authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director"):
+        raise HTTPException(403, "Only admin/director can delete CS")
+    cs = await db.comparative_statements.find_one({"cs_id": cs_id}, {"_id": 0, "file_base64": 0})
+    if not cs: raise HTTPException(404, "CS not found")
+    await db.comparative_statements.update_one({"cs_id": cs_id},
+                                                {"$set": {"deleted": True, "status": "cancelled"}})
+    await audit("comparative_statement", cs_id, "delete", u,
+                {"cs_number": cs.get("cs_number"),
+                 "old_value": {"status": cs.get("status"), "deleted": False},
+                 "new_value": {"status": "cancelled", "deleted": True},
+                 "reason": reason or ""})
+    return {"ok": True}
+
 
 # ---------------------- Excel Bulk Import ----------------------
 @api.get("/import/vendors/template")

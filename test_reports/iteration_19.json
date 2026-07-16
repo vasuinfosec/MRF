@@ -1,0 +1,41 @@
+{
+  "summary": "Iteration 19 — GRN unified export, Delivery Challan (DC) first-class endpoints, Comparative Statement (CS) import-only feature, plus PO/MRF/audit regression. 36/36 pass. Verified: (a) GET /api/grn/{id}/export?format=pdf returns %PDF; ?format=excel returns valid xlsx with MAT UID/VAR UID columns; ?force=1 bypasses 0-qty validation and writes details.forced=true; GET /api/export/grn is 200 for purchase/director/admin/store/pm/gm and 403 for site_engineer. (b) POST /api/dc creates DC with dc_number DC/YYYY/NNNN that sequentially increments; requires items and existing project; audit_logs row has details.old_value=null and new_value.item_count=1; site_engineer NOT in project's site_engineers list is 403. (c) GET /api/dc filters by project_id/status/dc_type; PM sees only DCs on projects they manage; SE sees only DCs on projects they belong to. (d) PUT /api/dc/{id} allowed fields succeed with old/new audit; body with only unknown fields → 400 'Nothing to update'. (e) GET /api/dc/{id}/pdf → 200 %PDF; missing from_location/to_location/dispatch_date → 422 with missing_mandatory; ?force=1 bypasses. (f) GET /api/dc/{id}/export?format=excel workbook has >20 headers and MAT UID / VAR UID columns; ?format=pdf dispatches correctly. (g) DELETE /api/dc/{id} is 403 for non-admin/director; admin succeeds → deleted=true, status='cancelled', audit-logged. (h) POST /api/comparative-statement: 400 on missing file_base64, 400 on neither mrf_id nor po_id, 413 for file >15 MB, success returns cs_number CS/YYYY/NNNN without file_base64 in payload while server persists it. (i) GET /api/comparative-statement never returns file_base64; site_engineer only sees CS attached to MRFs they created. (j) GET /api/comparative-statement/{id}/download returns file with correct mime + Content-Disposition attachment and writes audit action='export_download'. (k) PUT whitelist enforced with old/new audit; unknown-only body → 400. (l) DELETE admin/director only, audit-logged. (m) Regression: /api/po/{id}/export pdf/excel/tally OK for purchase; /api/mrf/{id}/export pdf OK for pm; /api/audit is 200 for gm/purchase/pm/site_engineer/store; /api/audit/facets 200 for admin/director/gm/purchase/pm.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_dc_cs_grn_iter19.py",
+    "/app/test_reports/pytest/dc_cs_grn_iter19.xml"
+  ],
+  "action_items": [
+    "None required — all iter19 acceptance criteria pass 36/36. Optional: consider adding a native /api/grn endpoint (POST/PUT) so 0-qty GRN validation can be exercised end-to-end via HTTP alone; the current test uses direct mongo insertion of a synthetic GRN row to hit that path.",
+    "Optional: GRN PDF/Excel dispatcher currently rejects `store` for a GRN when the store user is not in the project's site_engineers list (via _check_po_access). Not a bug per the review spec (spec says store CAN pull /api/export/grn bulk, which does pass), but the per-GRN dispatcher inherits _check_po_access's project scoping. If store roles should be able to fetch any GRN PDF, relax _check_po_access for role='store' or add explicit store bypass in grn_export_dispatch. Confirm intended behaviour with product."
+  ],
+  "critical_code_review_comments": [
+    "server.py:3891 grn_export_dispatch falls back to raise 403 only when po is None AND role not in (purchase/director/admin/store); when a po exists it delegates to _check_po_access. Store gets 403 unless assigned to the project — acceptable per current spec but potentially surprising.",
+    "server.py:4090 DC_ROLES = {purchase, store, pm, director, admin, gm}; site_engineer is intentionally missing from DC_ROLES so /api/dc create fails 403 for SE regardless of project membership. The specific SE-membership check at 4125 is unreachable for the DC_ROLES gate — either add 'site_engineer' to DC_ROLES to allow project-scoped SE creation, or drop the dead check. Not blocking spec (spec requires SE denial on DC create).",
+    "server.py:4325 CS oversize check uses ceil(raw)/base64. base64 has ~33% overhead; 16 MB raw request triggers server-side b64decode of a ~21 MB payload before the size check — consider validating Content-Length first to reject early.",
+    "server.py:4407 download_cs uses _log_export with fmt='download' → action becomes 'export_download' as spec requires. Verified via audit fetch.",
+    "server.py:4441 CS update ALLOWED whitelist does NOT include file_base64 (correct — file is immutable post-upload). Whitelist correctly filters out arbitrary keys and returns 400 when nothing valid.",
+    "server.py:4157 list_dcs scopes pm/site_engineer via project_id $in list. Uses proper index-friendly {'project_managers': u.user_id} / {'site_engineers': u.user_id} queries.",
+    "server.py:4197 update_dc ALLOWED excludes 'reason' but body.reason is still captured into audit as details.reason — good pattern.",
+    "server.py:4063 _validate_dc_for_export flags item i qty > 0 alongside from/to/dispatch checks — consistent with GRN validator at 3853.",
+    "server.py:1561 next_dc_number and 1571 next_cs_number use $inc atomic counters — safe under concurrency."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_dc_cs_grn_iter19.py (new — canonical iter19 regression suite)"
+  ],
+  "success_rate": {"backend": "100% (36/36)", "frontend": "not_tested"},
+  "seed_data_creation": "Created test customer TESTCUS19-*, projects TP-19-*/TP-19B-*, vendor TESTVEND19-*, ephemeral MRFs/POs, GRN synthetic row grn_TEST19_* (cleaned up), and multiple DCs/CS docs prefixed 'TEST'. Reused /api/seed masters idempotently.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "test_dc_cs_grn_iter19.py at /app/backend/tests/ is the canonical regression suite for GRN unified export, Delivery Challan and Comparative Statement. Run with: pytest tests/test_dc_cs_grn_iter19.py -v --junitxml=/app/test_reports/pytest/dc_cs_grn_next.xml. Requires ENABLE_DEV_LOGIN=1 and dev-login users (director/gm/pm/purchase/siteeng/store/admin @vasu.dev). BASE_URL resolves from EXPO_PUBLIC_BACKEND_URL. The zero-qty GRN test opens a direct pymongo connection to insert/delete a synthetic GRN row (skips gracefully if pymongo/local mongo not available). Cleanup happens in test's finally block. All 36 assertions green.",
+  "rca_of_issue": "No open bugs. Two test-authoring issues self-fixed during the run: (1) initial version used `store` role for /po/{po_id}/received but store isn't assigned to the ephemeral project's site_engineers, so _check_po_access returned 403 — switched to `purchase` which has global access. (2) DC list scoping tests were asserting `all rows have project_a`, but PM/SE tokens persist across runs and accumulate DCs across many projects — corrected assertion to only require rows are subset of the projects where pm/se is in project_managers/site_engineers."
+}
