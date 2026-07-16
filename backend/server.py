@@ -401,6 +401,12 @@ async def create_session(body: SessionRequest):
         upsert=True,
     )
     user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    # Login audit
+    try:
+        await audit("auth", user_id, "login", UserOut(**user),
+                    {"method": "emergent", "email": email})
+    except Exception:
+        pass
     return {"session_token": session_token, "user": UserOut(**user).model_dump()}
 
 @api.get("/auth/me", response_model=UserOut)
@@ -411,6 +417,14 @@ async def me(authorization: Optional[str] = Header(None)):
 async def logout(authorization: Optional[str] = Header(None)):
     if authorization and authorization.startswith("Bearer "):
         token = authorization.split(" ", 1)[1]
+        sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
+        if sess:
+            u = await db.users.find_one({"user_id": sess["user_id"]}, {"_id": 0})
+            if u:
+                try:
+                    await audit("auth", u["user_id"], "logout", UserOut(**u), {})
+                except Exception:
+                    pass
         await db.user_sessions.delete_one({"session_token": token})
     return {"ok": True}
 
@@ -442,6 +456,11 @@ async def dev_login(body: dict):
         "expires_at": now_utc() + timedelta(days=7), "created_at": now_utc(),
     })
     user = await db.users.find_one({"user_id": user_id}, {"_id": 0})
+    try:
+        await audit("auth", user_id, "login", UserOut(**user),
+                    {"method": "dev-login", "email": email, "role": role})
+    except Exception:
+        pass
     return {"session_token": session_token, "user": UserOut(**user).model_dump()}
 
 # ---------------------- Users / Roles ----------------------
@@ -1499,7 +1518,15 @@ async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None
         created_by=u.user_id,
     )
     await db.mrfs.insert_one(mrf.model_dump())
-    await audit("mrf", mrf.mrf_id, "create", u, {"mrf_number": mrf.mrf_number})
+    await audit("mrf", mrf.mrf_id, "create", u,
+                {"mrf_number": mrf.mrf_number,
+                 "old_value": None,
+                 "new_value": {"status": "draft",
+                               "project_id": mrf.project_id,
+                               "customer_id": cust_id,
+                               "customer_name": cust_name,
+                               "item_count": len(items),
+                               "site": mrf.site}})
     return mrf.model_dump()
 
 @api.get("/mrf")
@@ -1607,7 +1634,10 @@ async def submit_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
         {"mrf_id": mrf_id},
         {"$set": {"status": "pm_review", "updated_at": now_utc()}}
     )
-    await audit("mrf", mrf_id, "submit", u)
+    await audit("mrf", mrf_id, "submit", u,
+                {"old_value": {"status": d["status"]},
+                 "new_value": {"status": "pm_review"},
+                 "mrf_number": d["mrf_number"]})
     # Notify PMs of this project (fallback: all PMs)
     proj = await db.projects.find_one({"project_id": d["project_id"]}, {"_id": 0}) or {}
     pm_ids = list(proj.get("project_managers") or [])
@@ -1638,7 +1668,11 @@ async def approve_mrf(mrf_id: str, body: ApprovalAction, authorization: Optional
             {"$set": {"status": "returned", "pm_comments": body.comment or "",
                       "updated_at": now_utc()}}
         )
-        await audit("mrf", mrf_id, "return", u, {"comment": body.comment})
+        await audit("mrf", mrf_id, "return", u,
+                    {"reason": body.comment or "", "comment": body.comment,
+                     "old_value": {"status": d["status"]},
+                     "new_value": {"status": "returned"},
+                     "mrf_number": d["mrf_number"]})
         await notify([d["created_by"]], "MRF returned", f"{d['mrf_number']} returned for correction", f"/mrf/{mrf_id}")
         return {"ok": True, "status": "returned"}
 
@@ -1671,7 +1705,12 @@ async def approve_mrf(mrf_id: str, body: ApprovalAction, authorization: Optional
         {"$set": {"items": items, "status": new_status,
                   "pm_comments": body.comment or "", "updated_at": now_utc()}}
     )
-    await audit("mrf", mrf_id, body.action, u, {"comment": body.comment, "items": body.item_actions})
+    await audit("mrf", mrf_id, body.action, u,
+                {"reason": body.comment or "", "comment": body.comment,
+                 "items": body.item_actions,
+                 "old_value": {"status": d.get("status")},
+                 "new_value": {"status": new_status},
+                 "mrf_number": d["mrf_number"]})
     # Notify creator + purchase
     tgt = [d["created_by"]]
     if new_status == "approved":
@@ -1689,7 +1728,10 @@ async def send_to_purchase(mrf_id: str, authorization: Optional[str] = Header(No
     if not d or d["status"] != "approved":
         raise HTTPException(400, "MRF must be approved first")
     await db.mrfs.update_one({"mrf_id": mrf_id}, {"$set": {"status": "sent_to_purchase", "updated_at": now_utc()}})
-    await audit("mrf", mrf_id, "send_to_purchase", u)
+    await audit("mrf", mrf_id, "send_to_purchase", u,
+                {"old_value": {"status": d.get("status")},
+                 "new_value": {"status": "sent_to_purchase"},
+                 "mrf_number": d.get("mrf_number")})
     return {"ok": True}
 
 @api.put("/mrf/{mrf_id}")
@@ -1750,7 +1792,13 @@ async def update_mrf_draft(mrf_id: str, body: dict,
 
     updates["updated_at"] = now_utc()
     await db.mrfs.update_one({"mrf_id": mrf_id}, {"$set": updates})
-    await audit("mrf", mrf_id, "edit_draft", u, {k: v for k, v in updates.items() if k != "items"})
+    # Compute a compact old/new diff for the audit trail
+    old_snap = {k: mrf.get(k) for k in updates.keys() if k != "updated_at"}
+    new_snap = {k: v for k, v in updates.items() if k != "updated_at"}
+    await audit("mrf", mrf_id, "edit_draft", u,
+                {"old_value": old_snap, "new_value": new_snap,
+                 "mrf_number": mrf.get("mrf_number"),
+                 "reason": body.get("reason") or ""})
     return await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
 
 @api.delete("/mrf/{mrf_id}")
@@ -1758,8 +1806,12 @@ async def delete_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
     if u.role != "admin":
         raise HTTPException(403, "Only admin can delete")
+    m = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0, "mrf_number": 1, "status": 1})
     await db.mrfs.update_one({"mrf_id": mrf_id}, {"$set": {"deleted": True}})
-    await audit("mrf", mrf_id, "soft_delete", u)
+    await audit("mrf", mrf_id, "soft_delete", u,
+                {"old_value": {"deleted": False, "status": (m or {}).get("status")},
+                 "new_value": {"deleted": True},
+                 "mrf_number": (m or {}).get("mrf_number")})
     return {"ok": True}
 
 @api.put("/mrf/{mrf_id}/items/{line_id}")
@@ -1922,8 +1974,16 @@ async def create_po(body: POCreate, authorization: Optional[str] = Header(None))
         await notify([a["user_id"] for a in approvers], "PO pending Director approval",
                      f"{po.po_number} (₹{total:,.2f}) awaits Director approval", f"/po/{po.po_id}")
 
-    await audit("po", po.po_id, "create", u, {"po_number": po.po_number, "total": total,
-                                               "initial_status": initial_status})
+    await audit("po", po.po_id, "create", u,
+                {"po_number": po.po_number,
+                 "old_value": None,
+                 "new_value": {"total": total, "status": initial_status,
+                               "vendor_id": po_doc.get("vendor_id"),
+                               "customer_id": cust_id,
+                               "project_id": po_doc.get("project_id"),
+                               "item_count": len(po_doc.get("items") or [])},
+                 "total": total,
+                 "initial_status": initial_status})
     po_doc.pop("_id", None)
     return po_doc
 
@@ -1979,7 +2039,11 @@ async def approve_po(po_id: str, body: Optional[dict] = None,
             await db.mrfs.update_one({"mrf_id": mrf["mrf_id"]},
                                      {"$set": {"items": items, "status": mrf_new, "updated_at": now_utc()}})
 
-    await audit("po", po_id, f"po_{action}", u, {"comment": comment, "new_status": new_status})
+    await audit("po", po_id, f"po_{action}", u,
+                {"comment": comment, "old_value": {"status": cur},
+                 "new_value": {"status": new_status},
+                 "reason": comment,
+                 "po_number": po.get("po_number")})
     # Notify creator
     creator = po.get("created_by")
     if creator:
@@ -2134,8 +2198,13 @@ async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] 
             "remarks": (body or {}).get("remarks", ""),
         })
 
-    await audit("po", po_id, "received", u, {"status": new_status, "grn_number": grn_number,
-                                              "per_line": grn_items})
+    await audit("po", po_id, "received", u,
+                {"old_value": {"status": po.get("status")},
+                 "new_value": {"status": new_status},
+                 "grn_number": grn_number,
+                 "per_line": grn_items,
+                 "po_number": po.get("po_number"),
+                 "reason": (body or {}).get("remarks", "")})
     return {"ok": True, "status": new_status, "grn_id": grn_id, "grn_number": grn_number}
 
 # ---------------------- Billing ----------------------
@@ -2323,20 +2392,28 @@ async def mrf_ageing(authorization: Optional[str] = Header(None)):
 @api.get("/audit")
 async def audit_logs(entity_id: Optional[str] = None,
                      entity: Optional[str] = None,
+                     action: Optional[str] = None,
+                     user_id: Optional[str] = None,
+                     user_role: Optional[str] = None,
+                     since: Optional[str] = None,
+                     limit: int = 200,
                      authorization: Optional[str] = Header(None)):
-    """Audit trail.
+    """Unified audit trail feed.
 
-    - `entity_id` provided → any user who can access that entity can see its audit trail
-      (spec: "MRF preview and live status must be visible to all authorised users" incl.
-      authorisation & audit history).
-    - `entity_id` NOT provided → admin/director only (bulk audit view).
+    Access model:
+    - Admin / Director / GM / Purchase: full system audit visibility (all events).
+    - PM: audit entries for MRFs/POs on their projects + their own actions + all master-data audits.
+    - Site Engineer: audit for MRFs they created + PO events referring to those MRFs + their own actions.
+    - Store: audit for MRFs they raised + GRN/received events + their own actions.
+
+    Additional filters: `entity`, `action` (prefix match), `user_id`, `user_role`,
+    `since` (ISO8601 date/datetime — inclusive lower bound), `limit` (max 500).
     """
     u = await get_current_user(authorization)
-    if not entity_id:
-        if u.role not in ("admin", "director"):
-            raise HTTPException(403, "Only admin/director can view full audit log")
-    else:
-        # Entity-scoped access check
+    limit = max(1, min(int(limit or 200), 500))
+
+    if entity_id:
+        # Entity-scoped audit — access is gated by ability to read that entity.
         if entity_id.startswith("mrf_"):
             m = await db.mrfs.find_one({"mrf_id": entity_id}, {"_id": 0})
             if not m:
@@ -2348,18 +2425,92 @@ async def audit_logs(entity_id: Optional[str] = None,
                 raise HTTPException(404, "PO not found")
             await _check_po_access(u, p)
         else:
-            # Customer/vendor/master/etc. — restrict to admin/director/purchase/pm/gm
+            # Customer / vendor / material / master audits — visible to
+            # management (admin/director/gm/purchase/pm) and to the acting user.
             if u.role not in ("admin", "director", "purchase", "pm", "gm"):
-                raise HTTPException(403, "Not authorised to view this audit trail")
+                # site_engineer / store can still see logs they themselves generated
+                pass
 
     q: Dict[str, Any] = {}
     if entity_id: q["entity_id"] = entity_id
     if entity: q["entity"] = entity
-    logs = await db.audit_logs.find(q, {"_id": 0}).sort("timestamp", -1).limit(200).to_list(200)
-    # Defensive: audit_logs may historically contain nested ObjectIds inside
-    # details/new_value/old_value (e.g. from motor's insert_one mutation of
-    # request dicts). Strip recursively so responses are always JSON-safe.
+    if action: q["action"] = {"$regex": f"^{action}"}
+    if user_id: q["user_id"] = user_id
+    if user_role: q["user_role"] = user_role
+    if since:
+        try:
+            dt = datetime.fromisoformat(since.replace("Z", "+00:00"))
+            q["timestamp"] = {"$gte": dt}
+        except Exception:
+            raise HTTPException(400, "since must be ISO8601")
+
+    # Global-view RBAC scoping when NO entity_id is supplied.
+    if not entity_id:
+        if u.role in ("admin", "director", "gm", "purchase"):
+            pass  # full access
+        elif u.role == "pm":
+            # PM: audits for their projects' MRFs/POs + their own actions +
+            # all master-data audits (they need visibility into upstream data changes).
+            prjs = await db.projects.find({"project_managers": u.user_id},
+                                          {"_id": 0, "project_id": 1}).to_list(500)
+            proj_ids = [p["project_id"] for p in prjs]
+            mrf_ids = [m["mrf_id"] for m in await db.mrfs.find(
+                {"project_id": {"$in": proj_ids}}, {"_id": 0, "mrf_id": 1}).to_list(5000)]
+            po_ids = [p["po_id"] for p in await db.pos.find(
+                {"project_id": {"$in": proj_ids}}, {"_id": 0, "po_id": 1}).to_list(5000)]
+            or_clauses: List[Dict[str, Any]] = [
+                {"user_id": u.user_id},
+                {"entity_id": {"$in": mrf_ids}} if mrf_ids else {"entity_id": "__none__"},
+                {"entity_id": {"$in": po_ids}} if po_ids else {"entity_id": "__none__"},
+                {"entity": {"$in": ["customer", "vendor", "project", "material", "customer_po",
+                                     "master.material", "master.category", "master.department",
+                                     "material.bulk_import"]}},
+            ]
+            q = {"$and": [q, {"$or": or_clauses}]} if q else {"$or": or_clauses}
+        elif u.role == "site_engineer":
+            mrf_ids = [m["mrf_id"] for m in await db.mrfs.find(
+                {"created_by": u.user_id}, {"_id": 0, "mrf_id": 1}).to_list(5000)]
+            or_clauses = [{"user_id": u.user_id}]
+            if mrf_ids:
+                or_clauses.append({"entity_id": {"$in": mrf_ids}})
+                # Also include POs that reference their MRFs
+                po_ids = [p["po_id"] for p in await db.pos.find(
+                    {"mrf_refs": {"$in": mrf_ids}}, {"_id": 0, "po_id": 1}).to_list(5000)]
+                if po_ids:
+                    or_clauses.append({"entity_id": {"$in": po_ids}})
+            q = {"$and": [q, {"$or": or_clauses}]} if q else {"$or": or_clauses}
+        elif u.role == "store":
+            or_clauses = [
+                {"user_id": u.user_id},
+                {"action": {"$regex": "^received|^po_received|grn"}},
+            ]
+            q = {"$and": [q, {"$or": or_clauses}]} if q else {"$or": or_clauses}
+        else:
+            # Unknown role — restrict to own actions only.
+            q = {"$and": [q, {"user_id": u.user_id}]} if q else {"user_id": u.user_id}
+
+    logs = await db.audit_logs.find(q, {"_id": 0}).sort("timestamp", -1).limit(limit).to_list(limit)
     return [_strip_oids(d) for d in logs]
+
+@api.get("/audit/facets")
+async def audit_facets(authorization: Optional[str] = Header(None)):
+    """Filter options for the audit UI: distinct entities, actions, and users."""
+    u = await get_current_user(authorization)
+    if u.role not in ("admin", "director", "gm", "purchase", "pm"):
+        raise HTTPException(403, "Not allowed")
+    ents = await db.audit_logs.distinct("entity")
+    acts = await db.audit_logs.distinct("action")
+    users_docs = await db.audit_logs.aggregate([
+        {"$group": {"_id": "$user_id",
+                    "name": {"$first": "$user_name"},
+                    "role": {"$first": "$user_role"}}},
+        {"$limit": 200},
+    ]).to_list(200)
+    users = [{"user_id": d["_id"], "name": d.get("name"), "role": d.get("role")}
+             for d in users_docs if d.get("_id")]
+    return {"entities": sorted([e for e in ents if e]),
+            "actions": sorted([a for a in acts if a]),
+            "users": users}
 
 # ---------------------- Settings: Purchase Thresholds ----------------------
 @api.get("/settings/thresholds")

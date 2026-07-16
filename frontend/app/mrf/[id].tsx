@@ -8,6 +8,7 @@ import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Body, Loader } from "@/src/components/ui";
 import ExportMenu from "@/src/components/ExportMenu";
+import AuditTrail from "@/src/components/AuditTrail";
 import { theme, statusLabel, canonicalStatus } from "@/src/theme";
 
 function ownerRoleForStatus(status: string): string {
@@ -367,19 +368,9 @@ export default function MRFDetail() {
         </View>
 
         {/* Audit */}
-        <H2 style={{ marginTop: 24, marginBottom: 8 }}>Audit Trail</H2>
-        <Card testID="audit-card">
-          {audit.length ? audit.map((a) => (
-            <View key={a.audit_id} style={styles.auditRow}>
-              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                <Text style={{ fontWeight: "700", color: theme.colors.text }}>{statusLabel(a.action)}</Text>
-                <Text style={styles.auditDate}>{new Date(a.timestamp).toLocaleString()}</Text>
-              </View>
-              <Text style={{ color: theme.colors.textSecondary, fontSize: 12 }}>{a.user_name} · {statusLabel(a.user_role)}</Text>
-              {a.details?.comment ? <Text style={styles.auditDetail}>&ldquo;{a.details.comment}&rdquo;</Text> : null}
-            </View>
-          )) : <Muted>No history yet.</Muted>}
-        </Card>
+        <View style={{ marginTop: 20 }} testID="audit-card">
+          <AuditTrail entityId={String(id || "")} title="Audit Trail" limit={100} />
+        </View>
       </ScrollView>
 
       {/* Action Modal */}

@@ -8,6 +8,7 @@ import { api, backendUrl, getToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Loader } from "@/src/components/ui";
 import ExportMenu from "@/src/components/ExportMenu";
+import AuditTrail from "@/src/components/AuditTrail";
 import { theme } from "@/src/theme";
 
 export default function PODetail() {
@@ -361,6 +362,11 @@ export default function PODetail() {
             ))}
           </>
         ) : null}
+
+        {/* Audit Trail */}
+        <View style={{ marginTop: 20 }}>
+          <AuditTrail entityId={String(id || "")} title="Audit Trail" limit={100} />
+        </View>
       </ScrollView>
 
       {/* Per-line receipt modal */}

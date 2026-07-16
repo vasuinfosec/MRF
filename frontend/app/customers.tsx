@@ -229,6 +229,13 @@ export default function CustomersScreen() {
                     <TouchableOpacity testID={`cust-po-${c.customer_id}`} onPress={() => openPOs(c)} style={styles.iconBtn}>
                       <Ionicons name="document-text-outline" size={18} color={theme.colors.primary} />
                     </TouchableOpacity>
+                    <TouchableOpacity
+                      testID={`cust-audit-${c.customer_id}`}
+                      onPress={() => router.push({ pathname: "/audit", params: { entity_id: c.customer_id } })}
+                      style={styles.iconBtn}
+                    >
+                      <Ionicons name="time-outline" size={18} color={theme.colors.action} />
+                    </TouchableOpacity>
                     <TouchableOpacity testID={`cust-edit-${c.customer_id}`} onPress={() => openEdit(c)} style={styles.iconBtn}>
                       <Ionicons name="pencil" size={18} color={theme.colors.primary} />
                     </TouchableOpacity>
