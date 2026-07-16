@@ -89,16 +89,27 @@ export default function CreateMRF() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const [cs, ps, mm] = await Promise.all([
+      const [cs, ps, mm, mats] = await Promise.all([
         api<Customer[]>("/customers"),
         api<Project[]>("/projects"),
         api<any>("/masters"),
+        api<any[]>("/materials?status=approved"),   // Phase 4: only approved materials
       ]);
       setCustomers(cs);
       setProjects(ps);
+      // Normalize new-format materials to the picker shape (name = description, includes UID)
+      const matAsMaster = mats.map((m) => ({
+        item_id: m.material_uid,            // used as key
+        material_uid: m.material_uid,       // Phase 4 UID
+        name: m.description,
+        category: "material",
+        value: m.unit || "",
+        gst_rate: m.gst_rate,
+        item_code: m.item_code,
+      }));
       setMasters({
         unit: mm.unit || [], brand: mm.brand || [],
-        material: mm.material || [], model: mm.model || [],
+        material: matAsMaster, model: mm.model || [],
       });
 
       if (isEdit && params.edit) {
@@ -160,12 +171,12 @@ export default function CreateMRF() {
   const removeItem = (i: number) => setItems((arr) => arr.length > 1 ? arr.filter((_, idx) => idx !== i) : arr);
 
   // When material chosen, auto-fill description + unit (and clear make/model unless preserved)
-  const chooseMaterial = (i: number, m: Master) => {
+  const chooseMaterial = (i: number, m: any) => {
     const patch: Partial<LineItem> = {
-      material_id: m.item_id,
+      material_id: m.material_uid || m.item_id,  // Phase 4: prefer MAT-#### UID
       description: m.name,
     };
-    if (m.value && !items[i].unit) patch.unit = m.value; // if material master stores default unit in `value`
+    if (m.value && !items[i].unit) patch.unit = m.value; // material master default unit
     setItem(i, patch);
     setPicker(null); setPickerSearch("");
   };

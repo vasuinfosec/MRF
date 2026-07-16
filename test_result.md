@@ -533,3 +533,78 @@ test_plan:
 agent_communication:
     -agent: "main"
     -message: "PM/GM/Director MRF-opening bug fixed at the root (audit endpoint scoping). Verified via UI: PM can now open any accessible MRF and see Status / Current Owner / Pending Action / Customer with POs / Items grid / all action buttons (Authorise/Reject/Return/Print/Export) / Audit Trail. Regression targets: (1) GET /api/audit?entity_id=<mrf_id> now works for any user with MRF access; (2) GET /api/audit?entity_id=<po_id> for anyone with PO access; (3) GET /api/audit without entity_id still 403 for non-admin/director; (4) /api/audit?entity_id=<mrf_id> as unrelated site_engineer returns 403 (project scoping); (5) MRF list uses canonical status filters and returns matching sets; (6) Confirm no other endpoint regressions."
+
+## Phase 4 — Material Master (MAT-####) + Variants (VAR-####) + Bulk Import
+
+backend:
+  - task: "Material UID (MAT-####) and Variant UID (VAR-####) with dedup"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "New collections: materials (unique on material_uid + description_norm), variants (unique compound on material_uid+make_norm+model_norm), counters (atomic _next_seq for MAT/VAR sequence). Format: MAT-0001, VAR-0001. Legacy master.category=material rows migrated in seed with next-available UID in creation-date order. Case-insensitive dedup on description and (material,make,model). Idempotent."
+  - task: "Purchase-uploads → PM-reviews workflow for materials"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "POST /api/materials by Purchase → status=pending_pm_review (Admin/Director bypass to approved). POST /api/materials/{uid}/action (PM approve/reject/flag). POST /api/materials/bulk-action for PM bulk approve/reject. GET /api/materials?status=<x> — default returns only 'approved'; MRF picker uses status=approved so un-approved cannot be used in MRFs. Word-count guard: >100 words → 400."
+  - task: "PUT /api/materials/{uid} routes changes-of-approved to pending_gm_approval"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Editing an approved material by Purchase sets status=pending_gm_approval + records pending_change. Admin/Director edits commit immediately. POST /api/materials/{uid}/gm-approve to finalise. Reason mandatory on every edit. Master audit records old->new."
+  - task: "Bulk import (Excel/CSV) — POST /api/import/materials + template"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "GET /api/import/materials/template returns Excel with headers (Material Description, Category, Make, Model, Unit, GST Rate %, Item Code, Remarks) + 2 sample rows. POST /api/import/materials with {rows:[…]} — Purchase only. Dedup (skip if description_norm exists). Word limit enforced per row. Auto-creates a variant if Make provided. Returns summary {created, duplicates, errors, flagged_word_limit} for UI feedback."
+
+frontend:
+  - task: "MRF picker uses only approved Material Master (MAT-#### UIDs)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/mrf/create.tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Materials loaded from /materials?status=approved instead of /masters. material_id now stores MAT-#### UID. Unapproved materials cannot appear in MRF picker."
+
+test_plan:
+  current_focus:
+    - "Material UID (MAT-####) and Variant UID (VAR-####) with dedup"
+    - "Purchase-uploads → PM-reviews workflow for materials"
+    - "PUT /api/materials/{uid} routes changes-of-approved to pending_gm_approval"
+    - "Bulk import (Excel/CSV) — POST /api/import/materials + template"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: "Phase 4 (Material Master + UIDs + Bulk Import + GM-approval flow) implemented and manually smoke-tested. All flows green in curl: MAT/VAR UIDs assigned in order, migration idempotent, dedup case-insensitive on description AND (material,make,model), word-count 400 on >100 words, bulk import summary correct, PM approve/reject/bulk, edit-of-approved → pending_gm_approval, GM approve → approved. Please run RBAC & integrity regression per the test_result tasks. Verify: (a) POST /materials 403 for site_engineer/pm/gm/store; (b) POST /materials/{uid}/action 403 for purchase/site_engineer/gm (only PM/admin/director); (c) POST /materials/{uid}/gm-approve 403 for pm/purchase/site_engineer (only GM/director/admin); (d) POST /materials duplicate description (case-insensitive) → 400; (e) POST /variants duplicate combo returns SAME variant_uid (not error); (f) POST /materials word count >100 → 400; (g) Bulk import dedup skips existing; (h) /materials default filter is approved-only; (i) Migration idempotent (running /seed twice does not double up); (j) master_audit contains entries with entity='material'."
