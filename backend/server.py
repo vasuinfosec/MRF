@@ -70,6 +70,13 @@ class RoleUpdate(BaseModel):
 class SessionRequest(BaseModel):
     session_id: str
 
+class Site(BaseModel):
+    site_id: str = Field(default_factory=lambda: gid("st"))
+    name: str
+    location: Optional[str] = ""
+    site_engineers: List[str] = []
+    active: bool = True
+
 class Project(BaseModel):
     project_id: str = Field(default_factory=lambda: gid("prj"))
     code: str
@@ -77,8 +84,9 @@ class Project(BaseModel):
     site: str
     client: Optional[str] = None
     active: bool = True
-    site_engineers: List[str] = []      # user_ids
+    site_engineers: List[str] = []      # user_ids at project level
     project_managers: List[str] = []    # user_ids
+    sites: List[Site] = []              # sub-sites under this project
 
 class Vendor(BaseModel):
     vendor_id: str = Field(default_factory=lambda: gid("vnd"))
@@ -372,10 +380,79 @@ async def list_projects(all: Optional[bool] = False,
     if all and u.role == "admin":
         return docs
     if u.role == "site_engineer":
-        docs = [p for p in docs if u.user_id in (p.get("site_engineers") or [])]
+        docs = [
+            p for p in docs
+            if u.user_id in (p.get("site_engineers") or [])
+            or any(u.user_id in (s.get("site_engineers") or [])
+                   for s in (p.get("sites") or []) if s.get("active", True))
+        ]
     elif u.role == "project_manager":
         docs = [p for p in docs if u.user_id in (p.get("project_managers") or [])]
     return docs
+
+# --- Site management (sub-master under Project) ---
+@api.post("/projects/{project_id}/sites")
+async def add_site(project_id: str, body: dict, authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin")
+    name = (body.get("name") or "").strip()
+    if not name:
+        raise HTTPException(400, "Site name required")
+    site = {
+        "site_id": gid("st"),
+        "name": name,
+        "location": (body.get("location") or "").strip(),
+        "site_engineers": list(body.get("site_engineers") or []),
+        "active": True,
+    }
+    r = await db.projects.update_one({"project_id": project_id},
+                                     {"$push": {"sites": site}})
+    if r.matched_count == 0:
+        raise HTTPException(404, "Project not found")
+    await audit("project", project_id, "site_add", u, {"site": name})
+    return site
+
+@api.put("/projects/{project_id}/sites/{site_id}")
+async def update_site(project_id: str, site_id: str, body: dict,
+                      authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin")
+    updates: Dict[str, Any] = {}
+    for k in ("name", "location"):
+        if k in body:
+            updates[f"sites.$.{k}"] = str(body[k] or "").strip()
+    if "site_engineers" in body and isinstance(body["site_engineers"], list):
+        updates["sites.$.site_engineers"] = [str(x) for x in body["site_engineers"]]
+    if "active" in body:
+        updates["sites.$.active"] = bool(body["active"])
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+    r = await db.projects.update_one(
+        {"project_id": project_id, "sites.site_id": site_id},
+        {"$set": updates},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Site not found")
+    await audit("project", project_id, "site_update", u, {"site_id": site_id, **body})
+    proj = await db.projects.find_one({"project_id": project_id}, {"_id": 0})
+    return next((s for s in (proj.get("sites") or []) if s["site_id"] == site_id), None)
+
+@api.delete("/projects/{project_id}/sites/{site_id}")
+async def remove_site(project_id: str, site_id: str,
+                      authorization: Optional[str] = Header(None)):
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin")
+    r = await db.projects.update_one(
+        {"project_id": project_id, "sites.site_id": site_id},
+        {"$set": {"sites.$.active": False}},
+    )
+    if r.matched_count == 0:
+        raise HTTPException(404, "Site not found")
+    await audit("project", project_id, "site_delete", u, {"site_id": site_id})
+    return {"ok": True}
 
 @api.post("/projects/{project_id}/team")
 async def update_project_team(
@@ -491,9 +568,15 @@ async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None
         p = await db.projects.find_one({"project_id": body.project_id}, {"_id": 0})
         if not p:
             raise HTTPException(404, "Project not found")
-        team = p.get("site_engineers") or [] if u.role == "site_engineer" else p.get("project_managers") or []
-        if u.user_id not in team:
-            raise HTTPException(403, "You are not assigned to this project")
+        if u.role == "site_engineer":
+            in_project = u.user_id in (p.get("site_engineers") or [])
+            in_any_site = any(u.user_id in (s.get("site_engineers") or [])
+                              for s in (p.get("sites") or []) if s.get("active", True))
+            if not (in_project or in_any_site):
+                raise HTTPException(403, "You are not assigned to this project")
+        else:
+            if u.user_id not in (p.get("project_managers") or []):
+                raise HTTPException(403, "You are not assigned to this project")
     items = []
     for i in body.items:
         d = i.model_dump()
