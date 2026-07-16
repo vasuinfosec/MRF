@@ -38,7 +38,9 @@ def _h(tok: str) -> dict:
 # ---------- fixtures ----------
 @pytest.fixture(scope="module")
 def seed():
-    r = requests.post(f"{BASE_URL}/api/seed", timeout=60)
+    # Post-SEC-001: seed requires admin auth once users exist.
+    tok, _ = _login("admin@vasu.dev", "admin")
+    r = requests.post(f"{BASE_URL}/api/seed", headers=_h(tok), timeout=60)
     assert r.status_code == 200, f"seed failed: {r.status_code}"
     return r.json()
 
@@ -94,8 +96,8 @@ class TestProjectSeed:
             assert pm_uid in p["project_managers"], f"{p['code']} missing seeded PM"
 
     def test_seed_idempotent_no_duplicates(self, tokens):
-        # Call seed again
-        r = requests.post(f"{BASE_URL}/api/seed", timeout=60)
+        # Call seed again (with admin now that SEC-001 requires it)
+        r = requests.post(f"{BASE_URL}/api/seed", headers=_h(tokens["admin"]["token"]), timeout=60)
         assert r.status_code == 200
         r2 = requests.get(f"{BASE_URL}/api/projects?all=1", headers=_h(tokens["admin"]["token"]), timeout=30)
         projects = r2.json()

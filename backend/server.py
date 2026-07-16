@@ -298,7 +298,9 @@ async def logout(authorization: Optional[str] = Header(None)):
 
 @api.post("/auth/dev-login")
 async def dev_login(body: dict):
-    """Dev-only: create/login as a given role. Used for testing without Google OAuth."""
+    """Dev-only endpoint. Disabled in production via ENABLE_DEV_LOGIN env flag."""
+    if os.environ.get("ENABLE_DEV_LOGIN", "0") != "1":
+        raise HTTPException(404, "Not found")
     email = body.get("email")
     role = body.get("role", "site_engineer")
     name = body.get("name", email.split("@")[0] if email else "Dev User")
@@ -327,9 +329,13 @@ async def dev_login(body: dict):
 # ---------------------- Users / Roles ----------------------
 @api.get("/users", response_model=List[UserOut])
 async def list_users(authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        # Non-admin: return only lightweight directory info (name/role) without emails
+        users = await db.users.find({}, {"_id": 0}).to_list(1000)
+        return [UserOut(**{**x, "email": ""}) for x in users]
     users = await db.users.find({}, {"_id": 0}).to_list(1000)
-    return [UserOut(**u) for u in users]
+    return [UserOut(**u2) for u2 in users]
 
 @api.post("/users/role", response_model=UserOut)
 async def set_role(body: RoleUpdate, authorization: Optional[str] = Header(None)):
@@ -700,12 +706,47 @@ async def list_mrfs(
     docs = await db.mrfs.find(q, {"_id": 0}).sort("created_at", -1).to_list(500)
     return docs
 
+async def _check_mrf_access(u: UserOut, mrf: dict):
+    """Raise 403 if user cannot see this MRF."""
+    if u.role in ("admin", "purchase", "billing"):
+        return
+    if u.role == "site_engineer":
+        if mrf.get("created_by") == u.user_id:
+            return
+        p = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0})
+        if p and (u.user_id in (p.get("site_engineers") or []) or
+                  any(u.user_id in (s.get("site_engineers") or [])
+                      for s in (p.get("sites") or []) if s.get("active", True))):
+            return
+        raise HTTPException(403, "Not allowed")
+    if u.role == "project_manager":
+        p = await db.projects.find_one({"project_id": mrf["project_id"]}, {"_id": 0})
+        if p and u.user_id in (p.get("project_managers") or []):
+            return
+        raise HTTPException(403, "Not allowed")
+    raise HTTPException(403, "Not allowed")
+
+async def _check_po_access(u: UserOut, po: dict):
+    if u.role in ("admin", "purchase", "billing"):
+        return
+    if u.role == "project_manager":
+        p = await db.projects.find_one({"project_id": po.get("project_id")}, {"_id": 0})
+        if p and u.user_id in (p.get("project_managers") or []):
+            return
+    if u.role == "site_engineer":
+        for mid in po.get("mrf_refs") or []:
+            m = await db.mrfs.find_one({"mrf_id": mid}, {"_id": 0, "created_by": 1})
+            if m and m.get("created_by") == u.user_id:
+                return
+    raise HTTPException(403, "Not allowed")
+
 @api.get("/mrf/{mrf_id}")
 async def get_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
     d = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "MRF not found")
+    await _check_mrf_access(u, d)
     return d
 
 @api.post("/mrf/{mrf_id}/submit")
@@ -890,15 +931,18 @@ async def list_pos(project_id: Optional[str] = None,
 
 @api.get("/po/{po_id}")
 async def get_po(po_id: str, authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
     d = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "PO not found")
+    await _check_po_access(u, d)
     return d
 
 @api.post("/po/{po_id}/received")
 async def mark_po_received(po_id: str, body: dict, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
+    if u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Only purchase/billing/admin can record receipt")
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
         raise HTTPException(404, "PO not found")
@@ -1008,7 +1052,9 @@ async def billing_items(
     project_id: Optional[str] = None,
     authorization: Optional[str] = Header(None),
 ):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in ("billing", "admin", "purchase"):
+        raise HTTPException(403, "Only billing/purchase/admin")
     q: Dict[str, Any] = {"deleted": False}
     if project_id:
         q["project_id"] = project_id
@@ -1184,7 +1230,9 @@ async def mrf_ageing(authorization: Optional[str] = Header(None)):
 @api.get("/audit")
 async def audit_logs(entity_id: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role != "admin":
+        raise HTTPException(403, "Only admin can view audit trail")
     q = {}
     if entity_id:
         q["entity_id"] = entity_id
@@ -1258,6 +1306,14 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
                              headers={"Content-Disposition": f'attachment; filename="{po["po_number"].replace("/","_")}.pdf"'})
 
 # ---------------------- Excel ----------------------
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024  # 5MB
+
+def _safe_cell(v: Any) -> Any:
+    """Neutralize spreadsheet formula-injection payloads."""
+    if isinstance(v, str) and v and v[0] in ("=", "+", "-", "@"):
+        return "'" + v
+    return v
+
 def _excel_response(wb, filename):
     buf = io.BytesIO()
     wb.save(buf)
@@ -1270,7 +1326,9 @@ def _excel_response(wb, filename):
 async def export_mrf(token: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
-    await get_current_user(auth)
+    u = await get_current_user(auth)
+    if u.role not in ("purchase", "billing", "admin", "project_manager"):
+        raise HTTPException(403, "Not allowed")
     mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1282,17 +1340,22 @@ async def export_mrf(token: Optional[str] = None,
         c.fill = PatternFill("solid", fgColor="002FA7")
     for m in mrfs:
         for it in m["items"]:
-            ws.append([m["mrf_number"], m["date"].strftime("%Y-%m-%d") if isinstance(m["date"], datetime) else str(m["date"]),
-                       m["project_id"], m["site"], m["requesting_person"], m["system_category"],
-                       m["status"], it["description"], it["qty_requested"],
-                       it.get("qty_approved") or 0, it.get("billing_status", "")])
+            ws.append([_safe_cell(m["mrf_number"]),
+                       m["date"].strftime("%Y-%m-%d") if isinstance(m["date"], datetime) else str(m["date"]),
+                       _safe_cell(m["project_id"]), _safe_cell(m["site"]),
+                       _safe_cell(m["requesting_person"]), _safe_cell(m["system_category"]),
+                       _safe_cell(m["status"]), _safe_cell(it["description"]),
+                       it["qty_requested"], it.get("qty_approved") or 0,
+                       _safe_cell(it.get("billing_status", ""))])
     return _excel_response(wb, "mrf_export.xlsx")
 
 @api.get("/export/po")
 async def export_po(token: Optional[str] = None,
                     authorization: Optional[str] = Header(None)):
     auth = authorization or (f"Bearer {token}" if token else None)
-    await get_current_user(auth)
+    u = await get_current_user(auth)
+    if u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Not allowed")
     pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(1000)
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1302,21 +1365,29 @@ async def export_po(token: Optional[str] = None,
         c.font = Font(bold=True, color="FFFFFF")
         c.fill = PatternFill("solid", fgColor="002FA7")
     for p in pos:
-        ws.append([p["po_number"], p["date"].strftime("%Y-%m-%d") if isinstance(p["date"], datetime) else str(p["date"]),
-                   p.get("vendor_id"), p.get("project_id"), ", ".join(p.get("mrf_refs", [])),
-                   p.get("total", 0), p.get("status", "")])
+        ws.append([_safe_cell(p["po_number"]),
+                   p["date"].strftime("%Y-%m-%d") if isinstance(p["date"], datetime) else str(p["date"]),
+                   _safe_cell(p.get("vendor_id", "")), _safe_cell(p.get("project_id", "")),
+                   _safe_cell(", ".join(p.get("mrf_refs", []))),
+                   p.get("total", 0), _safe_cell(p.get("status", ""))])
     return _excel_response(wb, "po_export.xlsx")
 
 # ---------------------- GRN ----------------------
 @api.get("/po/{po_id}/grns")
 async def list_grns_for_po(po_id: str, authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
+    if not po:
+        raise HTTPException(404, "PO not found")
+    await _check_po_access(u, po)
     grns = await db.grns.find({"po_id": po_id}, {"_id": 0}).sort("date", -1).to_list(200)
     return grns
 
 @api.get("/grns")
 async def list_all_grns(authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Only purchase/billing/admin")
     return await db.grns.find({}, {"_id": 0}).sort("date", -1).to_list(500)
 
 @api.get("/grn/{grn_id}/pdf")
@@ -1415,6 +1486,11 @@ async def import_vendors(file: UploadFile = File(...), authorization: Optional[s
     if u.role != "admin" and u.role != "purchase":
         raise HTTPException(403, "Only admin/purchase")
     content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024*1024)}MB)")
+    fname = (file.filename or "").lower()
+    if not (fname.endswith(".xlsx") or fname.endswith(".xlsm")):
+        raise HTTPException(400, "Only .xlsx / .xlsm allowed")
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     except Exception as e:
@@ -1455,6 +1531,11 @@ async def import_mrf(file: UploadFile = File(...), authorization: Optional[str] 
     if u.role not in ["admin", "site_engineer", "project_manager"]:
         raise HTTPException(403, "Only admin/site engineer/project manager can import MRFs")
     content = await file.read()
+    if len(content) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"File too large (max {MAX_UPLOAD_BYTES // (1024*1024)}MB)")
+    fname = (file.filename or "").lower()
+    if not (fname.endswith(".xlsx") or fname.endswith(".xlsm")):
+        raise HTTPException(400, "Only .xlsx / .xlsm allowed")
     try:
         wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
     except Exception as e:
@@ -1610,7 +1691,9 @@ async def create_invoice(body: InvoiceCreate, authorization: Optional[str] = Hea
 @api.get("/invoice")
 async def list_invoices(po_id: Optional[str] = None,
                         authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Only purchase/billing/admin")
     q = {}
     if po_id:
         q["po_id"] = po_id
@@ -1619,7 +1702,9 @@ async def list_invoices(po_id: Optional[str] = None,
 
 @api.get("/invoice/{inv_id}")
 async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Only purchase/billing/admin")
     d = await db.invoices.find_one({"invoice_id": inv_id}, {"_id": 0})
     if not d:
         raise HTTPException(404, "Invoice not found")
@@ -1627,7 +1712,9 @@ async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
 
 @api.get("/po/{po_id}/invoices")
 async def list_po_invoices(po_id: str, authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in ("purchase", "billing", "admin"):
+        raise HTTPException(403, "Only purchase/billing/admin")
     return await db.invoices.find({"po_id": po_id}, {"_id": 0}).sort("created_at", -1).to_list(200)
 
 @api.get("/invoice/{inv_id}/pdf")
@@ -1759,8 +1846,15 @@ async def grn_variance(
 
 # ---------------------- Seed ----------------------
 @api.post("/seed")
-async def seed_data():
-    """Idempotent seed of demo data."""
+async def seed_data(authorization: Optional[str] = Header(None)):
+    """Idempotent seed of demo data. Requires admin, or dev-mode when no users exist yet."""
+    user_count = await db.users.count_documents({})
+    if user_count > 0:
+        # Bootstrap complete — only admin may reseed
+        u = await get_current_user(authorization)
+        if u.role != "admin":
+            raise HTTPException(403, "Only admin can seed once users exist")
+    # (Otherwise: no users yet, allow unauthenticated bootstrap.)
     # Users
     demo_users = [
         {"email": "site@vasu.dev", "name": "Ravi (Site Engineer)", "role": "site_engineer"},

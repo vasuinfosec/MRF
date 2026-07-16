@@ -27,14 +27,15 @@ def _h(t):
 
 @pytest.fixture(scope="module")
 def tokens():
-    r = requests.post(f"{BASE_URL}/api/seed", timeout=30)
+    admin_tok = _login("admin", "admin@vasu.dev", "Director")
+    r = requests.post(f"{BASE_URL}/api/seed", headers=_h(admin_tok), timeout=30)
     assert r.status_code == 200
     return {
         "site": _login("site_engineer", "site@vasu.dev", "Ravi"),
         "pm": _login("project_manager", "pm@vasu.dev", "Priya"),
         "purchase": _login("purchase", "purchase@vasu.dev", "Kumar"),
         "billing": _login("billing", "billing@vasu.dev", "Anita"),
-        "admin": _login("admin", "admin@vasu.dev", "Director"),
+        "admin": admin_tok,
     }
 
 

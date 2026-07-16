@@ -18,15 +18,17 @@ def _login(role: str, email: str, name: str):
 
 @pytest.fixture(scope="module")
 def tokens():
-    # Ensure seed data first
-    r = requests.post(f"{BASE_URL}/api/seed", timeout=30)
+    # Ensure seed data first (post-SEC-001 requires admin auth)
+    admin_tok = _login("admin", "admin@vasu.dev", "Director")
+    r = requests.post(f"{BASE_URL}/api/seed",
+                      headers={"Authorization": f"Bearer {admin_tok}"}, timeout=30)
     assert r.status_code == 200
     return {
         "site": _login("site_engineer", "site@vasu.dev", "Ravi"),
         "pm": _login("project_manager", "pm@vasu.dev", "Priya"),
         "purchase": _login("purchase", "purchase@vasu.dev", "Kumar"),
         "billing": _login("billing", "billing@vasu.dev", "Anita"),
-        "admin": _login("admin", "admin@vasu.dev", "Director"),
+        "admin": admin_tok,
     }
 
 
@@ -36,9 +38,10 @@ def _h(tok):
 
 # ----- Auth -----
 class TestAuth:
-    def test_seed_idempotent(self):
-        r1 = requests.post(f"{BASE_URL}/api/seed", timeout=30)
-        r2 = requests.post(f"{BASE_URL}/api/seed", timeout=30)
+    def test_seed_idempotent(self, tokens):
+        h = _h(tokens["admin"])
+        r1 = requests.post(f"{BASE_URL}/api/seed", headers=h, timeout=30)
+        r2 = requests.post(f"{BASE_URL}/api/seed", headers=h, timeout=30)
         assert r1.status_code == 200 and r2.status_code == 200
         assert "logins" in r1.json()
 
