@@ -172,7 +172,12 @@ export default function MRFDetail() {
 
         {/* Actions */}
         <View style={{ gap: 8, marginTop: 12 }}>
-          {canSubmit ? <Btn testID="submit-btn" title="Submit for Approval" variant="action" onPress={doSubmit} /> : null}
+          {canSubmit ? (
+            <>
+              <Btn testID="edit-draft-btn" title="Edit MRF" variant="outline" onPress={() => router.push(`/mrf/create?edit=${mrf.mrf_id}` as any)} />
+              <Btn testID="submit-btn" title="Submit for PM Review" variant="action" onPress={doSubmit} />
+            </>
+          ) : null}
           {canReview ? (
             <>
               <Btn testID="approve-mrf-btn" title="Approve MRF" variant="primary" onPress={() => setAction("approve")} />

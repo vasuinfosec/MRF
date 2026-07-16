@@ -17,7 +17,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from starlette.middleware.cors import CORSMiddleware
 from dotenv import load_dotenv
 from motor.motor_asyncio import AsyncIOMotorClient
-from pydantic import BaseModel, Field, EmailStr
+from pydantic import BaseModel, Field, EmailStr, field_validator
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4
@@ -202,6 +202,23 @@ class MRFItemIn(BaseModel):
     billable: bool = True
     boq_ref: Optional[str] = ""
     remarks: Optional[str] = ""
+    # ---- Phase 3: master-driven selection (dropdown-only for site engineers) ----
+    material_id: Optional[str] = None      # FK -> masters.item_id (category=material)
+    make: Optional[str] = ""               # from masters.brand
+    make_id: Optional[str] = None
+    model: Optional[str] = ""              # from masters.model
+    model_id: Optional[str] = None
+    priority: Optional[str] = "normal"     # low | normal | high | urgent
+
+    @field_validator("priority")
+    @classmethod
+    def _validate_priority(cls, v):
+        if v is None or v == "":
+            return "normal"
+        s = str(v).lower().strip()
+        if s not in ("low", "normal", "high", "urgent"):
+            raise ValueError("priority must be one of low, normal, high, urgent")
+        return s
 
 class MRFItem(MRFItemIn):
     item_line_id: str = Field(default_factory=lambda: gid("mli"))
@@ -1315,6 +1332,67 @@ async def send_to_purchase(mrf_id: str, authorization: Optional[str] = Header(No
     await audit("mrf", mrf_id, "send_to_purchase", u)
     return {"ok": True}
 
+@api.put("/mrf/{mrf_id}")
+async def update_mrf_draft(mrf_id: str, body: dict,
+                           authorization: Optional[str] = Header(None)):
+    """Update a Draft or Returned MRF. Site engineers can only edit their own drafts.
+    After submission, editing is blocked (per spec) unless the MRF is returned."""
+    u = await get_current_user(authorization)
+    mrf = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+    if not mrf:
+        raise HTTPException(404, "MRF not found")
+    # Only draft or returned MRFs are editable via this endpoint
+    editable_states = {"draft", "returned"}
+    if canonical_mrf_status(mrf.get("status")) not in editable_states and mrf.get("status") not in editable_states:
+        raise HTTPException(400, f"MRF is '{mrf.get('status')}' — cannot edit after submission (only 'returned' MRFs can be re-edited)")
+    # RBAC: creator OR admin/director
+    if u.role not in ("admin", "director") and mrf.get("created_by") != u.user_id:
+        raise HTTPException(403, "Only the MRF creator (or admin/director) can edit this draft")
+
+    updates: Dict[str, Any] = {}
+    for k in ("site", "required_by", "requesting_person", "system_category", "remarks", "attachments"):
+        if k in body:
+            updates[k] = body[k]
+    if "items" in body and isinstance(body["items"], list):
+        # Preserve existing item_line_id if provided
+        new_items = []
+        old_items = {it.get("item_line_id"): it for it in mrf.get("items", [])}
+        for i in body["items"]:
+            line_id = i.get("item_line_id") or f"mli_{uuid.uuid4().hex[:12]}"
+            base = old_items.get(line_id) or {}
+            merged = {**base, **i, "item_line_id": line_id}
+            merged.setdefault("status", "pending")
+            merged.setdefault("billing_status", "not_billed")
+            merged.setdefault("qty_received", 0)
+            merged.setdefault("qty_issued", 0)
+            merged.setdefault("qty_billed", 0)
+            merged.setdefault("qty_ordered", 0)
+            if merged.get("qty_approved") is None:
+                merged["qty_approved"] = merged.get("qty_requested")
+            new_items.append(merged)
+        updates["items"] = new_items
+
+    if body.get("project_id") and body["project_id"] != mrf.get("project_id"):
+        proj = await db.projects.find_one({"project_id": body["project_id"]}, {"_id": 0}) or {}
+        cid = proj.get("customer_id")
+        cust_name = ""
+        if cid:
+            c = await db.customers.find_one({"customer_id": cid}, {"_id": 0}) or {}
+            cust_name = c.get("name") or ""
+        updates["project_id"] = body["project_id"]
+        updates["customer_id"] = cid
+        updates["customer_name"] = cust_name or proj.get("client") or ""
+
+    if not updates:
+        raise HTTPException(400, "Nothing to update")
+
+    # If Site Engineer changed project — customer snapshot already refreshed above.
+
+    updates["updated_at"] = now_utc()
+    await db.mrfs.update_one({"mrf_id": mrf_id}, {"$set": updates})
+    await audit("mrf", mrf_id, "edit_draft", u, {k: v for k, v in updates.items() if k != "items"})
+    return await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
+
 @api.delete("/mrf/{mrf_id}")
 async def delete_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
@@ -1361,6 +1439,8 @@ async def update_mrf_line(mrf_id: str, line_id: str, body: dict,
             if k in ("qty_requested", "qty_approved"):
                 try: new_v = float(new_v) if new_v is not None else new_v
                 except Exception: raise HTTPException(400, f"{k} must be numeric")
+            if k == "priority" and new_v not in (None, "", "low", "normal", "high", "urgent"):
+                raise HTTPException(400, "priority must be one of low, normal, high, urgent")
             old_v = target.get(k)
             if new_v != old_v:
                 changed[k] = {"old": old_v, "new": new_v}

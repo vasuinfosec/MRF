@@ -394,3 +394,65 @@ test_plan:
 agent_communication:
     -agent: "main"
     -message: "Phase 2c bundle implemented. Backend smoke test passed: new customer_id on MRF/PO responses populated; Tally export returns XLSX with correct columns and CGST/SGST split; branded PO PDF verified with Vasu banner + Customer ID + footer; MRF line-item PUT enforces reason and writes to master_audit. Please run regression: (1) Tally purchase export returns 200 with expected columns for POs; (2) Tally invoice export handles invoice line-items; (3) MRF line-item PUT: 400 without reason, 200 with reason and creates master_audit entry with entity='mrf.item'; (4) Locked-status editing blocked (fully_received, closed) except for admin/director; (5) Non-creator SE cannot edit lines they didn't create (403); (6) Existing tests still pass. Do NOT test PDF layout — was manually verified via analyze_file_tool."
+
+## Phase 3a — Dropdown-driven MRF creation for Site Engineers
+
+backend:
+  - task: "MRFItem model: material_id + make/make_id + model/model_id + priority"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Extended MRFItemIn with master-driven selection fields. All optional (backwards-compat). priority default 'normal'."
+  - task: "PUT /api/mrf/{mrf_id} — draft edit endpoint"
+    implemented: true
+    working: true
+    file: "/app/backend/server.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: true
+        -agent: "main"
+        -comment: "Only editable when status ∈ {draft, returned}. RBAC: creator OR admin/director; other SEs 403. Verified via curl: SE edits DRAFT OK → submits → edit blocked (400) → PM returns → SE edits RETURNED OK → other SE tries edit → 403."
+
+frontend:
+  - task: "MRF create screen — dropdown-only workflow for SE"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/mrf/create.tsx"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Full rewrite. Dependent dropdowns (Customer→Project→Site, Category from project.system_categories, Material auto-fills UID+description+unit, Make→Model). Searchable picker with autofocus, empty state, quick-date chips + @react-native-community/datetimepicker. Only Qty (numeric) and Remarks (free text) allow manual input. Uses ?edit=<mrf_id> query param for edit mode."
+  - task: "Edit MRF button on detail screen (creator + draft/returned only)"
+    implemented: true
+    working: "NA"
+    file: "/app/frontend/app/mrf/[id].tsx"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "Added 'Edit MRF' outline button next to 'Submit for PM Review' on the actions section, visible only to creator when status is draft/returned."
+
+test_plan:
+  current_focus:
+    - "PUT /api/mrf/{mrf_id} — draft edit endpoint"
+    - "MRF create screen — dropdown-only workflow for SE"
+  stuck_tasks: []
+  test_all: false
+  test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: "Phase 3a implemented. Manual e2e: SE creates MRF with material_id/make/model/priority — OK. SE edits draft — OK. SE submits → status pm_review — edit blocked (400). PM returns → SE can edit again — OK. Different SE forbidden — 403. Please regress: PUT /api/mrf/{id} — happy path (draft edit by creator, 200); denied after submit (400); allowed after return; RBAC (creator vs other SE vs admin); make sure customer_id snapshot updates if project changes."
