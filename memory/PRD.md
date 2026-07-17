@@ -210,3 +210,33 @@ Shared components (`/app/frontend/src/components/`):
 - Dashboard & Analytics (Phase 10) — deferred by user 2 sessions ago
 - Frontend MAT-####/VAR-#### chip rendering in MRF/PO/GRN item cards
 - Legacy test-suite refresh
+
+## 12. AI Cost-Control & Supplier Performance (Iter 27, Jul 2026)
+
+Implemented per user directive (msg 618):
+
+**Budget & RBAC**
+- Non-director roles capped at ₹200/month (auto-summed from `llm_suggestions.cost.cost_inr`)
+- Director: unlimited spending, only role allowed to use Claude Sonnet 4.5 (premium)
+- Premium requests from non-directors → silent downgrade to gpt-4o-mini with `routing.downgraded=true` flag surfaced in UI
+- Wallet exhausted → HTTP 402 with `monthly_ai_budget_exhausted` payload
+
+**Deterministic (LLM-free) Mode**
+- ₹0 cost, unlimited for all roles, no external API call
+- Pure math + aggregates: target price, negotiate-to, decision, variance
+- Free fallback when wallet is drained
+
+**Hardened AI System Prompt**
+- Explicit "Hard AI Restrictions" block: AI is read-only advisory only
+- MUST NOT approve/reject vendors, accept quotes, issue POs, modify MRFs/masters, post to Tally, send communications, or create financial commitments
+
+**Admin Endpoints (Admin/Director only)**
+- `GET /api/llm/my-budget` — every user's own wallet
+- `GET /api/llm/admin/spend-monthly?months=N` — grand total + per-user + per-model + trend
+- `GET /api/llm/admin/supplier-performance` — deterministic metrics: total/completed/open POs, GRN on-time %, avg delay, rejections, last order
+
+**Frontend**
+- NegotiatePanel: wallet chip in header, 4-tier chooser (Deterministic/Auto/Cheap/Premium), Sonnet chip disabled for non-directors, downgrade banner, deterministic-engine banner
+- New `/ai-admin` screen (More → "AI Spend & Supplier Performance") with two tabs
+
+**Test coverage**: `test_ai_cost_control_iter27.py` — 19/19 passed. Frontend Playwright smoke — 10/10 passed.
