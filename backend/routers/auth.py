@@ -68,6 +68,19 @@ async def create_session(body: SessionRequest):
         data = r.json()
 
     email = data["email"]
+    email_norm = (email or "").strip().lower()
+
+    # Owner allowlist — emails here always land (or get promoted to) `director`.
+    # Configure via OWNER_EMAILS env (comma-separated). Solves the "first Google
+    # login only gets site_engineer" chicken-and-egg problem when no admin
+    # exists yet in a fresh deployment.
+    owner_list = {
+        e.strip().lower()
+        for e in (os.environ.get("OWNER_EMAILS", "") or "").split(",")
+        if e.strip()
+    }
+    is_owner = email_norm in owner_list
+
     existing = await db.users.find_one({"email": email}, {"_id": 0})
     if existing:
         user_id = existing["user_id"]
@@ -75,11 +88,24 @@ async def create_session(body: SessionRequest):
         if role in LEGACY_ROLE_MAP:
             role = LEGACY_ROLE_MAP[role]
             await db.users.update_one({"email": email}, {"$set": {"role": role}})
+        # If this email is in the owner allowlist but was previously
+        # provisioned with a lower role, silently promote to `director`.
+        if is_owner and role != "director":
+            role = "director"
+            await db.users.update_one({"email": email}, {"$set": {"role": role}})
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         count = await db.users.count_documents({})
-        # First user becomes admin; subsequent unknown users default to site_engineer.
-        role = "admin" if count == 0 else "site_engineer"
+        # Priority order:
+        #   1) email in OWNER_EMAILS  → director
+        #   2) very first user in DB   → admin
+        #   3) everyone else          → site_engineer (safe default)
+        if is_owner:
+            role = "director"
+        elif count == 0:
+            role = "admin"
+        else:
+            role = "site_engineer"
         await db.users.insert_one({
             "user_id": user_id,
             "email": email,
