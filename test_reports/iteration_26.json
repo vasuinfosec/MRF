@@ -1,0 +1,125 @@
+{
+  "summary": "Phase 9C round 5 (Batch C) — 7 new router extractions (billing, invoice, imports, vendors, projects, auth, po_exports) verified regression-clean. New pytest suite test_phase9c_r5_batch_c.py (56 tests, ~2.7s) covers every extracted endpoint: RBAC, request-body validation, master-audit reason-required guards, Excel/PDF stream correctness, GST CGST/SGST/IGST split for intra vs inter-state vendors, DC audit fix verification, and OpenAPI presence for all 33 required paths. Combined with the previous three suites = 160/160 pytest pass in ~7.2s. LLM UAT exit=0 (0 failures). DC audit fix verified — new_value.status now correctly reports 'pending_approval' instead of hardcoded 'issued'.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase9c_r5_batch_c.py",
+    "/app/backend/tests/test_phase9c_refactor.py",
+    "/app/backend/tests/test_phase9c_r3_masters_customers.py",
+    "/app/backend/tests/test_phase9c_r4_batch_b.py",
+    "/app/backend/tests/uat_llm_files.py",
+    "/app/test_reports/pytest/iter26_r5_batch_c.xml",
+    "/app/test_reports/pytest/iter26_all_phase9c.xml"
+  ],
+  "coverage_matrix": {
+    "P0_auth": {
+      "dev_login": "400 on missing email; 400 on invalid role; 200 issues token, upserts user, canonicalises role",
+      "auth_me": "200 with Bearer; 401 without",
+      "auth_session_invalid": "401 verified",
+      "logout": "deletes session; subsequent /auth/me → 401",
+      "users_admin_full": "emails visible for admin",
+      "users_non_admin_stripped": "emails blanked for pm",
+      "set_role": "403 non-admin; 400 invalid role; 404 user not found"
+    },
+    "P0_vendors": {
+      "list_any_authed": "pm/site_engineer/purchase/admin all 200",
+      "create_rbac": "pm → 403; purchase → 200",
+      "update_reason_required": "no reason → 400; with reason → 200 + name persisted",
+      "soft_delete": "active=false after DELETE; list excludes"
+    },
+    "P0_projects": {
+      "list_scoping": "admin sees all; purchase/gm/director count matches admin; pm-scoped list only shows projects where user_id in project_managers",
+      "create_rbac": "pm → 403; admin with invalid customer_id → 400",
+      "update_reason_required": "no reason → 400",
+      "sites_admin_only": "pm add-site → 403; admin → 200",
+      "team_admin_only": "pm → 403"
+    },
+    "P0_billing": {
+      "list_rbac": "pm/gm/site_engineer/store → 403; purchase/admin/director → 200",
+      "filter_by_billing_status": "?filter=not_billed returns rows all matching",
+      "fully_billed_override_guard": "qty_billed<qty_received without override_reason → 400"
+    },
+    "P0_invoice": {
+      "list_rbac": "pm/gm/site_engineer → 403; purchase/director/admin → 200",
+      "create_rbac": "pm → 403"
+    },
+    "P0_imports": {
+      "vendor_template_any_authed": "pm/siteeng/purchase/admin all 200 (xlsx content-type verified)",
+      "mrf_template_any_authed": "siteeng → 200",
+      "vendors_import_rbac": "pm → 403",
+      "vendors_import_ext_check": "csv → 400",
+      "vendors_import_oversize": "5MB+1 → 413 (MAX_UPLOAD_BYTES hoist verified)",
+      "vendors_dedup": "1st import inserted=1, 2nd import skipped>=1",
+      "mrf_import_rbac": "purchase & gm → 403"
+    },
+    "P0_po_exports": {
+      "po_pdf_intra_state": "?force=1 returns %PDF stream, content-type application/pdf",
+      "po_pdf_token_query": "?token= supports browser download without Bearer header",
+      "gst_split_helpers": "_is_intra_state('Maharashtra')=True, ('Karnataka')=False. _split_gst_amt(100,18,intra)=(9,9,0); (100,18,inter)=(0,0,18) — CGST/SGST/IGST math correct",
+      "bulk_export_mrf_rbac": "site_engineer/store → 403; admin → 200",
+      "bulk_export_po_rbac": "site_engineer/store → 403; admin → 200",
+      "bulk_export_tally_rbac": "site_engineer → 403; admin ?kind=purchase → 200",
+      "dispatcher_pdf": "?format=pdf&force=1 → 200 %PDF",
+      "dispatcher_excel": "?format=excel&force=1 → 200 spreadsheet content-type",
+      "dispatcher_tally": "?format=tally&force=1 → 200",
+      "dispatcher_invalid_format": "?format=jpg → 400"
+    },
+    "P0_dc_audit_fix": {
+      "verification": "POST /api/dc as purchase creates DC with status='pending_approval'. GET /api/audit?entity=dc&entity_id={id} returns create-row with details.new_value.status='pending_approval' — bug in routers/dc.py:88 confirmed fixed."
+    },
+    "P1_cross_router": {
+      "happy_path": "MRF create (admin) → submit → approve (with action=approve body) → send-to-purchase → PO create (purchase, ₹100 auto-issued) → GET /api/po/{id}/pdf?force=1 via po_exports router → 200 %PDF. Full happy-path executes end-to-end.",
+      "regression_suites": "test_phase9c_refactor.py 21/21 + test_phase9c_r3_masters_customers.py 45/45 + test_phase9c_r4_batch_b.py 38/38 + test_phase9c_r5_batch_c.py 56/56 = 160/160 (~7.2s)",
+      "llm_uat": "uat_llm_files.py exit=0, 0 failures across item-standardise/quotation-compare/reconcile/decide/list"
+    },
+    "P2_openapi": {
+      "required_paths_r5": 33,
+      "missing": 0,
+      "total_openapi_paths": 91,
+      "verified": [
+        "/api/billing/items (GET), /api/billing/update (POST)",
+        "/api/invoice (POST,GET), /api/invoice/{inv_id} (GET), /api/invoice/{inv_id}/pdf (GET)",
+        "/api/import/vendors/template (GET), /api/import/mrf/template (GET)",
+        "/api/import/vendors (POST), /api/import/mrf (POST)",
+        "/api/vendors (GET,POST), /api/vendors/{vendor_id} (PUT,DELETE)",
+        "/api/projects (GET,POST), /api/projects/{project_id} (PUT,DELETE)",
+        "/api/projects/{project_id}/sites (POST), /api/projects/{project_id}/sites/{site_id} (PUT,DELETE)",
+        "/api/projects/{project_id}/team (POST)",
+        "/api/auth/session (POST), /api/auth/me (GET), /api/auth/logout (POST), /api/auth/dev-login (POST)",
+        "/api/users (GET), /api/users/role (POST)",
+        "/api/po/{po_id}/pdf (GET), /api/export/mrf (GET), /api/export/po (GET), /api/export/tally (GET)",
+        "/api/po/{po_id}/export (GET dispatcher)"
+      ]
+    },
+    "rbac_drift_check": "None. Billing={purchase,admin,director}, Invoice={purchase,director,admin}, Vendors mutations={admin,purchase,director}, Projects admin-only for mutations with pm/siteeng/store scoped reads, Imports vendors={admin,purchase} and mrf={admin,site_engineer,pm,director}, PO exports bulk denies site_engineer/store — all preserved byte-identical from server.py.",
+    "dc_audit_fix_verification": "Verified via GET /api/audit?entity=dc&entity_id={dc_id}. details.new_value.status now equals dc.status default 'pending_approval'. Previous hardcoded 'issued' is gone — iteration 25 minor issue resolved."
+  },
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:1735 — Down from 5276 (67% total reduction across Batches A/B/C). Now well under the 700-line threshold for the trailing helpers-only region if further split. Router-import side-effects still rely on server.py registering routers AFTER defining all shared symbols (from server import ...). Order-fragile but functional.",
+    "routers/po_exports.py:73 — _validate_po_for_export currently blocks export on missing mandatory data. `?force=1` correctly bypasses. Tests use `?force=1` on the ₹100 test PO because the seeded vendors have `gstin='27AAAAA0000A1Z1'` which passes but customer_id may be blank. Confirmed 200 in every dispatcher path.",
+    "routers/imports.py:73 — MAX_UPLOAD_BYTES hoist to server.py top-level works. 5MB+1 rejected with 413 in ~15ms server-side (rejects after file.read()). For very large uploads consider chunked SpooledTemporaryFile pattern later.",
+    "routers/vendors.py:27 — Documented 403 role list says {'admin','purchase','director'} but review request stated 'pm/gm/site_engineer/store' should get 403 — the actual gate PASSES those roles (all four get 403). No drift.",
+    "routers/projects.py:37 — `store` role gets identical scoping to `site_engineer` (project-level or per-site membership). Correct per spec but worth calling out that store == siteeng for project visibility."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase9c_r5_batch_c.py (new — 56 tests, ~2.7s, covers 7 new routers + DC audit fix + OpenAPI presence for 33 paths)"
+  ],
+  "success_rate": {
+    "backend": "100% (160/160 pytest across 4 phase9c suites + 0 LLM UAT failures + 33/33 OpenAPI paths + DC audit fix verified)",
+    "frontend": "N/A — not requested"
+  },
+  "seed_data_creation": "Uses idempotent POST /api/seed via admin fixture. All test data prefixed with TEST_R5_ (vendors, projects, MRFs, DCs). Vendors are soft-deleted (active=false) at end of TestVendorsRouter. Additional 2 TEST_R5 GST vendors (intra/inter-state) created for PO PDF stream tests remain in DB — searchable by name prefix.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 9C Batch C (round 5) is regression-clean. Combined regression is now 4 suites totalling 160 tests in ~7.2s: test_phase9c_refactor.py (21), test_phase9c_r3_masters_customers.py (45), test_phase9c_r4_batch_b.py (38), test_phase9c_r5_batch_c.py (56). LLM UAT at /app/backend/tests/uat_llm_files.py (~1min, exit 0). server.py = 1735 lines (down from 5276 — 67% reduction). All 19 routers now extracted: audit, auth, billing, cs, customers, dc, grn, imports, invoice, llm, masters, mrf, notifications, po, po_exports, projects, reports, settings, vendors. The remaining server.py holds Pydantic models, PDF/Excel workbook helpers, brand constants (VASU_*), _check_*_access helpers, _split_gst_amt, _is_intra_state, and app bootstrap. DC audit fix (routers/dc.py:88) verified working.",
+  "rca_of_issue": "N/A — no functional bugs. During test authoring, 4 initial test-scaffolding failures due to Pydantic required fields (Project.site, DC.dispatch_date, PO.delivery_site, MRF.approve body) and wrong audit query param name (used entity_type instead of entity) — all corrected by inspecting server.py Pydantic models and existing r4 fixture. No behavioural regression in routers themselves."
+}

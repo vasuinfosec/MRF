@@ -85,7 +85,7 @@ async def create_dc(body: DCCreate, authorization: Optional[str] = Header(None))
     await audit("dc", dc.dc_id, "create", u,
                  {"dc_number": dc.dc_number,
                   "old_value": None,
-                  "new_value": {"status": "issued", "dc_type": dc.dc_type,
+                  "new_value": {"status": dc.status, "dc_type": dc.dc_type,
                                  "item_count": len(dc.items),
                                  "project_id": dc.project_id,
                                  "from_location": dc.from_location,
