@@ -1,0 +1,71 @@
+{
+  "summary": "Phase 9C router-refactor regression + LLM file-upload UAT — all green. 21/21 pytest cases in test_phase9c_refactor.py pass (notifications, reports, audit RBAC, settings threshold matrix, P2 smoke, OpenAPI diff). uat_llm_files.py exit=0 with 0 failures across item-standardise / quotation-compare / reconcile / decide / suggestions-list. No behavioural drift observed after the four extractions from server.py.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase9c_refactor.py",
+    "/app/test_reports/pytest/phase9c_refactor.xml",
+    "/app/backend/tests/uat_llm_files.py"
+  ],
+  "coverage_matrix": {
+    "P0_endpoint_availability": {
+      "GET /api/notifications": "200 for all 7 roles",
+      "POST /api/notifications/{nid}/read": "200 idempotent (repeat calls same 200 ok:true)",
+      "GET /api/reports/dashboard": "200 for all 7 roles; all 11 documented keys present; ageing buckets {0-3,4-7,8-15,16+} match",
+      "GET /api/reports/mrf-ageing": "200; list rows contain mrf_id, mrf_number, status, days, project_id, site",
+      "GET /api/reports/grn-variance": "200; rows contain variance + invoice_variance",
+      "GET /api/audit": "200 for admin/director/gm/purchase; scoped feed correct for pm/site_engineer/store",
+      "GET /api/audit/facets": "200 for admin/director/gm/purchase/pm; 403 for site_engineer & store",
+      "GET /api/settings/thresholds": "200 for all 7 roles",
+      "PUT /api/settings/thresholds": "director/admin 200; others 403"
+    },
+    "P0_audit_rbac_leaks": "site_engineer feed contains only own actions or mrf_*/po_* rows; store feed contains only own actions or grn/received-tagged rows; entity_id=mrf_<bogus> → 404 (via _check_mrf_access).",
+    "P0_thresholds_put_matrix": {
+      "403_forbidden_roles": "pm, purchase, gm, site_engineer, store → 403",
+      "400_missing_keys": "{gm} only, {director} only, {} → 400",
+      "400_non_numeric": "gm='abc' → 400",
+      "400_negative": "gm=-1 → 400",
+      "400_director_lt_gm": "gm=600000/director=400000 → 400",
+      "200_valid_and_audits": "director PUT {gm:50000,director:500000} → 200 + audit row entity=settings/action=update visible via /api/audit?entity=settings"
+    },
+    "P1_llm_uat": {
+      "exit_code": 0,
+      "item_standardise": "BOQ PDF (860 chars extracted by pypdf); 3 suggestions returned; status pending_review",
+      "quotation_compare": "3 vendor PDFs ranked; L1=SafetyFirst (₹396,927.22, factor 0.94); 6 anomalies flagged; model=claude-sonnet-4-5-20250929",
+      "reconcile": "reused PO/2026/0128; per_line=1, exceptions=5; mismatch detected",
+      "decide_roundtrips": "1 reject + 2 accept all 200",
+      "suggestions_list": "all 3 sug_ ids appear in /api/llm/suggestions?limit=20"
+    },
+    "P2_smoke": {
+      "POST /api/seed x2 (admin)": "200 both — idempotent",
+      "/api/materials?status=approved": "200",
+      "/api/vendors": "200",
+      "/api/customers": "200",
+      "/api/mrf": "200",
+      "/api/po": "200"
+    },
+    "openapi_diff": "All 9 extracted paths present in /openapi.json (GET/POST /notifications*, GET x3 /reports/*, GET x2 /audit*, GET+PUT /settings/thresholds)."
+  },
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routers/reports.py `grn_variance` line 135: freight/other_charges are added to po_val_ord unconditionally but to po_val_recv only when status=='received'. The rounding+addition of freight to received-value expression uses a chained ternary that binds oddly ((freight+other) + (freight+other) if status else 0) — behaviourally correct because freight+other is added to po_val_ord above already; keep an eye on future readers. Reference: /app/backend/routers/reports.py:134-135. Not a bug in this refactor pass.",
+    "routers/audit.py preserves the exact global-view RBAC branches from server.py. Note that when `entity_id` is a customer/vendor/material id, the code sets `pass` for non-management roles instead of raising 403 — this matches pre-refactor behaviour but is worth reviewing separately since it allows site_engineer/store to see any master-data audit row via ?entity_id=..."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase9c_refactor.py (new)"
+  ],
+  "success_rate": {"backend": "100%", "frontend": "N/A (skipped per request)"},
+  "seed_data_creation": "Called POST /api/seed twice via admin fixture — idempotent, uses pre-existing seeded materials/vendors/customers/projects.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Phase 9C router extraction is regression-clean. New pytest lives at /app/backend/tests/test_phase9c_refactor.py (21 tests, ~1.5s). LLM UAT is at /app/backend/tests/uat_llm_files.py (~1min, exit 0). Both can be run individually or as regression whenever the routers/ package is touched.",
+  "rca_of_issue": "N/A — no bugs found in this pass."
+}

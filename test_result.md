@@ -669,16 +669,19 @@ frontend:
 
 test_plan:
   current_focus:
-    - "Enhanced PO PDF with Vasu GSTIN header, MAT/VAR/HSN columns, CGST/SGST/IGST split"
-    - "Enhanced PO Excel bulk + single (40-column line-item workbook)"
-    - "Tally voucher export with HSN mandatory validation"
-    - "MRF PDF endpoint (new) + unified export dispatchers"
-    - "Pre-export validation returns 422 with missing_mandatory list"
-    - "?force=1 bypass audit-logged; every export logged in audit_logs"
-    - "Unified ExportMenu bottom-sheet on PO/MRF detail screens"
+    - "UAT: LLM file-upload path (BOQ / vendor quote / invoice PDFs) — /api/llm/item-standardise, /api/llm/quotation-compare, /api/llm/reconcile"
+    - "Phase 9C refactor: /api/notifications now served from routers/notifications.py"
+    - "Phase 9C refactor: /api/reports/dashboard, /api/reports/mrf-ageing, /api/reports/grn-variance now served from routers/reports.py"
+    - "Phase 9C refactor: /api/audit and /api/audit/facets now served from routers/audit.py"
+    - "Phase 9C refactor: /api/settings/thresholds (GET+PUT) now served from routers/settings.py"
+    - "server.py shrunk 5276 -> 4966 lines (~310 lines extracted)"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
+
+agent_communication:
+    -agent: "main"
+    -message: "Phase 9C incremental refactor round 2: extracted 4 more routers from server.py — notifications, reports (dashboard/mrf-ageing/grn-variance), audit (audit + audit/facets), settings (thresholds get/put). Pattern is identical to the existing routers/llm.py — decorators run at import time against the shared `api` APIRouter, imports done AFTER app/api are defined in server.py. Backend restarted cleanly, all 8 extracted endpoints return 200 via curl for admin role, sample payloads sane. Full LLM UAT re-run (BOQ / quote / invoice PDFs against Haiku + Sonnet) passed 0 failures.  Also created /app/backend/tests/uat_llm_files.py — auto-generates realistic reportlab PDFs and drives the 3 LLM endpoints end-to-end incl. accept/reject/list. Please run backend regression: (a) hit /notifications, /reports/dashboard, /reports/mrf-ageing, /reports/grn-variance, /audit, /audit/facets, /settings/thresholds (GET+PUT with valid & invalid payloads) for each role; (b) verify RBAC on /audit (site_engineer/store scoped feeds); (c) verify PUT /settings/thresholds rejects director<gm and non-numeric values; (d) confirm no /api/* endpoint is missing after the refactor (OpenAPI diff or curl smoke sweep)."
 
 agent_communication:
     -agent: "main"
