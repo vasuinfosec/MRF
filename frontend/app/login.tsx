@@ -73,7 +73,7 @@ export default function Login() {
           <View style={styles.logo}>
             <Text style={styles.logoText}>V</Text>
           </View>
-          <Text style={styles.brandName}>VASU INFOSEC</Text>
+          <Text style={styles.brandName}>ViL AI Prompt Control</Text>
           <Text style={styles.brandTag}>Material Requisition & Purchase Order System</Text>
         </View>
 
@@ -153,7 +153,7 @@ const styles = StyleSheet.create({
     alignItems: "center", justifyContent: "center", marginBottom: 12,
   },
   logoText: { color: "#fff", fontSize: 32, fontWeight: "800" },
-  brandName: { fontSize: 22, fontWeight: "800", letterSpacing: 2, color: theme.colors.text },
+  brandName: { fontSize: 20, fontWeight: "800", letterSpacing: 0.5, color: theme.colors.text, textAlign: "center" },
   brandTag: { fontSize: 12, color: theme.colors.textMuted, marginTop: 4, textAlign: "center" },
   divider: { flexDirection: "row", alignItems: "center", marginVertical: 20 },
   line: { flex: 1, height: 1, backgroundColor: theme.colors.border },

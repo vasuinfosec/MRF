@@ -1,4 +1,4 @@
-// Vasu Infosec design tokens — high-contrast industrial theme
+// ViL AI Prompt Control — design tokens — high-contrast industrial theme
 export const theme = {
   colors: {
     bg: "#FFFFFF",

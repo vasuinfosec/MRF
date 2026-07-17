@@ -35,7 +35,7 @@ export default function Home() {
   const role = user.role;
 
   return (
-    <AppShell title="Vasu Infosec" testID="home-screen">
+    <AppShell title="ViL AI Prompt Control" testID="home-screen">
       <View>
         <H1>Welcome, {user.name.split(" ")[0]}</H1>
         <Muted>{roleWelcome(role)}</Muted>
