@@ -5,7 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { AppShell } from "@/src/components/AppShell";
 import { useAuth } from "@/src/auth";
-import { api, backendUrl, getToken } from "@/src/api";
+import { api, backendUrl, getDownloadToken } from "@/src/api";
 import { Btn, Card, H1, Muted, Pill, Empty, Loader } from "@/src/components/ui";
 import { theme, statusLabel } from "@/src/theme";
 
@@ -80,7 +80,8 @@ export default function MRFList() {
   const canCreate = user?.role === "site_engineer" || user?.role === "pm" || user?.role === "director" || user?.role === "admin";
 
   const exportExcel = async () => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     const url = `${backendUrl}/api/export/mrf?token=${t}`;
     if (typeof window !== "undefined") window.open(url, "_blank");
   };

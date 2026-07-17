@@ -16,12 +16,24 @@ from server import (
     Customer, CustomerPO, _validate_customer_id,
 )
 
+# ---------------------------------------------------------------------------
+# SEC-002 (audit iter-28): Customer records carry PII (GSTIN, PAN, phone,
+# email, addresses) and PO PDFs. Reads are restricted to management roles.
+# Site engineers / store operators do NOT need this data — they operate on
+# MRFs/GRNs which carry a snapshotted `customer_name` and `customer_id`.
+# ---------------------------------------------------------------------------
+CUSTOMER_READ_ROLES = {"admin", "director", "gm", "pm", "purchase"}
+CUSTOMER_WRITE_ROLES = {"admin", "director"}
+CUSTOMER_PO_WRITE_ROLES = {"admin", "director", "purchase"}
+
 
 # ---------------------- Customers ----------------------
 @api.get("/customers")
 async def list_customers(include_inactive: bool = False,
                           authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in CUSTOMER_READ_ROLES:
+        raise HTTPException(403, "Customer directory is restricted to management roles.")
     q: Dict[str, Any] = {} if include_inactive else {"active": True}
     docs = await db.customers.find(q, {"_id": 0}).sort("name", 1).to_list(1000)
     for c in docs:
@@ -34,7 +46,9 @@ async def list_customers(include_inactive: bool = False,
 @api.get("/customers/{customer_id}")
 async def get_customer(customer_id: str,
                         authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in CUSTOMER_READ_ROLES:
+        raise HTTPException(403, "Customer records are restricted to management roles.")
     c = await db.customers.find_one({"customer_id": customer_id}, {"_id": 0})
     if not c:
         raise HTTPException(404, "Customer not found")
@@ -213,7 +227,9 @@ async def update_customer_po(customer_id: str, cpo_id: str, body: dict,
 @api.get("/customers/{customer_id}/pos/{cpo_id}/attachment")
 async def get_customer_po_attachment(customer_id: str, cpo_id: str,
                                        authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
+    if u.role not in CUSTOMER_READ_ROLES:
+        raise HTTPException(403, "Customer PO attachments are restricted to management roles.")
     d = await db.customer_pos.find_one(
         {"cpo_id": cpo_id, "customer_id": customer_id}, {"_id": 0}
     )

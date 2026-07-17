@@ -6,7 +6,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 
 import { useAuth } from "@/src/auth";
-import { backendUrl, getToken } from "@/src/api";
+import { backendUrl, getToken, getDownloadToken } from "@/src/api";
 import { Btn, Card, H1, H2, Muted, Label, Body } from "@/src/components/ui";
 import { theme } from "@/src/theme";
 
@@ -17,7 +17,8 @@ export default function ImportScreen() {
   const [result, setResult] = useState<any>(null);
 
   const downloadTemplate = async (kind: "vendors" | "mrf") => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     if (typeof window !== "undefined") {
       window.open(`${backendUrl}/api/import/${kind}/template?token=${t}`, "_blank");
     }

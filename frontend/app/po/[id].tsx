@@ -4,7 +4,7 @@ import { useRouter, useLocalSearchParams } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView, useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { api, backendUrl, getToken } from "@/src/api";
+import { api, backendUrl, getDownloadToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Loader } from "@/src/components/ui";
 import ExportMenu from "@/src/components/ExportMenu";
@@ -102,12 +102,14 @@ export default function PODetail() {
   };
 
   const downloadGRN = async (grn_id: string) => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     if (typeof window !== "undefined") window.open(`${backendUrl}/api/grn/${grn_id}/pdf?token=${t}`, "_blank");
   };
 
   const downloadInvoice = async (inv_id: string) => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     if (typeof window !== "undefined") window.open(`${backendUrl}/api/invoice/${inv_id}/pdf?token=${t}`, "_blank");
   };
 

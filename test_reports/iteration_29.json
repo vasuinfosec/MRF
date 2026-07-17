@@ -1,0 +1,26 @@
+{
+  "summary": "Validated iter-29 security fixes SEC-001 (dev-login host guard), SEC-002 (customer RBAC), SEC-003 (short-lived dt_ download tokens). Backend: 19/19 pytest cases pass. Frontend Playwright smoke on phone viewport confirms /reports, /po and /import (admin) all mint a dt_ token via POST /api/auth/download-token and open the export URL with `?token=dt_...` (no raw session token in URL). Site engineer hitting Customer Master shows 'Customer directory is restricted to management roles.' and MRF flow remains usable. No code changes required.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iter29_security.py",
+    "/app/test_reports/pytest/iter29_security.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "SEC-001 dev_login_blocked audit rows are inserted with a `try/except: pass` — this is fine but silent DB failures would go unlogged. Consider a warning log on exception.",
+    "SEC-003 export endpoints still accept the legacy raw session token via `?token=` for backward compat. This is intentional per the review request but should be scheduled for removal once all download call sites are on dt_ tokens (verified today: reports MRF/PO, /po export, /import vendor+MRF templates all use dt_)."
+  ],
+  "updated_files": ["/app/backend/tests/test_iter29_security.py"],
+  "success_rate": {"backend": "100% (19/19)", "frontend": "100% (all smoke assertions pass)"},
+  "seed_data_creation": "None. Dev-login used for role tokens; existing customers/MRFs used for RBAC checks.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "SEC-001/002/003 verified. test_iter29_security.py covers: dev-login host guard (localhost + preview allowed; production host header pair blocked with 404 + audit row), customer RBAC (site_engineer & store blocked on list/detail/attachment; pm/purchase/gm/director/admin allowed on list), dt_ tokens (mint shape, single-use enforced via 401 'already used', dt_ works as ?token= on export/mrf XLSX, legacy raw session token still works on both header + query, TTL index on download_tokens.expires_at exists). Frontend: window.open captured URLs — all export/download call sites use dt_ tokens.",
+  "rca_of_issue": "N/A — this is a validation task, not a bug fix. All three security fixes behave as designed."
+}

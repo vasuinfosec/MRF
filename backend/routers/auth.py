@@ -14,10 +14,11 @@ preserved byte-identical from the pre-refactor server.py.
 from __future__ import annotations
 
 import os
+import secrets
 import uuid
 from datetime import timedelta
 from typing import Optional, List
-from fastapi import Header, HTTPException
+from fastapi import Header, HTTPException, Request
 
 import httpx
 
@@ -26,6 +27,32 @@ from server import (
     SessionRequest, UserOut, RoleUpdate,
     ROLES, LEGACY_ROLE_MAP,
 )
+
+
+def _is_dev_login_host_allowed(host: str) -> bool:
+    """Whitelist of hostnames from which the dev-login backdoor may be used.
+
+    Emergent's cloud passes TWO relevant headers:
+      * `Host`             = internal K8s cluster hostname (`*.preview.emergentcf.cloud`)
+      * `X-Forwarded-Host` = public preview hostname       (`*.preview.emergentagent.com`)
+    Production custom domains show up in NEITHER match pattern, so this
+    check remains safe.
+
+    Allowed suffixes/exacts:
+      * .preview.emergentagent.com
+      * .preview.emergentcf.cloud
+      * localhost / 127.0.0.1 / 0.0.0.0
+    """
+    h = (host or "").split(":", 1)[0].lower().strip()
+    if not h:
+        return False
+    if h in ("localhost", "127.0.0.1", "0.0.0.0"):
+        return True
+    if h.endswith(".preview.emergentagent.com"):
+        return True
+    if h.endswith(".preview.emergentcf.cloud"):
+        return True
+    return False
 
 
 @api.post("/auth/session")
@@ -105,9 +132,41 @@ async def logout(authorization: Optional[str] = Header(None)):
 
 
 @api.post("/auth/dev-login")
-async def dev_login(body: dict):
-    """Dev-only endpoint. Disabled in production via ENABLE_DEV_LOGIN env flag."""
+async def dev_login(body: dict, request: Request):
+    """Dev-only endpoint. Two independent guards must BOTH pass:
+
+    1. `ENABLE_DEV_LOGIN=1` environment flag is set.
+    2. The inbound request's Host header is on an allowed dev/preview hostname
+       (`*.preview.emergentagent.com` or localhost). Even if the env flag
+       accidentally leaks into a production image, an external attacker on the
+       production hostname cannot reach this endpoint.
+
+    On any failure we return 404 (not 403) so the endpoint appears absent.
+    """
     if os.environ.get("ENABLE_DEV_LOGIN", "0") != "1":
+        raise HTTPException(404, "Not found")
+    host_direct = request.headers.get("host") or ""
+    host_fwd = request.headers.get("x-forwarded-host") or ""
+    # Allow the request if EITHER the internal Host or the public
+    # X-Forwarded-Host is on the whitelist. Production custom domains match
+    # neither, so they're safely rejected.
+    if not (_is_dev_login_host_allowed(host_direct)
+             or _is_dev_login_host_allowed(host_fwd)):
+        # Log the block so ops has a signal if someone attempts to abuse it.
+        try:
+            await db.audit_logs.insert_one({
+                "audit_id": f"aud_{uuid.uuid4().hex[:12]}",
+                "entity": "auth", "entity_id": "dev-login-blocked",
+                "action": "dev_login_blocked", "user_id": "anonymous",
+                "user_name": "anonymous", "user_role": "anonymous",
+                "details": {"host": host_direct,
+                             "x_forwarded_host": host_fwd,
+                             "email": (body or {}).get("email"),
+                             "role": (body or {}).get("role")},
+                "timestamp": now_utc(),
+            })
+        except Exception:
+            pass
         raise HTTPException(404, "Not found")
     email = body.get("email")
     role = body.get("role", "pm")
@@ -139,6 +198,29 @@ async def dev_login(body: dict):
     except Exception:
         pass
     return {"session_token": session_token, "user": UserOut(**user).model_dump()}
+
+
+@api.post("/auth/download-token")
+async def create_download_token(authorization: Optional[str] = Header(None)):
+    """SEC-003: Mint a short-lived (5-minute), single-use download token.
+
+    Browser file downloads have to embed the auth in the URL because native
+    `<a>` / `window.open` cannot set headers. Instead of exposing the long-
+    lived 7-day session token via `?token=`, the frontend calls this endpoint
+    first, gets a `dt_*` token, and passes THAT as `?token=`. The download
+    endpoint recognises the `dt_` prefix in `get_current_user`, validates the
+    token, marks it used atomically, and rejects any subsequent reuse.
+    """
+    u = await get_current_user(authorization)
+    token = f"dt_{secrets.token_urlsafe(24)}"
+    await db.download_tokens.insert_one({
+        "token": token,
+        "user_id": u.user_id,
+        "expires_at": now_utc() + timedelta(minutes=5),
+        "used": False,
+        "created_at": now_utc(),
+    })
+    return {"token": token, "expires_in": 300}
 
 
 # ---------------------- Users / Roles ----------------------

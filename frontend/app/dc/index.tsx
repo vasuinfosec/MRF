@@ -102,8 +102,9 @@ export default function DCList() {
 
       <View style={styles.fabRow}>
         <Btn title="Export All DCs (Excel)" variant="outline" onPress={async () => {
-          const { getToken, backendUrl } = await import("@/src/api");
-          const t = await getToken();
+          const { getDownloadToken, backendUrl } = await import("@/src/api");
+          const t = await getDownloadToken();
+          if (!t) return;
           if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/dc?token=${t}`, "_blank");
         }} />
       </View>

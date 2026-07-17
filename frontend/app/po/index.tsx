@@ -5,7 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 
 import { AppShell } from "@/src/components/AppShell";
 import { useAuth } from "@/src/auth";
-import { api, backendUrl, getToken } from "@/src/api";
+import { api, backendUrl, getDownloadToken } from "@/src/api";
 import { Btn, Card, H1, Muted, Pill, Empty, Loader } from "@/src/components/ui";
 import { theme } from "@/src/theme";
 
@@ -34,7 +34,8 @@ export default function POList() {
   const canCreate = user?.role === "purchase" || user?.role === "director" || user?.role === "admin";
 
   const exportExcel = async () => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/po?token=${t}`, "_blank");
   };
 

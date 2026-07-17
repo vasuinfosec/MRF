@@ -426,6 +426,38 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> UserO
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
     token = authorization.split(" ", 1)[1]
+    # ------------------------------------------------------------------
+    # SEC-003: Short-lived, single-use download tokens (`dt_*`) issued via
+    # POST /api/auth/download-token. They live in a separate collection so
+    # they cannot be replayed after use, and expire in 5 minutes.
+    # ------------------------------------------------------------------
+    if token.startswith("dt_"):
+        dt = await db.download_tokens.find_one({"token": token}, {"_id": 0})
+        if not dt:
+            raise HTTPException(status_code=401, detail="Invalid download token")
+        exp = dt.get("expires_at")
+        if exp and exp.tzinfo is None:
+            exp = exp.replace(tzinfo=timezone.utc)
+        if exp and exp < now_utc():
+            raise HTTPException(status_code=401, detail="Download token expired")
+        if dt.get("used"):
+            raise HTTPException(status_code=401, detail="Download token already used")
+        # Mark used atomically to prevent replay (compareAndSet).
+        r = await db.download_tokens.update_one(
+            {"token": token, "used": {"$ne": True}},
+            {"$set": {"used": True, "used_at": now_utc()}},
+        )
+        if r.matched_count == 0:
+            raise HTTPException(status_code=401, detail="Download token already used")
+        user = await db.users.find_one({"user_id": dt["user_id"]}, {"_id": 0})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        if user.get("role") in LEGACY_ROLE_MAP:
+            canon = LEGACY_ROLE_MAP[user["role"]]
+            await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": canon}})
+            user["role"] = canon
+        return UserOut(**user)
+
     sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
     if not sess:
         raise HTTPException(status_code=401, detail="Invalid session")
@@ -1680,6 +1712,9 @@ async def startup():
     await db.users.create_index("user_id", unique=True)
     await db.user_sessions.create_index("session_token", unique=True)
     await db.user_sessions.create_index("expires_at", expireAfterSeconds=0)
+    # SEC-003: Short-lived, single-use download tokens (5-minute TTL).
+    await db.download_tokens.create_index("token", unique=True)
+    await db.download_tokens.create_index("expires_at", expireAfterSeconds=0)
     await db.mrfs.create_index("mrf_id", unique=True)
     await db.mrfs.create_index("mrf_number", unique=True)
     await db.pos.create_index("po_id", unique=True)

@@ -5,7 +5,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 import * as DocumentPicker from "expo-document-picker";
 
-import { api, backendUrl, getToken } from "@/src/api";
+import { api, backendUrl, getDownloadToken } from "@/src/api";
 import { Btn, Card, H2, Label, Muted, Loader, Pill } from "@/src/components/ui";
 import AuditTrail from "@/src/components/AuditTrail";
 import ApprovalPanel from "@/src/components/ApprovalPanel";
@@ -50,7 +50,8 @@ export default function ComparativeStatement() {
   useEffect(() => { load(); }, [load]);
 
   const download = async (cs: CS) => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     const url = `${backendUrl}/api/comparative-statement/${cs.cs_id}/download?token=${t}`;
     if (Platform.OS === "web" && typeof window !== "undefined") window.open(url, "_blank");
   };

@@ -4,7 +4,7 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { SafeAreaView } from "react-native-safe-area-context";
 
-import { api, backendUrl, getToken } from "@/src/api";
+import { api, backendUrl, getDownloadToken } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Empty, Loader, Pill, Stat } from "@/src/components/ui";
 import { theme } from "@/src/theme";
@@ -39,12 +39,14 @@ export default function Reports() {
   const vName = (id: string) => vendors.find((v) => v.vendor_id === id)?.name || "—";
 
   const exp = async (kind: "mrf" | "po") => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/${kind}?token=${t}`, "_blank");
   };
 
   const expTally = async (kind: "purchase" | "invoice") => {
-    const t = await getToken();
+    const t = await getDownloadToken();
+    if (!t) return;
     if (typeof window !== "undefined") window.open(`${backendUrl}/api/export/tally?kind=${kind}&token=${t}`, "_blank");
   };
 
