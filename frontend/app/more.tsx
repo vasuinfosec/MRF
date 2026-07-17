@@ -69,6 +69,9 @@ export default function More() {
         <View style={{ marginTop: 8, gap: 8 }}>
           <Btn testID="masters-btn" title="Master Data (Projects, Vendors, Sites, Units, Brands, Materials)" variant="primary" onPress={() => router.push("/masters")} />
           <Btn testID="reports-btn" title="Reports Dashboard" variant="outline" onPress={() => router.push("/reports")} />
+          {(user?.role === "admin" || user?.role === "director") ? (
+            <Btn testID="ai-admin-btn" title="AI Spend & Supplier Performance" variant="outline" onPress={() => router.push("/ai-admin")} />
+          ) : null}
           <Btn testID="import-btn" title="Excel Bulk Import" variant="outline" onPress={() => router.push("/import")} />
           <Btn testID="audit-log-btn" title="System Audit Trail" variant="outline" onPress={() => router.push("/audit")} />
         </View>

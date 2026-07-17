@@ -30,12 +30,37 @@ EMERGENT_LLM_KEY = os.getenv("EMERGENT_LLM_KEY", "")
 
 # Tier → model name.
 #   cheap (DEFAULT)  = OpenAI gpt-4o-mini      — cheapest text model in Emergent LLM Key.
-#   premium          = Anthropic Sonnet 4.5   — only used when explicitly overridden.
+#   premium          = Anthropic Sonnet 4.5   — Director role only.
 # Haiku was removed (~5x more expensive per output token than gpt-4o-mini).
 _LLM_MODELS = {
     "cheap": ("openai", "gpt-4o-mini"),
     "premium": ("anthropic", "claude-sonnet-4-5-20250929"),
 }
+
+# --------------------------------------------------------------------------
+# Cost-control (from user directive, message 618):
+#
+#   * Director            → no monthly cap, may pick any tier (cheap OR premium)
+#   * All other AI roles  → ₹200/month cap, `cheap` tier only.
+#                           If they request `premium` we SILENTLY downgrade
+#                           to `cheap` and surface a flag on the response so
+#                           the UI can show "analyzed with cost-optimised model".
+#                           When the ₹200 monthly wallet is exhausted, further
+#                           LLM calls return HTTP 402 with a clear payload.
+#
+# Deterministic (LLM-free) mode is always available for everyone and never
+# touches this budget.
+# --------------------------------------------------------------------------
+MONTHLY_BUDGET_INR: Dict[str, Optional[float]] = {
+    "director":       None,     # unlimited
+    "gm":             200.0,
+    "pm":             200.0,
+    "admin":          200.0,
+    "purchase":       200.0,
+    "site_engineer":  200.0,
+    "store":          200.0,
+}
+PREMIUM_ALLOWED_ROLES = {"director"}
 
 # Public pricing (USD per 1M tokens) as of 2025 Q4 — used only to display
 # an approximate cost on each call. Actual billing is on the Emergent
@@ -181,6 +206,89 @@ def _extract_json(txt: str) -> Any:
     return None
 
 
+def _month_start_utc() -> Any:
+    n = now_utc()
+    return n.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+
+async def _user_month_spend_inr(user_id: str) -> float:
+    """Sum of cost.cost_inr from llm_suggestions for this user this calendar
+    month. Cached-hits contribute ₹0 because their cost is stored as 0.
+    """
+    start = _month_start_utc()
+    pipeline = [
+        {"$match": {"created_by": user_id, "created_at": {"$gte": start}}},
+        {"$group": {"_id": None, "total": {"$sum": "$cost.cost_inr"}}},
+    ]
+    try:
+        rows = await db.llm_suggestions.aggregate(pipeline).to_list(1)
+        return round(float(rows[0]["total"]) if rows else 0.0, 4)
+    except Exception:
+        return 0.0
+
+
+async def _budget_status(user: UserOut) -> Dict[str, Any]:
+    limit = MONTHLY_BUDGET_INR.get(user.role, 200.0)
+    spent = await _user_month_spend_inr(user.user_id)
+    remaining = None if limit is None else round(max(0.0, limit - spent), 4)
+    return {
+        "role": user.role,
+        "unlimited": limit is None,
+        "limit_inr": limit,
+        "spent_inr": spent,
+        "remaining_inr": remaining,
+        "period": _month_start_utc().strftime("%Y-%m"),
+        "premium_allowed": user.role in PREMIUM_ALLOWED_ROLES,
+    }
+
+
+async def _enforce_tier_and_budget(user: UserOut, requested_tier: str) -> Tuple[str, Dict[str, Any]]:
+    """Central cost-control gate.
+
+    * Non-director asking for `premium` → silent downgrade to `cheap`.
+    * Non-director whose monthly ₹ cap is exhausted → HTTP 402.
+    * Director → always allowed at requested tier, no cap.
+
+    Returns: (effective_tier, tier_meta)
+    """
+    meta: Dict[str, Any] = {
+        "requested_tier": requested_tier,
+        "effective_tier": requested_tier,
+        "downgraded": False,
+        "downgrade_reason": None,
+    }
+    effective = requested_tier
+
+    if requested_tier == "premium" and user.role not in PREMIUM_ALLOWED_ROLES:
+        effective = "cheap"
+        meta["effective_tier"] = "cheap"
+        meta["downgraded"] = True
+        meta["downgrade_reason"] = (
+            "Premium (Claude Sonnet 4.5) is restricted to the Director role. "
+            "Analysed with the cost-optimised model (gpt-4o-mini) instead."
+        )
+
+    budget = await _budget_status(user)
+    meta["budget_before"] = budget
+    if not budget["unlimited"] and (budget["remaining_inr"] or 0.0) <= 0:
+        raise HTTPException(
+            402,
+            {
+                "error": "monthly_ai_budget_exhausted",
+                "role": user.role,
+                "spent_inr": budget["spent_inr"],
+                "limit_inr": budget["limit_inr"],
+                "period": budget["period"],
+                "message": (
+                    f"Monthly AI budget of ₹{budget['limit_inr']} for role "
+                    f"'{user.role}' is exhausted (₹{budget['spent_inr']} used). "
+                    "Try the free Deterministic mode, or ask the Director to run this."
+                ),
+            },
+        )
+    return effective, meta
+
+
 async def _call_llm(tier: str, system: str, user_text: str,
                     user: UserOut, kind: str,
                     entity: str, entity_id: str,
@@ -189,9 +297,13 @@ async def _call_llm(tier: str, system: str, user_text: str,
 
     Returns: (raw_text, audit_extras).
     Raises HTTPException(500) if the key is missing.
+    Raises HTTPException(402) if this user has exhausted their monthly budget.
     """
     if not EMERGENT_LLM_KEY:
         raise HTTPException(500, "EMERGENT_LLM_KEY not configured on server")
+    # Central cost-control gate
+    effective_tier, tier_meta = await _enforce_tier_and_budget(user, tier)
+    tier = effective_tier
     provider, model = _LLM_MODELS.get(tier, _LLM_MODELS["cheap"])
     # Simple content-hash-based cache to avoid burning credits on identical prompts
     h = _payload_hash({"tier": tier, "sys": system, "user": user_text})
@@ -204,8 +316,8 @@ async def _call_llm(tier: str, system: str, user_text: str,
         cb["cost_inr"] = 0.0
         cb["cache_saved"] = True
         return cached["response"], {"cached": True, "tier": tier, "model": model,
-                                      "hash": h, "cost": cb}
-
+                                      "hash": h, "cost": cb,
+                                      "tier_meta": tier_meta}
     session_id = f"vasu_{kind}_{gid('sess')[:16]}"
     chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id,
                    system_message=system).with_model(provider, model)
@@ -229,6 +341,7 @@ async def _call_llm(tier: str, system: str, user_text: str,
         "chars_in": len(user_text) + len(system),
         "chars_out": len(text),
         "cost": cost,
+        "tier_meta": tier_meta,
     }
     await audit("llm", entity_id or "n/a", f"llm_call_{kind}", user,
                 {"tier": tier, "model": model, "entity": entity,
@@ -623,6 +736,250 @@ async def decide_suggestion(sug_id: str, body: Dict[str, Any] = Body(...),
                  "new_value": {"status": new_status},
                  "reason": body.get("reason") or ""})
     return await db.llm_suggestions.find_one({"suggestion_id": sug_id}, {"_id": 0})
+
+
+# ---------------------- Cost-Control & Admin Spend ----------------------
+
+@api.get("/llm/my-budget")
+async def my_budget(authorization: Optional[str] = Header(None)):
+    """Return the caller's monthly AI budget status.
+
+    Response:
+      {role, unlimited, limit_inr, spent_inr, remaining_inr, period,
+       premium_allowed}
+
+    Frontend uses this to show a "wallet" chip in the AI Co-pilot header and
+    to greying-out the premium tier chip for non-directors.
+    """
+    u = await get_current_user(authorization)
+    return await _budget_status(u)
+
+
+@api.get("/llm/admin/spend-monthly")
+async def admin_spend_monthly(months: int = 6,
+                              authorization: Optional[str] = Header(None)):
+    """Per-month, per-user, per-model AI spend rollup for the last `months`
+    calendar months. Admin & Director only.
+
+    Response:
+      {
+        "period_range": [{"month": "2026-06", "spent_inr": 12.34,
+                            "calls": 42}, ...],
+        "by_user":    [{"user_id": "...", "name": "...", "role": "...",
+                         "spent_inr_this_month": 3.4, "limit_inr": 200,
+                         "remaining_inr": 196.6, "calls_this_month": 5}, ...],
+        "by_model":   [{"model": "gpt-4o-mini", "spent_inr": ..., "calls": ...}]
+      }
+    """
+    u = await get_current_user(authorization)
+    if u.role not in {"admin", "director"}:
+        raise HTTPException(403, "Admin or Director only")
+    months = max(1, min(int(months or 6), 24))
+    # ---- 1) monthly totals over the last N months
+    now = now_utc()
+    lookback = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    for _ in range(months - 1):
+        # rewind by one month
+        if lookback.month == 1:
+            lookback = lookback.replace(year=lookback.year - 1, month=12)
+        else:
+            lookback = lookback.replace(month=lookback.month - 1)
+    monthly_pipeline = [
+        {"$match": {"created_at": {"$gte": lookback}}},
+        {"$addFields": {
+            "ym": {"$dateToString": {"format": "%Y-%m", "date": "$created_at"}}
+        }},
+        {"$group": {
+            "_id": "$ym",
+            "spent_inr": {"$sum": "$cost.cost_inr"},
+            "calls": {"$sum": 1},
+        }},
+        {"$sort": {"_id": 1}},
+    ]
+    period_rows = await db.llm_suggestions.aggregate(monthly_pipeline).to_list(months)
+    period_range = [
+        {"month": r["_id"],
+         "spent_inr": round(float(r.get("spent_inr") or 0), 4),
+         "calls": int(r.get("calls") or 0)}
+        for r in period_rows
+    ]
+    # ---- 2) this-month per-user rollup
+    ms = _month_start_utc()
+    user_pipeline = [
+        {"$match": {"created_at": {"$gte": ms}}},
+        {"$group": {
+            "_id": "$created_by",
+            "name": {"$first": "$created_by_name"},
+            "role": {"$first": "$created_by_role"},
+            "spent_inr": {"$sum": "$cost.cost_inr"},
+            "calls": {"$sum": 1},
+        }},
+        {"$sort": {"spent_inr": -1}},
+    ]
+    user_rows = await db.llm_suggestions.aggregate(user_pipeline).to_list(500)
+    by_user = []
+    for r in user_rows:
+        role = r.get("role") or ""
+        limit = MONTHLY_BUDGET_INR.get(role, 200.0)
+        spent = round(float(r.get("spent_inr") or 0), 4)
+        remaining = None if limit is None else round(max(0.0, limit - spent), 4)
+        by_user.append({
+            "user_id": r["_id"],
+            "name": r.get("name") or r["_id"],
+            "role": role,
+            "spent_inr_this_month": spent,
+            "limit_inr": limit,
+            "unlimited": limit is None,
+            "remaining_inr": remaining,
+            "calls_this_month": int(r.get("calls") or 0),
+        })
+    # ---- 3) this-month per-model breakdown
+    model_pipeline = [
+        {"$match": {"created_at": {"$gte": ms}}},
+        {"$group": {
+            "_id": "$model",
+            "spent_inr": {"$sum": "$cost.cost_inr"},
+            "calls": {"$sum": 1},
+        }},
+        {"$sort": {"spent_inr": -1}},
+    ]
+    model_rows = await db.llm_suggestions.aggregate(model_pipeline).to_list(20)
+    by_model = [
+        {"model": r["_id"] or "unknown",
+         "spent_inr": round(float(r.get("spent_inr") or 0), 4),
+         "calls": int(r.get("calls") or 0)}
+        for r in model_rows
+    ]
+    grand_total = round(sum(r["spent_inr"] for r in by_model), 4)
+    return {
+        "period_start_this_month": ms.strftime("%Y-%m"),
+        "grand_total_inr_this_month": grand_total,
+        "period_range": period_range,
+        "by_user": by_user,
+        "by_model": by_model,
+        "budget_config": {
+            k: v for k, v in MONTHLY_BUDGET_INR.items()
+        },
+        "premium_allowed_roles": sorted(list(PREMIUM_ALLOWED_ROLES)),
+    }
+
+
+# ---------------------- Supplier Performance ----------------------
+
+@api.get("/llm/admin/supplier-performance")
+async def admin_supplier_performance(limit: int = 100,
+                                       authorization: Optional[str] = Header(None)):
+    """Simple, deterministic supplier-performance rollup based on internal
+    workflow data — no LLM cost, no complex scoring.
+
+    Metrics per vendor:
+      - completed_orders: POs with status in {'received','closed'}
+      - open_orders: POs with status in {'issued','partially_received'}
+      - rejected_grns: GRNs with status == 'rejected'
+      - total_grns
+      - on_time_pct: % of GRNs where grn.date <= po.expected_delivery
+      - avg_delay_days: mean delay days for late GRNs
+      - last_order_date
+      - total_ordered_value
+
+    Admin, Director, GM, Purchase can view.
+    """
+    u = await get_current_user(authorization)
+    if u.role not in {"admin", "director", "gm", "purchase"}:
+        raise HTTPException(403, "Not allowed")
+
+    vendors = await db.vendors.find({}, {"_id": 0}).to_list(2000)
+    pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(5000)
+    grns = await db.grns.find({}, {"_id": 0}).to_list(10000)
+
+    po_by_id = {p["po_id"]: p for p in pos if p.get("po_id")}
+    v_by_id = {v["vendor_id"]: v for v in vendors if v.get("vendor_id")}
+
+    stats: Dict[str, Dict[str, Any]] = {}
+    for p in pos:
+        vid = p.get("vendor_id") or "_unassigned"
+        rec = stats.setdefault(vid, {
+            "vendor_id": vid,
+            "vendor_name": p.get("vendor_name") or (v_by_id.get(vid, {}).get("name") if vid != "_unassigned" else ""),
+            "total_orders": 0,
+            "completed_orders": 0,
+            "open_orders": 0,
+            "total_ordered_value_inr": 0.0,
+            "total_grns": 0,
+            "rejected_grns": 0,
+            "on_time_grns": 0,
+            "late_grns": 0,
+            "delay_days_sum": 0,
+            "last_order_date": None,
+        })
+        rec["total_orders"] += 1
+        status = (p.get("status") or "").lower()
+        if status in ("received", "closed"):
+            rec["completed_orders"] += 1
+        elif status in ("issued", "partially_received", "approved"):
+            rec["open_orders"] += 1
+        rec["total_ordered_value_inr"] += float(p.get("total") or 0)
+        pd = p.get("date") or p.get("created_at")
+        if pd:
+            if not rec["last_order_date"] or str(pd) > str(rec["last_order_date"]):
+                rec["last_order_date"] = pd
+
+    for g in grns:
+        po = po_by_id.get(g.get("po_id"))
+        if not po:
+            continue
+        vid = po.get("vendor_id") or "_unassigned"
+        rec = stats.get(vid)
+        if not rec:
+            continue
+        rec["total_grns"] += 1
+        if (g.get("status") or "").lower() == "rejected":
+            rec["rejected_grns"] += 1
+        # On-time check — expected_delivery is optional on the PO
+        exp = po.get("expected_delivery") or po.get("delivery_date")
+        gd = g.get("date") or g.get("created_at")
+        if exp and gd:
+            try:
+                exp_s = str(exp)[:10]
+                gd_s = str(gd)[:10]
+                if gd_s <= exp_s:
+                    rec["on_time_grns"] += 1
+                else:
+                    rec["late_grns"] += 1
+                    # naive delay in days
+                    try:
+                        from datetime import datetime as _dt
+                        d1 = _dt.strptime(exp_s, "%Y-%m-%d")
+                        d2 = _dt.strptime(gd_s, "%Y-%m-%d")
+                        rec["delay_days_sum"] += max(0, (d2 - d1).days)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+    out = []
+    for rec in stats.values():
+        if rec["vendor_id"] == "_unassigned":
+            continue
+        on_time_denom = rec["on_time_grns"] + rec["late_grns"]
+        on_time_pct = (rec["on_time_grns"] * 100.0 / on_time_denom) if on_time_denom else None
+        avg_delay = (rec["delay_days_sum"] / rec["late_grns"]) if rec["late_grns"] else 0.0
+        out.append({
+            "vendor_id": rec["vendor_id"],
+            "vendor_name": rec["vendor_name"],
+            "total_orders": rec["total_orders"],
+            "completed_orders": rec["completed_orders"],
+            "open_orders": rec["open_orders"],
+            "total_ordered_value_inr": round(rec["total_ordered_value_inr"], 2),
+            "total_grns": rec["total_grns"],
+            "rejected_grns": rec["rejected_grns"],
+            "on_time_pct": round(on_time_pct, 1) if on_time_pct is not None else None,
+            "avg_delay_days": round(avg_delay, 1),
+            "last_order_date": str(rec["last_order_date"])[:10] if rec["last_order_date"] else None,
+        })
+    out.sort(key=lambda r: (-(r["completed_orders"] or 0),
+                              -(r["total_ordered_value_inr"] or 0)))
+    return out[:max(1, min(int(limit or 100), 500))]
 
 
 # ---------------------- End LLM Co-pilot ----------------------

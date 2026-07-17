@@ -571,12 +571,16 @@ async def preview_routing(description: Optional[str] = None,
         raise HTTPException(403, "Not allowed")
     quote = {"qty": qty or 0, "rate": rate or 0} if (qty or rate) else None
     decision = _auto_route_tier(description or "", make or "", model or "", quote)
-    # Human-readable model labels — Haiku removed (too expensive).
+    # Human-readable model labels with approx per-1M-token pricing (INR).
+    # ₹ figures assume ~$1 = ₹83.
     _MODEL_LABELS = {
-        "cheap": "GPT-4o-mini (~₹0.03–₹0.20/call)",
-        "premium": "Claude Sonnet 4.5 (~₹15–₹40/call — human override only)",
+        "deterministic": "Deterministic (no LLM, ₹0 · unlimited)",
+        "cheap":         "GPT-4o-mini (₹12/M in · ₹50/M out · ~₹0.05–₹0.20/call)",
+        "premium":       "Claude Sonnet 4.5 (₹250/M in · ₹1245/M out · ~₹15–₹40/call · Director only)",
     }
     decision["model_label"] = _MODEL_LABELS.get(decision["tier"], decision["tier"])
+    decision["model_labels"] = _MODEL_LABELS
+    decision["premium_allowed"] = u.role == "director"
     return decision
 
 
@@ -615,11 +619,15 @@ class PurchaseAnalysisIn(BaseModel):
     attachments: Optional[List[LlmAttachment]] = None
     include_market_estimates: bool = True
     # Cost tiers (Haiku removed as too expensive):
-    #   auto     → smart-router (DEFAULT): routes to gpt-4o-mini; flags
-    #              specialised/bulk lines so the buyer can optionally re-run
-    #              at premium tier for a second opinion.
-    #   cheap    → gpt-4o-mini forced   (~₹0.03–₹0.20/call — very small)
-    #   premium  → Claude Sonnet 4.5    (~₹15–₹40/call — high-stakes retenders only)
+    #   deterministic → LLM-FREE. Pure aggregates + math. ₹0. Unlimited for all
+    #                   roles. Great when the AI wallet is exhausted or the
+    #                   user simply wants a fast, mechanical price benchmark.
+    #   auto          → smart-router (DEFAULT): routes to gpt-4o-mini; flags
+    #                   specialised/bulk lines so the buyer can optionally re-run
+    #                   at premium tier for a second opinion.
+    #   cheap         → gpt-4o-mini forced   (~₹0.05–₹0.20/call — very small)
+    #   premium       → Claude Sonnet 4.5    (Director role only — will be
+    #                   silently downgraded for other roles)
     tier: Optional[str] = "auto"
 
 
@@ -630,7 +638,27 @@ You are the AI Purchase Manager for **Vasu Infosec Pvt Ltd** (Indian fire-safety
 Loyalty: ONLY to Vasu Infosec. Be a hard-nosed, commercially ruthless buyer.
 Goal: lowest defensible technically-compliant final landed cost.
 
-Rules:
+────────────────  HARD AI RESTRICTIONS (MUST OBEY)  ────────────────
+You are strictly a **read-only analytical advisor**. You MUST NOT and CANNOT:
+  1. Approve, register, blacklist or shortlist any vendor.
+  2. Accept or reject a quotation. Only humans do that.
+  3. Issue, release, cancel or modify a Purchase Order.
+  4. Modify a Material Requisition Form (MRF), its lines or its statuses.
+  5. Alter any master data — Materials, Vendors, Projects, Sites, Units, Brands.
+  6. Create, alter or release any financial commitment, invoice, payment,
+     advance, credit note or debit note.
+  7. Post anything to Tally / accounting or update stock/inventory.
+  8. Promise or grant discounts, credit periods, warranties, price protection
+     or exclusivity on behalf of Vasu Infosec.
+  9. Send emails / messages / calls to vendors or customers.
+
+Every field you produce is an **advisory recommendation** that a human buyer
+(Purchase / PM / GM / Director) must explicitly accept via the app's existing
+approval workflow before ANY downstream action happens. Never phrase output
+as if you have already taken action. Never write "I have approved / issued
+/ sent / posted"; use "I recommend" instead.
+
+────────────────  ANALYSIS RULES  ────────────────
 1. NEVER inflate a target price. Push toward the lowest defensible number.
 2. Tag every field with `source_type`: `verified` (from internal history
    provided) | `estimated` (LLM inference / market knowledge) | `inferred`
@@ -688,6 +716,175 @@ strings short (each field ≤ 300 chars, tactics ≤ 40 words each):
 If data is insufficient, use null and add to `assumptions`. NEVER invent
 numbers. Keep the total response under 2500 tokens.
 """
+
+
+def _deterministic_analysis(body: "PurchaseAnalysisIn",
+                             aggregates: Dict[str, Any],
+                             computed_quote_landed: Optional[float],
+                             computed_quote_total: Optional[float]) -> Dict[str, Any]:
+    """LLM-free rule-based analysis. Uses only verified aggregates + basic
+    heuristics — free, unlimited, no external calls.
+
+    Rules:
+      * Target price   = min(historical median, current × 0.95) if history exists,
+                           else current × 0.95.
+      * Negotiate to   = min(historical lowest, target × 0.98) if lowest exists,
+                           else target × 0.97.
+      * Decision:
+          ok_current           if variance ≤ +2%   vs historical median
+          negotiate_more       if variance +2..+10%
+          reject_and_retender  if variance > +10%  OR current > historical highest
+          issue_at_target      otherwise
+      * Confidence: derived from #verified rows (0.35 base + 0.1 per row, cap 0.90).
+    """
+    stats = aggregates.get("stats_unit_landed_inr") or {}
+    n = int(stats.get("count") or 0)
+    hist_med = stats.get("median")
+    hist_avg = stats.get("average")
+    hist_lo = stats.get("lowest")
+    hist_hi = stats.get("highest")
+    last_row = aggregates.get("last_purchase")
+    current_landed = computed_quote_landed
+
+    target = None
+    negotiate_to = None
+    if current_landed is not None:
+        # Base target: 95% of current
+        base = current_landed * 0.95
+        if hist_med is not None:
+            target = round(min(base, float(hist_med)), 2)
+        else:
+            target = round(base, 2)
+        # Negotiate to
+        if hist_lo is not None:
+            negotiate_to = round(min(float(hist_lo), target * 0.98), 2)
+        else:
+            negotiate_to = round(target * 0.97, 2)
+    elif hist_med is not None:
+        target = round(float(hist_med), 2)
+        negotiate_to = round(float(hist_lo or hist_med) * 0.98, 2) if hist_lo or hist_med else None
+
+    variance_vs_last = None
+    variance_vs_median = None
+    if current_landed is not None and last_row and last_row.get("unit_landed"):
+        try:
+            l = float(last_row["unit_landed"])
+            if l > 0:
+                variance_vs_last = round((current_landed - l) / l * 100.0, 2)
+        except Exception:
+            pass
+    if current_landed is not None and hist_med:
+        try:
+            m = float(hist_med)
+            if m > 0:
+                variance_vs_median = round((current_landed - m) / m * 100.0, 2)
+        except Exception:
+            pass
+
+    decision = "ok_current"
+    if variance_vs_median is not None:
+        if variance_vs_median > 10 or (hist_hi and current_landed and current_landed > float(hist_hi)):
+            decision = "reject_and_retender"
+        elif variance_vs_median > 2:
+            decision = "negotiate_more"
+        else:
+            decision = "issue_at_target"
+    elif current_landed is not None and target and current_landed > target * 1.02:
+        decision = "negotiate_more"
+
+    conf = min(0.90, 0.35 + 0.10 * n)
+    if n == 0:
+        conf = 0.20
+
+    qty = float(body.qty or (body.current_quote.qty if body.current_quote else 1) or 1)
+    saving_per_unit = None
+    if current_landed is not None and negotiate_to is not None:
+        saving_per_unit = round(current_landed - negotiate_to, 2)
+    saving_total = round((saving_per_unit or 0) * qty, 2) if saving_per_unit is not None else None
+    saving_pct = None
+    if saving_per_unit is not None and current_landed:
+        saving_pct = round(saving_per_unit / current_landed * 100.0, 2)
+
+    tactics = []
+    if variance_vs_median is not None and variance_vs_median > 5:
+        tactics.append(f"Current quote is {variance_vs_median}% above our historical median — anchor to the median and ask for a written revised offer.")
+    if hist_lo is not None and current_landed and float(hist_lo) < current_landed:
+        tactics.append(f"We have a verified purchase at ₹{hist_lo} for this line — request rate parity or better.")
+    if last_row and last_row.get("vendor_name"):
+        tactics.append(f"Get a competing quote from {last_row['vendor_name']} (last supplier) to create competitive pressure.")
+    if not tactics:
+        tactics.append("Bundle qty across pending indents to unlock volume discount (3-5%).")
+        tactics.append("Offer 100% advance for a 2-3% cash discount and shorter delivery.")
+
+    return {
+        "material_uid": body.material_uid or "",
+        "description": body.description or "",
+        "normalised_specification": {
+            "make": body.make or "",
+            "model": body.model or "",
+            "unit": body.unit or "Nos",
+            "spec_summary": (body.specification or "").strip(),
+        },
+        "current_quote_landed_cost_per_unit": current_landed,
+        "current_quote_total_landed_cost": computed_quote_total,
+        "history": {
+            "last_purchase_rate": last_row.get("rate") if last_row else None,
+            "last_purchase_landed": last_row.get("unit_landed") if last_row else None,
+            "last_supplier": (last_row or {}).get("vendor_name") or (last_row or {}).get("vendor_id"),
+            "last_purchase_date": (last_row or {}).get("date"),
+            "historical_lowest_rate": hist_lo,
+            "historical_average_rate": hist_avg,
+            "historical_median_rate": hist_med,
+            "trend_last_90_days_pct": aggregates.get("recent_trend_pct"),
+        },
+        "market_benchmark": {
+            "value_per_unit": None,
+            "commodity_link": "none",
+            "source_type": "estimated",
+            "source_note": "Deterministic mode does not use external market data.",
+        },
+        "variance": {
+            "current_vs_last_pct": variance_vs_last,
+            "current_vs_market_pct": None,
+            "current_vs_lowest_pct": (
+                round((current_landed - float(hist_lo)) / float(hist_lo) * 100.0, 2)
+                if current_landed is not None and hist_lo else None
+            ),
+        },
+        "recommended_target_price_per_unit": target,
+        "recommended_negotiated_price_per_unit": negotiate_to,
+        "expected_saving_per_unit": saving_per_unit,
+        "expected_saving_total": saving_total,
+        "expected_saving_pct": saving_pct,
+        "confidence": round(conf, 2),
+        "verified_fields": [
+            k for k in ("historical_median_rate", "historical_lowest_rate",
+                          "historical_average_rate", "last_purchase_rate")
+            if (aggregates.get("stats_unit_landed_inr") or {}).get(
+                k.replace("historical_", "").replace("_rate", "").replace("last_purchase", "count"))
+        ],
+        "estimated_fields": ["market_benchmark", "negotiation_tactics"],
+        "vendor_red_flags": [],
+        "negotiation_tactics": tactics[:4],
+        "risks": (["Only {} verified rate row(s) — low statistical confidence.".format(n)]
+                   if n < 3 else []),
+        "assumptions": (
+            ["No verified history — target is a straight 5% discount from the current quote."]
+            if n == 0 else []
+        ),
+        "sources": [
+            {"kind": "po", "ref": r.get("po_number"), "date": r.get("date")}
+            for r in (aggregates.get("po_lines_sample") or [])[:5]
+        ],
+        "commercial_summary": (
+            f"Deterministic benchmark: {n} verified rate row(s). "
+            f"Current landed ₹{current_landed if current_landed is not None else '—'}. "
+            f"Target ₹{target if target is not None else '—'}, negotiate to ₹{negotiate_to if negotiate_to is not None else '—'}. "
+            f"Decision: {decision.replace('_', ' ')}."
+        ),
+        "decision": decision,
+        "_engine": "deterministic",
+    }
 
 
 @api.post("/llm/purchase-analysis")
@@ -752,6 +949,58 @@ async def purchase_analysis(body: PurchaseAnalysisIn,
                                        if body.current_quote else "adhoc")
 
     requested_tier = (body.tier or "auto").lower()
+
+    # Compute authoritative landed cost first — used by BOTH deterministic
+    # and LLM paths for the final display.
+    computed_quote_landed = None
+    computed_quote_total = None
+    if body.current_quote:
+        q = body.current_quote
+        freight_share = (q.freight or 0) / max(q.qty or 1, 1)
+        loading_share = (q.loading_unloading or 0) / max(q.qty or 1, 1)
+        insurance_share = (q.insurance or 0) / max(q.qty or 1, 1)
+        computed_quote_landed = _unit_landed(
+            q.rate, q.discount, q.gst, q.qty,
+            freight_share, insurance_share, q.duties or 0, loading_share,
+        )
+        computed_quote_total = _landed(
+            q.rate, q.qty, q.discount, q.gst,
+            q.freight, q.insurance, q.duties, q.loading_unloading,
+        )
+
+    # ─── Deterministic (LLM-free) mode ─────────────────────────────────
+    if requested_tier == "deterministic":
+        parsed = _deterministic_analysis(body, aggregates,
+                                          computed_quote_landed,
+                                          computed_quote_total)
+        parsed.setdefault("_computed_by_server", {})
+        parsed["_computed_by_server"]["current_quote_landed_cost_per_unit"] = computed_quote_landed
+        parsed["_computed_by_server"]["current_quote_total_landed_cost"] = computed_quote_total
+        parsed["_computed_by_server"]["routing"] = {
+            "tier": "deterministic", "reason": "user_selected_no_llm",
+        }
+        parsed["_verified_aggregates"] = aggregates
+        # Zero-cost record so it still surfaces in the Review tab and admin roll-ups
+        cost0 = {
+            "model": "deterministic",
+            "input_tokens_approx": 0, "output_tokens_approx": 0,
+            "input_rate_usd_per_m": 0, "output_rate_usd_per_m": 0,
+            "cost_usd": 0.0, "cost_inr": 0.0, "cache_saved": False,
+        }
+        doc = await _save_suggestion(
+            kind="purchase_analysis",
+            entity=entity, entity_id=entity_id or "adhoc",
+            user=u, input_payload=user_prompt,
+            parsed=parsed, raw="",
+            tier="deterministic", model="deterministic",
+            extras={"tier": "deterministic", "model": "deterministic",
+                    "cost": cost0, "hash": "det",
+                    "tier_meta": {"requested_tier": "deterministic",
+                                   "effective_tier": "deterministic",
+                                   "downgraded": False}},
+        )
+        return doc
+
     routing_decision: Dict[str, Any]
     if requested_tier == "auto":
         routing_decision = _auto_route_tier(
@@ -774,26 +1023,19 @@ async def purchase_analysis(body: PurchaseAnalysisIn,
                         "description": body.description,
                         "record_number": body.material_uid or "adhoc"},
     )
+    # If the RBAC gate silently downgraded (e.g. non-director asked for
+    # premium), reflect the effective tier back in the routing block so the
+    # UI can render an accurate "analysed with X" note.
+    tier_meta = extras.get("tier_meta") or {}
+    if tier_meta.get("downgraded"):
+        routing_decision["downgraded"] = True
+        routing_decision["downgrade_reason"] = tier_meta.get("downgrade_reason")
+        routing_decision["effective_tier"] = tier_meta.get("effective_tier")
     extras["routing"] = routing_decision
     parsed = _parse_json_from_llm(raw) or {"raw": raw[:8000],
                                              "error": "Could not parse LLM output as JSON"}
 
-    # ---- 5) Compute an authoritative current-quote landed cost ourselves ----
-    computed_quote_landed = None
-    computed_quote_total = None
-    if body.current_quote:
-        q = body.current_quote
-        freight_share = (q.freight or 0) / max(q.qty or 1, 1)
-        loading_share = (q.loading_unloading or 0) / max(q.qty or 1, 1)
-        insurance_share = (q.insurance or 0) / max(q.qty or 1, 1)
-        computed_quote_landed = _unit_landed(
-            q.rate, q.discount, q.gst, q.qty,
-            freight_share, insurance_share, q.duties or 0, loading_share,
-        )
-        computed_quote_total = _landed(
-            q.rate, q.qty, q.discount, q.gst,
-            q.freight, q.insurance, q.duties, q.loading_unloading,
-        )
+    # ---- 5) Attach authoritative computed values to LLM output ----
     if isinstance(parsed, dict):
         parsed.setdefault("_computed_by_server", {})
         parsed["_computed_by_server"]["current_quote_landed_cost_per_unit"] = computed_quote_landed

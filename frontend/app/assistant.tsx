@@ -418,6 +418,8 @@ function ReconcileResult({ doc, onDone }: { doc: any; onDone: () => void }) {
 // ---------- AI Purchase Manager (Negotiate) ----------
 
 function NegotiatePanel() {
+  const { user } = useAuth();
+  const isDirector = user?.role === "director";
   const [description, setDescription] = useState("");
   const [make, setMake] = useState("");
   const [modelStr, setModelStr] = useState("");
@@ -431,13 +433,25 @@ function NegotiatePanel() {
   const [deliveryDays, setDeliveryDays] = useState("");
   const [warranty, setWarranty] = useState("");
   const [ctx, setCtx] = useState("");
-  const [tier, setTier] = useState<"auto" | "cheap" | "premium">("auto");
+  const [tier, setTier] = useState<"deterministic" | "auto" | "cheap" | "premium">("auto");
   const [routePreview, setRoutePreview] = useState<any | null>(null);
+  const [budget, setBudget] = useState<any | null>(null);
   const [busy, setBusy] = useState(false);
   const [aggBusy, setAggBusy] = useState(false);
   const [aggregates, setAggregates] = useState<any | null>(null);
   const [result, setResult] = useState<any | null>(null);
   const [err, setErr] = useState("");
+
+  const loadBudget = useCallback(async () => {
+    try {
+      const b = await api<any>("/llm/my-budget");
+      setBudget(b);
+    } catch {
+      setBudget(null);
+    }
+  }, []);
+
+  useEffect(() => { loadBudget(); }, [loadBudget]);
 
   const previewRoute = useCallback(async () => {
     if (!description.trim()) { setRoutePreview(null); return; }
@@ -470,6 +484,12 @@ function NegotiatePanel() {
   const runAnalysis = async () => {
     setErr(""); setResult(null);
     if (!description.trim()) { setErr("Description required"); return; }
+    // Guard: non-director asking for premium — the backend will silently
+    // downgrade, but be explicit here so the user isn't surprised.
+    if (tier === "premium" && !isDirector) {
+      setErr("Premium (Sonnet 4.5) is Director-only. Your call will be analysed with GPT-4o-mini. Change the tier above if you prefer.");
+      // We still allow the call; server will downgrade.
+    }
     setBusy(true);
     try {
       const doc = await api<any>("/llm/purchase-analysis", {
@@ -490,7 +510,17 @@ function NegotiatePanel() {
         },
       });
       setResult(doc);
-    } catch (e: any) { setErr(e?.message || "Analysis failed"); }
+      loadBudget();
+    } catch (e: any) {
+      // Backend returns HTTP 402 as a structured payload when the wallet is
+      // exhausted. Surface it clearly.
+      const msg = e?.message || "Analysis failed";
+      if (msg.includes("monthly_ai_budget_exhausted") || msg.includes("402")) {
+        setErr("Monthly AI wallet exhausted for your role. Switch to Deterministic (free) mode, or ask the Director to run this.");
+      } else {
+        setErr(msg);
+      }
+    }
     setBusy(false);
   };
 
@@ -505,6 +535,13 @@ function NegotiatePanel() {
     negotiate_more: "#B45309", reject_and_retender: "#B91C1C",
   }[parsed.decision] || theme.colors.muted;
 
+  // Colour of the budget chip
+  const budgetPct = budget && !budget.unlimited && budget.limit_inr
+    ? Math.min(100, (budget.spent_inr / budget.limit_inr) * 100)
+    : 0;
+  const budgetColor = budget?.unlimited ? "#065F46"
+    : budgetPct > 90 ? "#B91C1C" : budgetPct > 70 ? "#B45309" : "#065F46";
+
   return (
     <View>
       <H2>Negotiate — AI Purchase Manager</H2>
@@ -512,6 +549,18 @@ function NegotiatePanel() {
         Aggregates history from POs, invoices, GRNs, DCs, comparative statements, then benchmarks
         against market indicators. Every field is tagged verified / estimated.
       </Muted>
+
+      {budget ? (
+        <View style={[styles.walletBar, { borderLeftColor: budgetColor }]}>
+          <Ionicons name="wallet-outline" size={16} color={budgetColor} />
+          <Text style={[styles.walletText, { color: budgetColor }]}>
+            {budget.unlimited
+              ? `Director wallet: unlimited · this month spent ₹${budget.spent_inr.toFixed(2)}`
+              : `Wallet: ₹${(budget.remaining_inr ?? 0).toFixed(2)} left of ₹${budget.limit_inr} · spent ₹${budget.spent_inr.toFixed(2)}`}
+            {"  ·  "}Premium {budget.premium_allowed ? "✓" : "✗"}
+          </Text>
+        </View>
+      ) : null}
 
       <Card style={{ marginTop: 12 }}>
         <Label>Item description *</Label>
@@ -568,15 +617,35 @@ function NegotiatePanel() {
       </Card>
 
       <Card style={{ marginTop: 12 }}>
-        <Label>LLM tier</Label>
-        <View style={{ flexDirection: "row", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-          {(["auto", "cheap", "premium"] as const).map((t) => (
-            <TouchableOpacity key={t} onPress={() => setTier(t)}
-              style={[styles.tierChip, tier === t ? styles.tierChipActive : null]}>
-              <Text style={[styles.tierChipText, tier === t ? styles.tierChipTextActive : null]}>
-                {t === "auto" ? "Auto (recommended)" :
-                 t === "cheap" ? "GPT-4o-mini (₹0.03–₹0.20)" :
-                 "Sonnet 4.5 (₹15–₹40, override)"}
+        <Label>Analysis engine</Label>
+        <Muted>
+          Deterministic is FREE and unlimited. GPT-4o-mini is very small (~₹0.05–₹0.20).
+          Claude Sonnet 4.5 is Director-only.
+        </Muted>
+        <View style={{ flexDirection: "row", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+          {([
+            { k: "deterministic", label: "Deterministic (Free, ₹0)", disabled: false },
+            { k: "auto", label: "Auto — smart routing", disabled: false },
+            { k: "cheap", label: "GPT-4o-mini (₹0.05–₹0.20)", disabled: false },
+            { k: "premium", label: `Claude Sonnet 4.5 (₹15–₹40)${isDirector ? "" : " · Director only"}`, disabled: !isDirector },
+          ] as const).map((t) => (
+            <TouchableOpacity
+              key={t.k}
+              onPress={() => !t.disabled && setTier(t.k as any)}
+              style={[
+                styles.tierChip,
+                tier === t.k ? styles.tierChipActive : null,
+                t.disabled ? styles.tierChipDisabled : null,
+              ]}
+              disabled={t.disabled}
+              testID={`aipm-tier-${t.k}`}
+            >
+              <Text style={[
+                styles.tierChipText,
+                tier === t.k ? styles.tierChipTextActive : null,
+                t.disabled ? styles.tierChipTextDisabled : null,
+              ]}>
+                {t.label}
               </Text>
             </TouchableOpacity>
           ))}
@@ -586,7 +655,7 @@ function NegotiatePanel() {
           <Btn variant="secondary" onPress={runAggregates} disabled={aggBusy}>
             {aggBusy ? "Loading…" : "Preview history (free)"}
           </Btn>
-          <Btn onPress={runAnalysis} disabled={busy}>
+          <Btn onPress={runAnalysis} disabled={busy} testID="aipm-run">
             {busy ? "Analysing…" : "Run analysis"}
           </Btn>
         </View>
@@ -637,6 +706,22 @@ function NegotiatePanel() {
             Model: <Text style={{ fontWeight: "600" }}>{result.model}</Text> · tier: {result.tier} · routing: {routing.reason || "—"}
             {routing.matched_keyword ? ` · kw: ${routing.matched_keyword}` : ""}
           </Muted>
+
+          {routing.downgraded ? (
+            <View style={styles.downgradeBar}>
+              <Ionicons name="information-circle-outline" size={14} color="#92400E" />
+              <Text style={styles.downgradeText}>{routing.downgrade_reason}</Text>
+            </View>
+          ) : null}
+
+          {result.tier === "deterministic" ? (
+            <View style={styles.detBar}>
+              <Ionicons name="calculator-outline" size={14} color="#065F46" />
+              <Text style={styles.detText}>
+                Deterministic engine — no LLM used. ₹0 cost, unlimited runs.
+              </Text>
+            </View>
+          ) : null}
 
           {/* --- COST & TOKENS BREAKDOWN ---------------------------------- */}
           {result.cost ? (
@@ -946,8 +1031,26 @@ const styles = StyleSheet.create({
     borderWidth: 1, borderColor: theme.colors.border, backgroundColor: "#fff",
   },
   tierChipActive: { backgroundColor: theme.colors.action, borderColor: theme.colors.action },
+  tierChipDisabled: { backgroundColor: "#F3F4F6", borderColor: "#E5E7EB", opacity: 0.6 },
   tierChipText: { fontSize: 11, fontWeight: "700", color: theme.colors.text },
   tierChipTextActive: { color: "#fff" },
+  tierChipTextDisabled: { color: theme.colors.textMuted },
+  walletBar: {
+    flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10,
+    padding: 10, borderRadius: 8, backgroundColor: "#F0FDF4",
+    borderLeftWidth: 4,
+  },
+  walletText: { flex: 1, fontSize: 12, fontWeight: "600" },
+  downgradeBar: {
+    flexDirection: "row", alignItems: "flex-start", gap: 6, marginTop: 8,
+    padding: 8, backgroundColor: "#FEF3C7", borderRadius: 6,
+  },
+  downgradeText: { flex: 1, fontSize: 11, color: "#92400E", lineHeight: 15 },
+  detBar: {
+    flexDirection: "row", alignItems: "center", gap: 6, marginTop: 8,
+    padding: 8, backgroundColor: "#D1FAE5", borderRadius: 6,
+  },
+  detText: { fontSize: 11, color: "#065F46", flex: 1 },
   covRow: { flexDirection: "row", gap: 8, marginTop: 4 },
   kpiCell: {
     flex: 1, backgroundColor: "#F7F8FC", borderRadius: 6, padding: 8, alignItems: "center",
