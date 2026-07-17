@@ -4640,6 +4640,9 @@ async def delete_cs(cs_id: str, reason: Optional[str] = None,
 from emergentintegrations.llm.chat import LlmChat, UserMessage
 import hashlib as _hashlib
 import json as _json
+import base64 as _base64_llm
+import csv as _csv_llm
+import io as _io_llm
 
 EMERGENT_LLM_KEY = os.getenv("EMERGENT_LLM_KEY", "")
 
@@ -4654,6 +4657,71 @@ LLM_ROLES_STD = {"purchase", "admin", "pm", "gm", "director"}
 LLM_ROLES_COMPARE = {"purchase", "admin", "pm", "gm", "director"}
 LLM_ROLES_RECONCILE = {"purchase", "admin", "gm", "director"}
 LLM_ROLES_DECIDE = {"purchase", "admin", "pm", "gm", "director"}
+
+# Attachment limits
+LLM_MAX_ATTACHMENT_MB = 10
+LLM_MAX_EXTRACTED_CHARS = 40000  # trim extracted text to keep token spend sane
+
+
+def _decode_b64(payload: str) -> bytes:
+    if not payload:
+        return b""
+    # Strip data URL prefix if present
+    if payload.startswith("data:") and "," in payload:
+        payload = payload.split(",", 1)[1]
+    return _base64_llm.b64decode(payload.encode("utf-8"), validate=False)
+
+
+def _extract_text_from_attachment(file_name: str, mime_type: str,
+                                   file_base64: str) -> Tuple[str, str]:
+    """Return (extracted_text, detected_kind).
+    Supported kinds: pdf, xlsx, xls, csv, txt.
+    Images/other → returns empty text with kind='unsupported'.
+    """
+    raw = _decode_b64(file_base64 or "")
+    if not raw:
+        return ("", "empty")
+    if len(raw) > LLM_MAX_ATTACHMENT_MB * 1024 * 1024:
+        raise HTTPException(413, f"Attachment exceeds {LLM_MAX_ATTACHMENT_MB} MB")
+    name = (file_name or "").lower()
+    mt = (mime_type or "").lower()
+    try:
+        if "pdf" in mt or name.endswith(".pdf"):
+            import pypdf
+            reader = pypdf.PdfReader(_io_llm.BytesIO(raw))
+            parts: List[str] = []
+            for i, pg in enumerate(reader.pages[:60]):  # cap 60 pages
+                try:
+                    parts.append(f"[Page {i+1}]\n{(pg.extract_text() or '').strip()}")
+                except Exception:
+                    continue
+            text = "\n\n".join(parts).strip()
+            return (text[:LLM_MAX_EXTRACTED_CHARS], "pdf")
+        if "spreadsheetml" in mt or name.endswith(".xlsx") or name.endswith(".xls"):
+            wb = openpyxl.load_workbook(_io_llm.BytesIO(raw), data_only=True, read_only=True)
+            lines: List[str] = []
+            for ws in wb.worksheets[:6]:  # cap 6 sheets
+                lines.append(f"### Sheet: {ws.title}")
+                for row in ws.iter_rows(values_only=True):
+                    cells = ["" if c is None else str(c) for c in row]
+                    if any(cells):
+                        lines.append("\t".join(cells))
+                    if len("\n".join(lines)) > LLM_MAX_EXTRACTED_CHARS:
+                        break
+            return ("\n".join(lines)[:LLM_MAX_EXTRACTED_CHARS], "xlsx")
+        if "csv" in mt or name.endswith(".csv"):
+            txt = raw.decode("utf-8", errors="replace")
+            reader = _csv_llm.reader(_io_llm.StringIO(txt))
+            lines = ["\t".join(r) for r in reader]
+            return ("\n".join(lines)[:LLM_MAX_EXTRACTED_CHARS], "csv")
+        if "text" in mt or name.endswith(".txt"):
+            return (raw.decode("utf-8", errors="replace")[:LLM_MAX_EXTRACTED_CHARS], "txt")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(400, f"Could not read attachment ({name}): {e}")
+    # Unsupported (images, etc.)
+    return ("", "unsupported")
 
 
 def _payload_hash(payload: Any) -> str:
@@ -4766,12 +4834,19 @@ async def _save_suggestion(kind: str, entity: str, entity_id: str,
 
 # ---- 1) Item Standardisation (Haiku / cheap) --------------------------------
 
+class LlmAttachment(BaseModel):
+    file_name: str
+    mime_type: str = ""
+    file_base64: str
+
+
 class ItemStandardiseIn(BaseModel):
     description: str
     make: Optional[str] = ""
     model: Optional[str] = ""
     unit: Optional[str] = ""
     context: Optional[str] = ""  # e.g. "MRF Fire Safety Camera"
+    attachments: Optional[List[LlmAttachment]] = None
 
 
 @api.post("/llm/item-standardise")
@@ -4806,7 +4881,7 @@ async def llm_item_standardise(body: ItemStandardiseIn,
         "no prose."
     )
     prompt = _json.dumps({
-        "input": body.model_dump(),
+        "input": body.model_dump(exclude={"attachments"}),
         "catalogue_materials": approved[:200],
         "catalogue_variants": variants[:600],
         "instructions": (
@@ -4817,10 +4892,22 @@ async def llm_item_standardise(body: ItemStandardiseIn,
             "Never invent material_uid values not present in the catalogue."
         ),
     })
+    # Append attachment-extracted text if provided
+    attach_summary: List[dict] = []
+    if body.attachments:
+        chunks: List[str] = []
+        for att in body.attachments[:5]:
+            text, kind = _extract_text_from_attachment(att.file_name, att.mime_type, att.file_base64)
+            attach_summary.append({"file_name": att.file_name, "kind": kind, "chars": len(text)})
+            if text:
+                chunks.append(f"--- Attachment: {att.file_name} ({kind}) ---\n{text}")
+        if chunks:
+            prompt += "\n\nAttached documents:\n" + "\n\n".join(chunks)
     raw, extras = await _call_llm("cheap", system, prompt, u,
                                    kind="item_standardise",
                                    entity="material", entity_id="",
-                                   input_payload={"description": body.description})
+                                   input_payload={"description": body.description,
+                                                  "attachments": attach_summary})
     parsed = _extract_json(raw) or {"suggestions": [], "notes": "unparseable"}
     # Defensive: strip any suggestion that references an unknown MAT-#### UID
     known_muid = {m["material_uid"] for m in approved}
@@ -4834,7 +4921,11 @@ async def llm_item_standardise(body: ItemStandardiseIn,
     parsed["suggestions"] = parsed_suggestions[:3]
     doc = await _save_suggestion(
         "item_standardise", "material", "", u,
-        input_payload=body.model_dump(), parsed=parsed, raw=raw,
+        input_payload={
+            "description": body.description, "make": body.make,
+            "model": body.model, "unit": body.unit, "context": body.context,
+            "attachments": attach_summary,
+        }, parsed=parsed, raw=raw,
         tier="cheap", model=extras["model"], extras=extras,
     )
     return doc
@@ -4846,7 +4937,8 @@ class QuotationCompareIn(BaseModel):
     mrf_id: Optional[str] = ""
     po_id: Optional[str] = ""
     context: Optional[str] = ""
-    quotes: List[Dict[str, Any]]  # [{vendor_name, currency, items:[{description,qty,unit,rate,gst}]}]
+    quotes: Optional[List[Dict[str, Any]]] = None  # [{vendor_name, currency, items:[...]}]
+    attachments: Optional[List[LlmAttachment]] = None  # PDF/Excel/CSV vendor quotes to auto-parse
 
 
 @api.post("/llm/quotation-compare")
@@ -4857,10 +4949,22 @@ async def llm_quotation_compare(body: QuotationCompareIn,
     u = await get_current_user(authorization)
     if u.role not in LLM_ROLES_COMPARE:
         raise HTTPException(403, "Not allowed")
-    if not body.quotes or len(body.quotes) < 2:
-        raise HTTPException(400, "At least 2 vendor quotes required")
-    if len(body.quotes) > 6:
-        raise HTTPException(400, "Max 6 vendor quotes per comparison")
+    quotes = body.quotes or []
+    attach_summary: List[dict] = []
+    attach_chunks: List[str] = []
+    if body.attachments:
+        for att in body.attachments[:8]:  # up to 8 vendor quote docs
+            text, kind = _extract_text_from_attachment(att.file_name, att.mime_type, att.file_base64)
+            attach_summary.append({"file_name": att.file_name, "kind": kind, "chars": len(text)})
+            if text:
+                attach_chunks.append(f"--- Quotation file: {att.file_name} ({kind}) ---\n{text}")
+    # Require either ≥2 structured quotes OR ≥2 attachments
+    if len(quotes) + len(attach_chunks) < 2:
+        raise HTTPException(400, "Provide at least 2 vendor quotes (structured or file attachments)")
+    if len(quotes) > 6:
+        raise HTTPException(400, "Max 6 structured vendor quotes per comparison")
+    if len(attach_chunks) > 8:
+        raise HTTPException(400, "Max 8 vendor quote attachments per comparison")
 
     system = (
         "You are a senior procurement analyst for Vasu Infosec. Compare vendor "
@@ -4868,10 +4972,12 @@ async def llm_quotation_compare(body: QuotationCompareIn,
         "Rank vendors L1 (lowest total) → Ln, compute per-item delta% vs L1, and "
         "flag anomalies (rate outliers, missing items, unit mismatches, "
         "unusually low bids). You DO NOT issue POs or authorise vendors. "
-        "Output STRICT JSON only."
+        "Output STRICT JSON only. If vendor names/rates need to be inferred "
+        "from unstructured attachments, do your best and flag low-confidence rows "
+        "under anomalies with severity='info'."
     )
     prompt = _json.dumps({
-        "quotes": body.quotes,
+        "quotes": quotes,
         "context": body.context or "",
         "instructions": (
             "Return JSON: {ranking:[{rank,vendor_name,total_taxable,total_with_tax,"
@@ -4880,11 +4986,15 @@ async def llm_quotation_compare(body: QuotationCompareIn,
             "vendor_name,description,reason}], summary, recommendation}."
         ),
     })
+    if attach_chunks:
+        prompt += "\n\nAttached quotation documents:\n" + "\n\n".join(attach_chunks)
     raw, extras = await _call_llm("premium", system, prompt, u,
                                    kind="quotation_compare",
                                    entity=("po" if body.po_id else "mrf"),
                                    entity_id=(body.po_id or body.mrf_id or ""),
-                                   input_payload={"quote_count": len(body.quotes),
+                                   input_payload={"quote_count": len(quotes),
+                                                  "attachment_count": len(attach_chunks),
+                                                  "attachments": attach_summary,
                                                   "record_number": body.po_id or body.mrf_id})
     parsed = _extract_json(raw) or {"error": "unparseable", "raw_excerpt": raw[:600]}
     doc = await _save_suggestion(
@@ -4892,7 +5002,8 @@ async def llm_quotation_compare(body: QuotationCompareIn,
         entity=("po" if body.po_id else "mrf"),
         entity_id=body.po_id or body.mrf_id or "",
         user=u,
-        input_payload=body.model_dump(),
+        input_payload={"quote_count": len(quotes), "attachment_count": len(attach_chunks),
+                       "attachments": attach_summary},
         parsed=parsed, raw=raw,
         tier="premium", model=extras["model"], extras=extras,
     )
@@ -4903,6 +5014,7 @@ async def llm_quotation_compare(body: QuotationCompareIn,
 
 class ReconcileIn(BaseModel):
     po_id: str
+    attachments: Optional[List[LlmAttachment]] = None  # e.g. vendor invoice PDFs
 
 
 @api.post("/llm/reconcile")
@@ -4970,13 +5082,25 @@ async def llm_reconcile(body: ReconcileIn,
             "summary}. Be conservative — flag rather than assume."
         ),
     })
+    # Append vendor invoice attachments (extracted text) if provided
+    attach_summary: List[dict] = []
+    if body.attachments:
+        chunks: List[str] = []
+        for att in body.attachments[:5]:
+            text, kind = _extract_text_from_attachment(att.file_name, att.mime_type, att.file_base64)
+            attach_summary.append({"file_name": att.file_name, "kind": kind, "chars": len(text)})
+            if text:
+                chunks.append(f"--- Vendor invoice: {att.file_name} ({kind}) ---\n{text}")
+        if chunks:
+            prompt += "\n\nAttached vendor invoices:\n" + "\n\n".join(chunks)
     raw, extras = await _call_llm("premium", system, prompt, u,
                                    kind="reconcile",
                                    entity="po", entity_id=body.po_id,
                                    input_payload={"po_number": po.get("po_number"),
                                                   "record_number": po.get("po_number"),
                                                   "grn_count": len(grns),
-                                                  "invoice_count": len(invs)})
+                                                  "invoice_count": len(invs),
+                                                  "attachments": attach_summary})
     parsed = _extract_json(raw) or {"error": "unparseable", "raw_excerpt": raw[:600]}
     doc = await _save_suggestion(
         "reconcile", "po", body.po_id, u,

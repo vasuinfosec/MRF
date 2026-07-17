@@ -15,6 +15,7 @@ import { SafeAreaView } from "react-native-safe-area-context";
 
 import { api } from "@/src/api";
 import { Btn, Card, H2, Label, Muted, Pill } from "@/src/components/ui";
+import LlmFilePicker, { LlmAttachment } from "@/src/components/LlmFilePicker";
 import { theme } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 
@@ -100,19 +101,24 @@ function StandardisePanel() {
   const [modelStr, setModelStr] = useState("");
   const [unit, setUnit] = useState("");
   const [ctx, setCtx] = useState("");
+  const [attachments, setAttachments] = useState<LlmAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [result, setResult] = useState<any | null>(null);
 
   const run = async () => {
     setErr("");
-    if (!description.trim()) { setErr("Description is required."); return; }
+    if (!description.trim() && !attachments.length) { setErr("Description or an attachment is required."); return; }
     setBusy(true);
     setResult(null);
     try {
       const doc = await api<any>("/llm/item-standardise", {
         method: "POST",
-        body: { description, make, model: modelStr, unit, context: ctx },
+        body: {
+          description: description || "(see attachment)",
+          make, model: modelStr, unit, context: ctx,
+          attachments: attachments.length ? attachments : undefined,
+        },
       });
       setResult(doc);
     } catch (e: any) { setErr(e?.message || "LLM call failed"); }
@@ -122,7 +128,7 @@ function StandardisePanel() {
   return (
     <View>
       <H2>Standardise Item</H2>
-      <Muted>Match free-text descriptions to MAT-#### / VAR-#### UIDs from the approved master. Uses Claude Haiku 4.5 (cheap tier).</Muted>
+      <Muted>Match free-text descriptions to MAT-#### / VAR-#### UIDs from the approved master. Optionally attach a BOQ PDF/Excel. Uses Claude Haiku 4.5 (cheap tier).</Muted>
       <Card style={{ marginTop: 10 }}>
         <Label>Description *</Label>
         <TextInput value={description} onChangeText={setDescription} placeholder='e.g. "CAT6 UTP cable 305m box"' style={styles.input} testID="std-desc" />
@@ -133,6 +139,13 @@ function StandardisePanel() {
         <Label style={{ marginTop: 8 }}>Unit / Context</Label>
         <TextInput value={unit} onChangeText={setUnit} placeholder="box, mtr, nos" style={styles.input} />
         <TextInput value={ctx} onChangeText={setCtx} placeholder="Context — e.g. structured cabling" style={[styles.input, { marginTop: 6 }]} />
+        <LlmFilePicker
+          attachments={attachments}
+          onChange={setAttachments}
+          max={3}
+          label="Attach BOQ / indent (optional)"
+          helperText="LLM will extract line items from your PDF / Excel and match against the approved master."
+        />
       </Card>
       {err ? <Text style={styles.err}>{err}</Text> : null}
       <Btn testID="std-run" title={busy ? "Thinking…" : "Suggest matches"} variant="primary" onPress={run} disabled={busy} />
@@ -177,6 +190,7 @@ function ComparePanel() {
     { vendor_name: "", items: [{ description: "", qty: 1, unit: "nos", rate: 0, gst: 18 }] },
     { vendor_name: "", items: [{ description: "", qty: 1, unit: "nos", rate: 0, gst: 18 }] },
   ]);
+  const [attachments, setAttachments] = useState<LlmAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [result, setResult] = useState<any | null>(null);
@@ -185,16 +199,27 @@ function ComparePanel() {
   const updI = (qi: number, ii: number, k: string, v: any) => setQuotes((s) => s.map((q, idx) => idx === qi ? { ...q, items: q.items.map((it: any, jj: number) => jj === ii ? { ...it, [k]: v } : it) } : q));
   const addVendor = () => setQuotes((s) => [...s, { vendor_name: "", items: [{ description: "", qty: 1, unit: "nos", rate: 0, gst: 18 }] }]);
   const addItem = (qi: number) => setQuotes((s) => s.map((q, idx) => idx === qi ? { ...q, items: [...q.items, { description: "", qty: 1, unit: "nos", rate: 0, gst: 18 }] } : q));
+  const rmVendor = (i: number) => setQuotes((s) => s.filter((_, idx) => idx !== i));
 
   const run = async () => {
     setErr("");
-    if (quotes.length < 2) { setErr("Need at least 2 vendor quotes."); return; }
-    if (quotes.some((q) => !q.vendor_name.trim())) { setErr("Every vendor needs a name."); return; }
+    // With attachments, we can rely on LLM to parse; otherwise need ≥2 named vendors
+    const namedQuotes = quotes.filter((q) => q.vendor_name.trim());
+    if (namedQuotes.length + attachments.length < 2) {
+      setErr("Provide at least 2 vendor quotes (either structured or attach vendor quotation files).");
+      return;
+    }
     setBusy(true); setResult(null);
     try {
       const doc = await api<any>("/llm/quotation-compare", {
         method: "POST",
-        body: { context: ctx, mrf_id: linkedId.startsWith("mrf_") ? linkedId : "", po_id: linkedId.startsWith("po_") ? linkedId : "", quotes },
+        body: {
+          context: ctx,
+          mrf_id: linkedId.startsWith("mrf_") ? linkedId : "",
+          po_id: linkedId.startsWith("po_") ? linkedId : "",
+          quotes: namedQuotes,
+          attachments: attachments.length ? attachments : undefined,
+        },
       });
       setResult(doc);
     } catch (e: any) { setErr(e?.message || "LLM call failed"); }
@@ -204,16 +229,30 @@ function ComparePanel() {
   return (
     <View>
       <H2>Compare Vendor Quotes</H2>
-      <Muted>Rank L1/L2/L3, per-item delta % and anomaly flags. Uses Claude Sonnet 4.5 (premium tier).</Muted>
+      <Muted>Rank L1/L2/L3, per-item delta % and anomaly flags. Enter structured lines OR attach vendor PDFs/Excels and let the LLM parse them. Uses Claude Sonnet 4.5 (premium tier).</Muted>
       <Card style={{ marginTop: 10 }}>
         <Label>Context (optional)</Label>
         <TextInput value={ctx} onChangeText={setCtx} placeholder="MRF-2026-0287 — CAT6 procurement" style={styles.input} />
         <Label style={{ marginTop: 8 }}>Attach to (MRF or PO id, optional)</Label>
         <TextInput value={linkedId} onChangeText={setLinkedId} placeholder="mrf_… or po_…" style={styles.input} />
+        <LlmFilePicker
+          attachments={attachments}
+          onChange={setAttachments}
+          max={6}
+          label="Vendor quotation files (optional)"
+          helperText="Upload each vendor's quote (PDF/Excel/CSV). LLM will extract vendor name + line rates automatically."
+        />
       </Card>
       {quotes.map((q, qi) => (
         <Card key={qi} style={{ marginTop: 10 }}>
-          <TextInput value={q.vendor_name} onChangeText={(v) => updV(qi, "vendor_name", v)} placeholder={`Vendor ${qi + 1}`} style={[styles.input, { fontWeight: "700" }]} />
+          <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+            <TextInput value={q.vendor_name} onChangeText={(v) => updV(qi, "vendor_name", v)} placeholder={`Vendor ${qi + 1} (leave blank to skip)`} style={[styles.input, { flex: 1, fontWeight: "700" }]} />
+            {quotes.length > 2 ? (
+              <TouchableOpacity onPress={() => rmVendor(qi)} style={{ padding: 6 }}>
+                <Ionicons name="trash-outline" size={16} color={theme.colors.danger} />
+              </TouchableOpacity>
+            ) : null}
+          </View>
           {q.items.map((it: any, ii: number) => (
             <View key={ii} style={{ marginTop: 6, padding: 6, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6 }}>
               <TextInput value={it.description} onChangeText={(v) => updI(qi, ii, "description", v)} placeholder="Description" style={styles.input} />
@@ -281,6 +320,7 @@ function CompareResult({ doc, onDone }: { doc: any; onDone: () => void }) {
 
 function ReconcilePanel() {
   const [poId, setPoId] = useState("");
+  const [attachments, setAttachments] = useState<LlmAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [result, setResult] = useState<any | null>(null);
@@ -290,7 +330,13 @@ function ReconcilePanel() {
     if (!poId.trim()) { setErr("PO id required."); return; }
     setBusy(true); setResult(null);
     try {
-      const doc = await api<any>("/llm/reconcile", { method: "POST", body: { po_id: poId.trim() } });
+      const doc = await api<any>("/llm/reconcile", {
+        method: "POST",
+        body: {
+          po_id: poId.trim(),
+          attachments: attachments.length ? attachments : undefined,
+        },
+      });
       setResult(doc);
     } catch (e: any) { setErr(e?.message || "LLM call failed"); }
     setBusy(false);
@@ -299,10 +345,17 @@ function ReconcilePanel() {
   return (
     <View>
       <H2>PO – GRN – Invoice 3-Way Match</H2>
-      <Muted>Line-by-line qty + rate reconciliation with exception flags. Uses Sonnet 4.5. Purchase/GM/Director gated.</Muted>
+      <Muted>Line-by-line qty + rate reconciliation with exception flags. Optionally attach vendor invoice PDFs so the LLM can cross-check totals. Uses Sonnet 4.5. Purchase/GM/Director gated.</Muted>
       <Card style={{ marginTop: 10 }}>
         <Label>PO ID</Label>
         <TextInput value={poId} onChangeText={setPoId} placeholder="po_xxx" style={styles.input} testID="rec-po" />
+        <LlmFilePicker
+          attachments={attachments}
+          onChange={setAttachments}
+          max={5}
+          label="Vendor invoice files (optional)"
+          helperText="Upload vendor invoice PDFs to include in the reconciliation."
+        />
       </Card>
       {err ? <Text style={styles.err}>{err}</Text> : null}
       <Btn testID="rec-run" title={busy ? "Analysing…" : "Run 3-Way Match"} variant="primary" onPress={run} disabled={busy} />
