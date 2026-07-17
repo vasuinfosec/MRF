@@ -28,12 +28,54 @@ import io as _io_llm
 
 EMERGENT_LLM_KEY = os.getenv("EMERGENT_LLM_KEY", "")
 
-# Tier → model name.  ultra_cheap adds OpenAI gpt-4o-mini for ~20x cost savings.
+# Tier → model name.
+#   cheap (DEFAULT)  = OpenAI gpt-4o-mini      — cheapest text model in Emergent LLM Key.
+#   premium          = Anthropic Sonnet 4.5   — only used when explicitly overridden.
+# Haiku was removed (~5x more expensive per output token than gpt-4o-mini).
 _LLM_MODELS = {
-    "ultra_cheap": ("openai", "gpt-4o-mini"),
-    "cheap": ("anthropic", "claude-haiku-4-5-20251001"),
+    "cheap": ("openai", "gpt-4o-mini"),
     "premium": ("anthropic", "claude-sonnet-4-5-20250929"),
 }
+
+# Public pricing (USD per 1M tokens) as of 2025 Q4 — used only to display
+# an approximate cost on each call. Actual billing is on the Emergent
+# Universal Key credit balance.
+_MODEL_PRICING_USD_PER_M = {
+    "gpt-4o-mini": {"input": 0.15, "output": 0.60},
+    "claude-sonnet-4-5-20250929": {"input": 3.00, "output": 15.00},
+    # Kept for legacy suggestions written under the previous configuration.
+    "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.00},
+}
+_USD_TO_INR = 83.0
+
+
+def _estimate_tokens(text: str) -> int:
+    """Fast, dependency-free token approximation. Roughly `chars / 4` is the
+    industry rule-of-thumb for English text; JSON/structured content is a bit
+    denser, so we use 3.6 as the divisor.
+    """
+    if not text:
+        return 0
+    return max(1, round(len(text) / 3.6))
+
+
+def _cost_breakdown(model: str, in_tokens: int, out_tokens: int) -> Dict[str, Any]:
+    rates = _MODEL_PRICING_USD_PER_M.get(model)
+    if not rates:
+        return {"model": model, "input_tokens": in_tokens, "output_tokens": out_tokens,
+                "cost_inr": None, "note": "unknown_model_pricing"}
+    cost_usd = (in_tokens / 1_000_000) * rates["input"] + \
+               (out_tokens / 1_000_000) * rates["output"]
+    return {
+        "model": model,
+        "input_tokens_approx": in_tokens,
+        "output_tokens_approx": out_tokens,
+        "input_rate_usd_per_m": rates["input"],
+        "output_rate_usd_per_m": rates["output"],
+        "cost_usd": round(cost_usd, 6),
+        "cost_inr": round(cost_usd * _USD_TO_INR, 4),
+        "cache_saved": False,
+    }
 
 # Roles allowed to invoke each LLM feature.
 LLM_ROLES_STD = {"purchase", "admin", "pm", "gm", "director"}
@@ -155,7 +197,14 @@ async def _call_llm(tier: str, system: str, user_text: str,
     h = _payload_hash({"tier": tier, "sys": system, "user": user_text})
     cached = await db.llm_cache.find_one({"_id": h}, {"_id": 0, "response": 1})
     if cached and cached.get("response"):
-        return cached["response"], {"cached": True, "tier": tier, "model": model, "hash": h}
+        cb = _cost_breakdown(model,
+                              _estimate_tokens(system + user_text),
+                              _estimate_tokens(cached["response"]))
+        cb["cost_usd"] = 0.0
+        cb["cost_inr"] = 0.0
+        cb["cache_saved"] = True
+        return cached["response"], {"cached": True, "tier": tier, "model": model,
+                                      "hash": h, "cost": cb}
 
     session_id = f"vasu_{kind}_{gid('sess')[:16]}"
     chat = LlmChat(api_key=EMERGENT_LLM_KEY, session_id=session_id,
@@ -172,15 +221,21 @@ async def _call_llm(tier: str, system: str, user_text: str,
                   "tier": tier, "model": model, "kind": kind}},
         upsert=True,
     )
+    in_tok = _estimate_tokens(system + user_text)
+    out_tok = _estimate_tokens(text)
+    cost = _cost_breakdown(model, in_tok, out_tok)
     extras = {
         "tier": tier, "model": model, "kind": kind, "hash": h,
         "chars_in": len(user_text) + len(system),
         "chars_out": len(text),
+        "cost": cost,
     }
     await audit("llm", entity_id or "n/a", f"llm_call_{kind}", user,
                 {"tier": tier, "model": model, "entity": entity,
                  "record_number": input_payload.get("record_number", ""),
-                 "chars_in": extras["chars_in"], "chars_out": extras["chars_out"]})
+                 "chars_in": extras["chars_in"], "chars_out": extras["chars_out"],
+                 "input_tokens_approx": in_tok, "output_tokens_approx": out_tok,
+                 "cost_inr": cost.get("cost_inr")})
     return text, extras
 
 
@@ -205,6 +260,8 @@ async def _save_suggestion(kind: str, entity: str, entity_id: str,
         "input_summary": {k: v for k, v in input_payload.items() if k != "long_text"},
         "output_raw": raw,
         "output_parsed": parsed,
+        "cost": extras.get("cost"),                    # <-- new
+        "cached": bool(extras.get("cached")),          # <-- new
         "decision": None,
         "decided_by": None,
         "decided_at": None,

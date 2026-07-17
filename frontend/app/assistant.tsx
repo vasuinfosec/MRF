@@ -64,7 +64,7 @@ export default function AssistantScreen() {
       <View style={styles.tabs}>
         {(
           [
-            { k: "standardise", label: "Standardise", icon: "sparkles-outline" as const, tier: "Haiku" },
+            { k: "standardise", label: "Standardise", icon: "sparkles-outline" as const, tier: "gpt-4o-mini" },
             { k: "compare", label: "Compare Quotes", icon: "swap-vertical-outline" as const, tier: "Sonnet" },
             { k: "reconcile", label: "3-Way Match", icon: "git-compare-outline" as const, tier: "Sonnet" },
             { k: "negotiate", label: "Negotiate", icon: "cash-outline" as const, tier: "Auto" },
@@ -431,7 +431,7 @@ function NegotiatePanel() {
   const [deliveryDays, setDeliveryDays] = useState("");
   const [warranty, setWarranty] = useState("");
   const [ctx, setCtx] = useState("");
-  const [tier, setTier] = useState<"auto" | "ultra_cheap" | "cheap" | "premium">("auto");
+  const [tier, setTier] = useState<"auto" | "cheap" | "premium">("auto");
   const [routePreview, setRoutePreview] = useState<any | null>(null);
   const [busy, setBusy] = useState(false);
   const [aggBusy, setAggBusy] = useState(false);
@@ -570,14 +570,13 @@ function NegotiatePanel() {
       <Card style={{ marginTop: 12 }}>
         <Label>LLM tier</Label>
         <View style={{ flexDirection: "row", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
-          {(["auto", "ultra_cheap", "cheap", "premium"] as const).map((t) => (
+          {(["auto", "cheap", "premium"] as const).map((t) => (
             <TouchableOpacity key={t} onPress={() => setTier(t)}
               style={[styles.tierChip, tier === t ? styles.tierChipActive : null]}>
               <Text style={[styles.tierChipText, tier === t ? styles.tierChipTextActive : null]}>
                 {t === "auto" ? "Auto (recommended)" :
-                 t === "ultra_cheap" ? "GPT-4o-mini (₹1-2)" :
-                 t === "cheap" ? "Haiku 4.5 (₹4-8)" :
-                 "Sonnet 4.5 (₹20-40)"}
+                 t === "cheap" ? "GPT-4o-mini (₹0.03–₹0.20)" :
+                 "Sonnet 4.5 (₹15–₹40, override)"}
               </Text>
             </TouchableOpacity>
           ))}
@@ -638,6 +637,47 @@ function NegotiatePanel() {
             Model: <Text style={{ fontWeight: "600" }}>{result.model}</Text> · tier: {result.tier} · routing: {routing.reason || "—"}
             {routing.matched_keyword ? ` · kw: ${routing.matched_keyword}` : ""}
           </Muted>
+
+          {/* --- COST & TOKENS BREAKDOWN ---------------------------------- */}
+          {result.cost ? (
+            <View style={styles.costCard}>
+              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                <Text style={styles.costTitle}>
+                  Cost this call {result.cached ? "· CACHE HIT (₹0)" : ""}
+                </Text>
+                <Text style={styles.costTotal}>
+                  ₹{result.cost.cost_inr ?? 0}
+                </Text>
+              </View>
+              <View style={styles.costGrid}>
+                <View style={styles.costCell}>
+                  <Text style={styles.costCellV}>{result.cost.input_tokens_approx ?? 0}</Text>
+                  <Text style={styles.costCellL}>input tok (~)</Text>
+                </View>
+                <View style={styles.costCell}>
+                  <Text style={styles.costCellV}>{result.cost.output_tokens_approx ?? 0}</Text>
+                  <Text style={styles.costCellL}>output tok (~)</Text>
+                </View>
+                <View style={styles.costCell}>
+                  <Text style={styles.costCellV}>${result.cost.input_rate_usd_per_m ?? "—"}</Text>
+                  <Text style={styles.costCellL}>in $/M</Text>
+                </View>
+                <View style={styles.costCell}>
+                  <Text style={styles.costCellV}>${result.cost.output_rate_usd_per_m ?? "—"}</Text>
+                  <Text style={styles.costCellL}>out $/M</Text>
+                </View>
+                <View style={styles.costCell}>
+                  <Text style={styles.costCellV}>${result.cost.cost_usd ?? "—"}</Text>
+                  <Text style={styles.costCellL}>USD</Text>
+                </View>
+              </View>
+              <Text style={styles.costFootnote}>
+                Token counts are approximate (chars ÷ 3.6). Actual billing runs against the
+                Emergent Universal Key balance.
+              </Text>
+            </View>
+          ) : null}
+          {/* --- END COST CARD -------------------------------------------- */}
 
           <View style={styles.summaryBox}>
             <Text style={styles.summaryText}>{parsed.commercial_summary || "(no commercial summary)"}</Text>
@@ -946,4 +986,15 @@ const styles = StyleSheet.create({
   badgeEstimatedInline: { backgroundColor: "#FEF3C7", color: "#B45309", fontSize: 9, fontWeight: "700", paddingHorizontal: 3, borderRadius: 2 },
   provenance: { fontSize: 11, color: theme.colors.text, marginTop: 4, lineHeight: 16 },
   flagText: { fontSize: 12, color: "#B91C1C", marginTop: 2 },
+  costCard: {
+    marginTop: 10, padding: 10, borderRadius: 8,
+    backgroundColor: "#F0F9FF", borderWidth: 1, borderColor: "#93C5FD",
+  },
+  costTitle: { fontSize: 11, fontWeight: "700", color: "#1E40AF", textTransform: "uppercase", letterSpacing: 0.5 },
+  costTotal: { fontSize: 16, fontWeight: "800", color: "#1E3A8A" },
+  costGrid: { flexDirection: "row", gap: 6, marginTop: 8 },
+  costCell: { flex: 1, alignItems: "center", paddingVertical: 4 },
+  costCellV: { fontSize: 12, fontWeight: "700", color: "#1E3A8A" },
+  costCellL: { fontSize: 9, color: "#3B82F6", marginTop: 2 },
+  costFootnote: { fontSize: 10, color: "#64748B", marginTop: 8, fontStyle: "italic" },
 });

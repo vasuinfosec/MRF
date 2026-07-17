@@ -178,13 +178,12 @@ MAX_MRF_LINES = 400
 LOOKBACK_DAYS = 3 * 365       # look 3 years back by default
 
 # --- Smart tier auto-router ------------------------------------------------
-# Rule of thumb (per user directive):
-#   * 90% of items  → gpt-4o-mini   (fastest, ~₹1–2/call)
-#   * Cables / pipes / structural steel / software / bulk-expensive items
-#     → Claude Haiku 4.5             (better spec + market reasoning, ~₹4–8/call)
-#   * Sonnet 4.5 is NEVER auto-selected; it can only be forced by an explicit
-#     `tier="premium"` in the request body — reserved for one-off high-stake
-#     tenders where a human decides to spend the credits.
+# All everyday-item calls now route to gpt-4o-mini (cheapest text model in
+# Emergent LLM Key). Specialised categories and bulk-expensive lines are ALSO
+# routed to gpt-4o-mini by default; the escalation now writes a flag on the
+# response so the buyer knows this is a high-stakes item that MAY warrant a
+# manual `premium` override for a second opinion.
+# Sonnet 4.5 is NEVER auto-selected.
 _CLAUDE_KEYWORDS = [
     # Cables & wires
     "cable", "wire", "conduit", "cat6", "cat5", "cat-6", "cat-5",
@@ -205,17 +204,14 @@ _CLAUDE_KEYWORDS = [
     "diesel", "fuel", "gas", "lubricant",
 ]
 
-_BULK_VALUE_THRESHOLD_INR = 100_000  # ₹1 lakh line-item value triggers Claude
+_BULK_VALUE_THRESHOLD_INR = 100_000  # ₹1 lakh line-item value flag
 
 
 def _auto_route_tier(description: str, make: str, model: str,
                        current_quote: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    """Return {"tier": ..., "reason": ..., "matched_keyword": ...}.
-
-    Called only when the request `tier == "auto"` (the default). Deterministic
-    keyword + value routing — no LLM involved in the routing decision itself.
-    Uses word-boundary matching so tokens like "2-wire" don't accidentally
-    trip the "wire" cable keyword.
+    """Deterministic routing. All auto-tier calls land on the cheapest model
+    (gpt-4o-mini). Specialised / bulk lines are FLAGGED so the UI can hint
+    "consider a premium re-run", but they still start on the cheap tier.
     """
     hay = " ".join([
         (description or ""), (make or ""), (model or ""),
@@ -223,13 +219,12 @@ def _auto_route_tier(description: str, make: str, model: str,
     ]).lower()
 
     for kw in _CLAUDE_KEYWORDS:
-        # Word-boundary match; escape kw so "cat6" / "cat-6" both work
         pattern = r"(?<![\w-])" + re.escape(kw) + r"(?![\w-])"
         if re.search(pattern, hay):
             return {"tier": "cheap", "reason": "specialised_category",
-                     "matched_keyword": kw}
+                     "matched_keyword": kw,
+                     "premium_reroll_advised": True}
 
-    # Bulk-expensive check
     if current_quote:
         try:
             qty = float(current_quote.get("qty") or 0)
@@ -237,11 +232,13 @@ def _auto_route_tier(description: str, make: str, model: str,
             line_value = qty * rate
             if line_value >= _BULK_VALUE_THRESHOLD_INR:
                 return {"tier": "cheap", "reason": "bulk_expensive_line",
-                         "line_value_inr": round(line_value, 2)}
+                         "line_value_inr": round(line_value, 2),
+                         "premium_reroll_advised": True}
         except Exception:
             pass
 
-    return {"tier": "ultra_cheap", "reason": "everyday_item"}
+    return {"tier": "cheap", "reason": "everyday_item",
+             "premium_reroll_advised": False}
 
 
 # --------------------------------------------------------------------------- helpers
@@ -574,11 +571,10 @@ async def preview_routing(description: Optional[str] = None,
         raise HTTPException(403, "Not allowed")
     quote = {"qty": qty or 0, "rate": rate or 0} if (qty or rate) else None
     decision = _auto_route_tier(description or "", make or "", model or "", quote)
-    # Add human-readable model name for UI
+    # Human-readable model labels — Haiku removed (too expensive).
     _MODEL_LABELS = {
-        "ultra_cheap": "GPT-4o-mini (~₹1–2/call)",
-        "cheap": "Claude Haiku 4.5 (~₹4–8/call)",
-        "premium": "Claude Sonnet 4.5 (~₹20–40/call)",
+        "cheap": "GPT-4o-mini (~₹0.03–₹0.20/call)",
+        "premium": "Claude Sonnet 4.5 (~₹15–₹40/call — human override only)",
     }
     decision["model_label"] = _MODEL_LABELS.get(decision["tier"], decision["tier"])
     return decision
@@ -618,12 +614,12 @@ class PurchaseAnalysisIn(BaseModel):
     context: Optional[str] = ""      # e.g. "Bangalore high-rise, urgent"
     attachments: Optional[List[LlmAttachment]] = None
     include_market_estimates: bool = True
-    # Cost control:
-    #   auto         → smart-router (DEFAULT): gpt-4o-mini for everyday items,
-    #                  Claude Haiku for cables/pipes/software/bulk-expensive
-    #   ultra_cheap  → gpt-4o-mini forced       (~₹1–2 / call)
-    #   cheap        → Claude Haiku 4.5 forced  (~₹4–8 / call)
-    #   premium      → Claude Sonnet 4.5 forced (~₹20–40 / call — use sparingly)
+    # Cost tiers (Haiku removed as too expensive):
+    #   auto     → smart-router (DEFAULT): routes to gpt-4o-mini; flags
+    #              specialised/bulk lines so the buyer can optionally re-run
+    #              at premium tier for a second opinion.
+    #   cheap    → gpt-4o-mini forced   (~₹0.03–₹0.20/call — very small)
+    #   premium  → Claude Sonnet 4.5    (~₹15–₹40/call — high-stakes retenders only)
     tier: Optional[str] = "auto"
 
 
@@ -762,10 +758,10 @@ async def purchase_analysis(body: PurchaseAnalysisIn,
             body.description or "", body.make or "", body.model or "",
             body.current_quote.model_dump() if body.current_quote else None,
         )
-    elif requested_tier in ("ultra_cheap", "cheap", "premium"):
+    elif requested_tier in ("cheap", "premium"):
         routing_decision = {"tier": requested_tier, "reason": "user_override"}
     else:
-        routing_decision = {"tier": "ultra_cheap", "reason": "unknown_tier_default"}
+        routing_decision = {"tier": "cheap", "reason": "unknown_tier_default"}
 
     final_tier = routing_decision["tier"]
     raw, extras = await _call_llm(
