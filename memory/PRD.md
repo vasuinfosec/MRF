@@ -128,37 +128,46 @@ Thresholds (editable in Masters → PO Thresholds by Director/Admin):
 ## 7. Current server.py Refactor Status
 
 **Before Phase 9C round 2:** 5,276 lines monolithic.
-**After round 4 (Batches A + B complete):** 2,853 lines — **46% reduction** (~2,423 lines extracted). Modules in `/app/backend/routers/`:
+**After round 5 (Batches A + B + C complete):** 1,735 lines — **67% reduction** (~3,540 lines extracted). Modules in `/app/backend/routers/`:
 
 | Module | Endpoints | LOC |
 |---|---|---|
 | `llm.py` | /api/llm/item-standardise, /quotation-compare, /reconcile, /suggestions[/{id}[/decide]] | 570 |
 | `mrf.py` | Full MRF lifecycle: /mrf CRUD, /submit, /approve, /send-to-purchase, /items/{line_id} (change_log), /pdf, /export | 506 |
 | `masters.py` | /materials/*, /variants/*, /master-audit, /systems, /masters (generic), /import/materials[/template] | 464 |
+| `po_exports.py` | /po/{id}/pdf, /export/mrf, /export/po, /export/tally, /po/{id}/export (dispatcher) | 426 |
 | `po.py` | PO lifecycle: create (threshold gate), /approve, list, get, /received (auto-GRN), /invoices | 379 |
 | `grn.py` | /grns, /po/{id}/grns, /grn/{id}, /approve, /pdf, /export, /export/grn (bulk) | 328 |
 | `dc.py` | /dc/*, /approve, /delete, /pdf, /export, /export/dc (bulk) | 286 |
 | `cs.py` | /comparative-statement/*, /download, /approve, /delete | 238 |
 | `customers.py` | /customers + /customers/{id}/pos/* | 223 |
-| `reports.py` | /api/reports/dashboard, /mrf-ageing, /grn-variance | 155 |
-| `audit.py` | /api/audit, /api/audit/facets | 142 |
-| `settings.py` | /api/settings/thresholds (GET, PUT) | 46 |
-| `notifications.py` | /api/notifications (GET), /api/notifications/{nid}/read | 30 |
+| `projects.py` | /projects + /projects/{id}/sites + /projects/{id}/team | 204 |
+| `imports.py` | /import/vendors[/template], /import/mrf[/template] | 196 |
+| `invoice.py` | /invoice CRUD + /invoice/{id}/pdf | 196 |
+| `auth.py` | /auth/session, /me, /logout, /dev-login + /users, /users/role | 168 |
+| `reports.py` | /reports/dashboard, /mrf-ageing, /grn-variance | 155 |
+| `audit.py` | /audit, /audit/facets | 142 |
+| `billing.py` | /billing/items, /billing/update | 109 |
+| `vendors.py` | /vendors CRUD | 72 |
+| `settings.py` | /settings/thresholds (GET, PUT) | 46 |
+| `notifications.py` | /notifications, /notifications/{nid}/read | 30 |
 
-**Deliberately kept in server.py (shared across routers):**
-- Access helpers `_check_mrf_access`, `_check_po_access` (used by mrf, po, grn, dc, audit, invoice routers)
-- PO PDF/Excel/Tally exports (large layout code + workbook helpers `_po_excel_workbook`, `_po_tally_workbook`)
-- Shared PDF/Excel/validation helpers: `_pdf_story`, `_vasu_footer`, `_excel_response`, `_validation_error`, `_log_export`, `_safe_cell`, `_resolve_material_info`, `_split_gst_amt`, `_is_intra_state`, `_po_initial_status`, `_mrf_pdf_bytes`, `_validate_mrf_for_export`, `_validate_po_for_export`, `_dc_pdf_story`, `_dc_excel_workbook`, `_validate_dc_for_export`
+**What remains in server.py (1,735 lines):**
+- FastAPI/CORS/lifespan bootstrap
+- Pydantic models (User, MRF, PO, GRN, DC, CS, Invoice, MasterItem, etc.)
+- Shared helpers: `_check_mrf_access`, `_check_po_access`, `_pdf_story`, `_vasu_footer`, `_excel_response`, `_validation_error`, `_log_export`, `_safe_cell`, `_resolve_material_info`, `_split_gst_amt`, `_is_intra_state`, `_po_initial_status`, `_mrf_pdf_bytes`, `_validate_mrf_for_export`, `_validate_po_for_export`, `_po_excel_workbook`, `_po_tally_workbook`, `_dc_pdf_story`, `_dc_excel_workbook`, `_validate_dc_for_export`, `get_thresholds`, `audit`, `master_audit`, `notify`, `now_utc`, `gid`, `next_*_number`
+- Auth core (`get_current_user`)
+- Brand constants (VASU_PRIMARY, VASU_STATE, VASU_GSTIN, ...)
+- Seed endpoint (POST /api/seed) and root (GET /api/)
 
-**Pending extraction (Batch C — future rounds):**
-- `po_exports.py` — PO PDF/Excel/Tally endpoints
-- `imports.py` — /import/vendors|mrf templates + upload
-- `exports.py` — remaining bulk /export/* endpoints
-- `auth.py` — /auth/session|me|logout|dev-login + /users, /users/role
-- `projects.py` — /projects + /projects/{id}/sites|team
-- `vendors.py` — /vendors + PUT/DELETE (fragments across server.py)
-- `billing.py` — /billing/items, /billing/update
-- `invoice.py` — /invoice/*
+Refactor is effectively **complete**. Any future extraction (models to `schemas.py`, helpers to `common/pdf.py` etc.) is optional cleanup — server.py is now maintainable at 1,735 lines.
+
+**Test suites:**
+- `tests/test_phase9c_refactor.py` — 21 tests (round 2)
+- `tests/test_phase9c_r3_masters_customers.py` — 45 tests (round 3)
+- `tests/test_phase9c_r4_batch_b.py` — 38 tests (round 4)
+- `tests/test_phase9c_r5_batch_c.py` — 56 tests (round 5)
+- **Total: 160/160 passing** · LLM UAT: 0 failures · OpenAPI: all paths present
 
 ## 8. Frontend Screens (`/app/frontend/app/`)
 
