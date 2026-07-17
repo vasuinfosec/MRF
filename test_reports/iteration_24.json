@@ -1,0 +1,79 @@
+{
+  "summary": "Phase 9C round 3 backend regression — masters.py + customers.py router extraction is byte-identical. New pytest suite (45 tests) + prior phase9c refactor suite (21 tests) = 66/66 pass. LLM UAT (uat_llm_files.py) exit=0 with 0 failures. All 25 extracted OpenAPI paths present. Cascade rename on PUT /api/customers/{cid} verified — customer_id change propagates to customer_pos and downstream. Frontend MatVarChips component verified present in both mrf/[id].tsx and po/[id].tsx with correct MAT-/VAR- fallback logic; no UI walkthrough performed per request.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase9c_r3_masters_customers.py",
+    "/app/backend/tests/test_phase9c_refactor.py",
+    "/app/backend/tests/uat_llm_files.py",
+    "/app/test_reports/pytest/phase9c_r3_iter24.xml",
+    "/app/test_reports/pytest/phase9c_all_iter24.xml"
+  ],
+  "coverage_matrix": {
+    "P0_masters": {
+      "GET /materials": "default→approved-only, ?status=all, ?status=pending_pm_review, ?q=free-text — all 200 with correct filter",
+      "GET /materials/counts": "200 dict",
+      "POST /materials": "403 for site_engineer/pm/gm/store; 400 empty desc / >100 words / duplicate norm; 200 purchase → pending_pm_review; 200 admin → approved",
+      "PUT /materials/{uid}": "400 without reason; approved+purchase → pending_gm_approval; admin edit stays approved; dedup enforced on rename",
+      "POST /materials/{uid}/action": "PM approve OK; 403 purchase/gm; 400 wrong status",
+      "POST /materials/{uid}/gm-approve": "GM only; 403 purchase; 400 if not pending_gm_approval",
+      "POST /materials/bulk-action": "PM bulk → {ok:3, skipped:2} correctly counts already-approved + bogus uid",
+      "GET /import/materials/template": "xlsx bytes returned; ?token= query param path works for browser download",
+      "POST /import/materials": "created/duplicates/errors/needs_correction/summary all populated correctly with mixed rows",
+      "GET+POST /variants": "list ok; duplicate combo returns same variant_uid",
+      "GET /master-audit": "admin/director 200; 403 for pm/purchase/gm/site_engineer/store",
+      "GET /systems": "list of system categories (≥5) returned",
+      "GET+POST+PUT+DELETE /masters": "list grouped; POST forbidden for purchase; dup name case-insensitive → 400; PUT requires reason → 400; DELETE is soft (active=false)"
+    },
+    "P0_customers": {
+      "GET /customers": "default active-only + po_count attached; ?include_inactive=true returns deactivated",
+      "GET /customers/{cid}": "returns customer_pos[] without attachment_b64",
+      "POST /customers": "403 for pm/purchase/gm; dup on customer_id AND name both case-insensitive → 400",
+      "PUT /customers/{cid} needs_reason": "400 without reason",
+      "PUT /customers/{cid} cascade_rename": "customer_id change cascades to customer_pos (verified — cpo still present under new cid); old cid returns 404",
+      "DELETE /customers/{cid}": "soft-delete (active=false); appears in ?include_inactive=true",
+      "POST /customers/{cid}/pos": "created; response redacts attachment_b64",
+      "PUT /customers/{cid}/pos/{cpo_id}": "returns without attachment_b64; audit log redacts base64 as [file] (code-verified in customers.py:203-206)",
+      "GET /customers/{cid}/pos/{cpo_id}/attachment": "returns {filename, content_b64}; 404 for missing cpo"
+    },
+    "P1_cross_router": {
+      "POST /api/mrf with material_id=MAT-0001": "admin creates MRF successfully → masters router resolves seeded material against materials collection",
+      "existing test_phase9c_refactor.py": "21/21 pass (notifications, reports, audit RBAC, settings PUT matrix, P2 smoke, OpenAPI)"
+    },
+    "P2_openapi": {
+      "expected_paths": 25,
+      "missing": 0,
+      "verified_paths": ["/api/materials(GET,POST)", "/api/materials/counts(GET)", "/api/materials/{material_uid}(PUT)", "/api/materials/{material_uid}/action(POST)", "/api/materials/{material_uid}/gm-approve(POST)", "/api/materials/bulk-action(POST)", "/api/import/materials/template(GET)", "/api/import/materials(POST)", "/api/variants(GET,POST)", "/api/master-audit(GET)", "/api/systems(GET)", "/api/masters(GET,POST)", "/api/masters/{item_id}(PUT,DELETE)", "/api/customers(GET,POST)", "/api/customers/{customer_id}(GET,PUT,DELETE)", "/api/customers/{customer_id}/pos(POST)", "/api/customers/{customer_id}/pos/{cpo_id}(PUT)", "/api/customers/{customer_id}/pos/{cpo_id}/attachment(GET)"]
+    },
+    "P3_frontend_chip": {
+      "component_present": "/app/frontend/src/components/MatVarChips.tsx (88 lines, testID=`mat-chip-{uid}` and `var-chip-{uid}`)",
+      "mrf_detail_import": "/app/frontend/app/mrf/[id].tsx:12+287 — fallback to material_id / variant_id when starts with MAT-/VAR-",
+      "po_detail_import": "/app/frontend/app/po/[id].tsx:12+248",
+      "screenshot_taken": false,
+      "rationale": "Component is a conditional Text render; backend green; no UI risk in this pass per request"
+    },
+    "rbac_drift_check": "No RBAC behaviour changes detected vs. pre-refactor. Materials write-role set (purchase/admin/director) preserved. Customers write-role set (admin/director) preserved. Customer POs write-role set (admin/director/purchase) preserved. master-audit remains admin/director-only.",
+    "cascade_rename_verification": "customer_id rename explicitly tested end-to-end — after PUT with new customer_id, GET on old cid returns 404 and GET on new cid returns the attached customer_pos row (proving customer_pos.customer_id was updated). Code path in customers.py:96-107 also updates projects, mrfs, pos, invoices collections — not exercised in this test since seeded data doesn't include these under a new test cid, but the update_many calls are byte-identical to the pre-refactor server.py implementation."
+  },
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routers/masters.py — /import/materials/template accepts ?token= query fallback for browser downloads; that pattern is only used for Excel exports. Same pattern also exists on other Excel endpoints. Not a bug.",
+    "routers/customers.py:99-107 — Customer ID cascade rename does not use a MongoDB session/transaction; if any of the 5 update_many calls fail mid-stream the DB is left half-renamed. Pre-existing (matches server.py). Consider wrapping in a session for future hardening but out of scope for this refactor pass.",
+    "routers/masters.py:170-173 — pm_action 'flag' path writes new_status='needs_correction' but only sets approved_by/approved_at when action == 'approve'. Correct.",
+    "test_phase9c_r3_masters_customers.py::TestCustomersCRUD emits a PytestRemovedIn10Warning (class-scoped instance-method fixture). Non-blocking — tests pass, will migrate to @classmethod when pytest 10 lands."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase9c_r3_masters_customers.py (new — 45 tests, ~2.7s)"
+  ],
+  "success_rate": {"backend": "100% (66/66 pytest + 0/0 LLM UAT failures)", "frontend": "N/A — chip presence verified via code inspection only, per request"},
+  "seed_data_creation": "POST /api/seed (idempotent). Test data prefixed with TEST_ (materials, customers, masters). Test customers are soft-deleted at end of the CRUD flow; test materials remain in the DB but are searchable by TEST_ prefix.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Router refactor for Phase 9C is now regression-clean across 7 extracted routers (llm, notifications, reports, audit, settings, masters, customers). Two pytest suites are the source of truth: /app/backend/tests/test_phase9c_refactor.py (21 tests, ~1.5s — first 5 routers) and /app/backend/tests/test_phase9c_r3_masters_customers.py (45 tests, ~2.7s — masters + customers). Together they exercise every endpoint moved out of server.py. LLM UAT at /app/backend/tests/uat_llm_files.py (~1min, exit 0) covers the LLM flows. Any future router extraction should extend the r3 suite pattern.",
+  "rca_of_issue": "N/A — no bugs found."
+}

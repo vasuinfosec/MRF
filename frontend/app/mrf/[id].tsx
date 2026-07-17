@@ -9,6 +9,7 @@ import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Body, Loader } from "@/src/components/ui";
 import ExportMenu from "@/src/components/ExportMenu";
 import AuditTrail from "@/src/components/AuditTrail";
+import MatVarChips from "@/src/components/MatVarChips";
 import { theme, statusLabel, canonicalStatus } from "@/src/theme";
 
 function ownerRoleForStatus(status: string): string {
@@ -283,6 +284,10 @@ export default function MRFDetail() {
               {it.status === "rejected" ? <Pill status="rejected" /> :
                it.status === "approved" ? <Pill status="approved" /> : null}
             </View>
+            <MatVarChips
+              materialUid={it.material_uid || (typeof it.material_id === "string" && it.material_id.startsWith("MAT-") ? it.material_id : undefined)}
+              variantUid={it.variant_uid || (typeof it.variant_id === "string" && it.variant_id.startsWith("VAR-") ? it.variant_id : undefined)}
+            />
             {it.specification ? <Muted>{it.specification}{it.part_number ? ` · ${it.part_number}` : ""}</Muted> : null}
             <View style={styles.itemGrid}>
               <MiniStat label="Unit" value={it.unit} />

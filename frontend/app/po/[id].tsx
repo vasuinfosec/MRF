@@ -9,6 +9,7 @@ import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Muted, Pill, Label, Loader } from "@/src/components/ui";
 import ExportMenu from "@/src/components/ExportMenu";
 import AuditTrail from "@/src/components/AuditTrail";
+import MatVarChips from "@/src/components/MatVarChips";
 import { theme } from "@/src/theme";
 
 export default function PODetail() {
@@ -244,6 +245,10 @@ export default function PODetail() {
                   <Pill status={remaining > 0 ? "partially_received" : "received"} />
                 ) : null}
               </View>
+              <MatVarChips
+                materialUid={it.material_uid || (typeof it.material_id === "string" && it.material_id.startsWith("MAT-") ? it.material_id : undefined)}
+                variantUid={it.variant_uid || (typeof it.variant_id === "string" && it.variant_id.startsWith("VAR-") ? it.variant_id : undefined)}
+              />
               {it.specification ? <Muted>{it.specification}</Muted> : null}
               <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 8 }}>
                 <MiniStat label="Ordered" value={`${it.qty} ${it.unit}`} />

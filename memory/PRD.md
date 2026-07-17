@@ -128,17 +128,19 @@ Thresholds (editable in Masters → PO Thresholds by Director/Admin):
 ## 7. Current server.py Refactor Status
 
 **Before Phase 9C round 2:** 5,276 lines monolithic.
-**After round 2:** 4,966 lines. Extracted modules in `/app/backend/routers/`:
+**After round 3:** 4,400 lines. Extracted modules in `/app/backend/routers/`:
 
-| Module | Endpoints |
-|---|---|
-| `llm.py` | /api/llm/item-standardise, /quotation-compare, /reconcile, /suggestions[/{id}[/decide]] |
-| `notifications.py` | /api/notifications (GET), /api/notifications/{nid}/read |
-| `reports.py` | /api/reports/dashboard, /mrf-ageing, /grn-variance |
-| `audit.py` | /api/audit, /api/audit/facets |
-| `settings.py` | /api/settings/thresholds (GET, PUT) |
+| Module | Endpoints | LOC |
+|---|---|---|
+| `llm.py` | /api/llm/item-standardise, /quotation-compare, /reconcile, /suggestions[/{id}[/decide]] | 570 |
+| `masters.py` | /materials/*, /variants/*, /master-audit, /systems, /masters (generic), /import/materials[/template] | 464 |
+| `customers.py` | /customers + /customers/{id}/pos/* | 223 |
+| `reports.py` | /api/reports/dashboard, /mrf-ageing, /grn-variance | 155 |
+| `audit.py` | /api/audit, /api/audit/facets | 142 |
+| `settings.py` | /api/settings/thresholds (GET, PUT) | 46 |
+| `notifications.py` | /api/notifications (GET), /api/notifications/{nid}/read | 30 |
 
-**Pending extraction (candidates):**
+**Pending extraction (Batch B & C):**
 - `masters.py` — /materials, /variants, /master-audit, /systems, /masters (generic)
 - `customers.py` — /customers + /customers/{id}/pos
 - `mrf.py` — /mrf lifecycle
