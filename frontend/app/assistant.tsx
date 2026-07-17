@@ -28,7 +28,8 @@ type Tab = "standardise" | "compare" | "reconcile" | "negotiate" | "review";
  *   • LLM outputs are SUGGESTIONS. Humans accept / reject before any downstream
  *     workflow write happens.
  *   • LLM never approves, releases POs, posts financials, or updates stock.
- *   • Every call is audit-logged with tier (Haiku=cheap, Sonnet=premium).
+ *   • Every call is audit-logged with tier and model (deterministic / gpt-4o-mini
+ *     / claude-sonnet-4-5 — Sonnet only for Director on Negotiate).
  */
 export default function AssistantScreen() {
   const router = useRouter();
