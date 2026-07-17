@@ -1,0 +1,33 @@
+{
+  "summary": "Iteration 21 UAT — Playwright end-to-end validation of approval workflow (GRN/DC/CS) + AI Co-pilot from a real user's perspective. All 14 scenarios PASS. Login (dev-login as Purchase/Admin/PM/GM/Site Engineer) works and lands on /home. Home quick-actions (Reports/GRN/DC/CS/AI Co-pilot) all render and navigate. GRN list renders 12 rows; opening pending grn_a6e74fc8c461 shows ApprovalPanel with status pill 'Pending Approval', Approve/Reject buttons HIDDEN for Purchase; download-grn-btn opens ExportMenu with PDF + Excel tiles; AuditTrail renders at bottom with role-coloured chips. Approved grn_586e8e96d398 shows the ✓ Approved lock message. After logout and login as Admin, same GRN shows Approve/Reject; clicking ✓ Approve → filling optional comment 'TEST_iter21 auto-approve' → Confirm Approve → status pill flips to 'Authorised' (approved) + AuditTrail refreshes with new 'Grn Approve' entry showing pending_approval → approved and ADMIN role chip. DC list (54 rows, statuses pending_approval/approved/rejected, outbound/inbound pills) opens dc_40c115293736 — Purchase sees NO approve buttons; Admin sees both. CS list as PM shows 27 approve buttons across 32 panels (5 already-approved CS correctly hide the buttons); as Purchase 0 approve buttons visible. AI Co-pilot: /assistant tabs (Standardise/Compare/3-Way/Review) load for Purchase. Standardise (Haiku): description 'CAT6 UTP cable 305m box' + make 'D-Link' → 'Suggest matches' resolves in ~8s with Top matches card, MAT-#### chip, confidence %, and reasoning. ✓ Accept in DecisionRow completes without error and appears in Review → Accepted tab. 3-Way Match (Sonnet) with po_9b7448e6cf78 resolves in ~15s with aggregate PO/GRN/Inv pills + per-line row with NOT_INVOICED status badge + exceptions block (CRITICAL/WARNING/INFO chips) — full structured render. Audit page as GM shows FILTERS row (All entities, Auth, Comparative Statement, ..., All actions, Approve, Bulk Import, Cancel, ..., All roles, Site Engineer, PM, Purchase, GM), role-coloured chips (GM/PURCHASE/ADMIN etc.), LLM entries with tier=cheap (Haiku) and tier=premium (Sonnet) visible with model=claude-haiku-4-5 / claude-sonnet-4-5. Site Engineer /assistant correctly shows 'The Assistant is available to Purchase, PM, GM, Accounts and Director.' with all four tabs hidden.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": [
+      {"component": "React Native Web", "issue": "Console deprecation warning: 'props.pointerEvents is deprecated. Use style.pointerEvents' emitted on every screen. Not a functional bug but should be migrated (likely from a third-party component using pointerEvents prop instead of style.pointerEvents). Reference: reproduces on /login, /home, and detail screens."}
+    ]
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_21.json"
+  ],
+  "action_items": [
+    "None functional — all 14 UAT scenarios pass.",
+    "Minor cleanup: migrate any component still using the `pointerEvents` prop to `style={{ pointerEvents: '…' }}` to silence the RN-web deprecation warning (search for `pointerEvents=` in /app/frontend/src)."
+  ],
+  "critical_code_review_comments": [
+    "ApprovalPanel.tsx correctly gates Approve/Reject buttons on `canAct` prop and the calling screens pass canAct based on role: GRN detail (/grn/[id].tsx:114) passes admin/director; DC detail passes the same; CS list panel passes pm/gm/director. Role-based visibility verified end-to-end.",
+    "assistant.tsx canUse={purchase,admin,pm,gm,director} — Site Engineer correctly falls through to the 'Assistant is available to Purchase, PM, GM, Accounts and Director.' branch with no tabs rendered.",
+    "GRN detail uses the new /api/grn/{id} endpoint with a graceful fallback to /grns list scan — no 404 UX issues observed.",
+    "Approval-modal flow (comment optional for approve, required for reject) works; the modal is dismissible with ESC and Cancel; submit hits POST /api/{entity}/{id}/approve and refetches — audit trail refresh is immediate.",
+    "The reconcile per-line status badge shows arbitrary status strings coloured by keyword match ('mismatch' → red, other → amber). For fully-invoiced POs the badge is 'MATCH'; for the seeded PO po_9b7448e6cf78 it renders 'NOT_INVOICED' (amber) — a legitimate reconciliation state, not a bug."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "not_tested (frontend-only iteration; iter20 already 40/40)", "frontend": "100% (14/14)"},
+  "seed_data_creation": "None. Reused existing seed: grn_a6e74fc8c461 (pending) + grn_586e8e96d398 (already-approved) for GRN flow, dc_40c115293736 for DC flow, cs_2549260adbc1 for CS flow, po_9b7448e6cf78 for 3-way match. The admin-approve step DID mutate grn_a6e74fc8c461 → status=approved with comment 'TEST_iter21 auto-approve' — this is expected behaviour and the audit row is a legitimate UAT artefact. If the next iteration needs another pending GRN, use grn_2bdb739a88ea or any other grn with status=None in the list.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Playwright UAT scripts were run inline via mcp_browser_automation in 3 batches (login+GRN, DC+CS+Standardise, Reconcile+Audit+RBAC). Use the exact testIDs from ApprovalPanel.tsx (approve-btn-{entity}, reject-btn-{entity}, approval-comment-{entity}, approval-submit-{entity}, approval-panel-{entity}) and assistant.tsx (llm-tab-{k}, std-desc, std-run, cmp-run, rec-po, rec-run, decide-accept-{sug}, decide-reject-{sug}). For role-switching in a single browser session, `localStorage.clear(); sessionStorage.clear()` between /login navigations is sufficient — no need for separate browser contexts. Wait-for-response strategy: use text='Top matches' for Haiku standardise (<10s) and text=/PO ₹|GRN ₹|Inv ₹/ for Sonnet reconcile (<25s); a 60s timeout is a comfortable ceiling. Preview URL: https://purchase-workflow-10.preview.emergentagent.com. Dev-login button testIDs: demo-{role_key}-btn (site_engineer, pm, gm, purchase, director, admin).",
+  "rca_of_issue": "No bugs. Approval-workflow role-gating and LLM co-pilot flows are working exactly as specified."
+}
