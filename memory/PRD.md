@@ -240,3 +240,24 @@ Implemented per user directive (msg 618):
 - New `/ai-admin` screen (More → "AI Spend & Supplier Performance") with two tabs
 
 **Test coverage**: `test_ai_cost_control_iter27.py` — 19/19 passed. Frontend Playwright smoke — 10/10 passed.
+
+## 13. Security Hardening (Iter 29, Jul 2026)
+
+Fixed 3 findings from the security audit:
+
+**SEC-001 [CRITICAL] — Dev-login host guard**
+- `POST /api/auth/dev-login` now requires BOTH `ENABLE_DEV_LOGIN=1` AND a request Host / X-Forwarded-Host on the preview allowlist (`*.preview.emergentagent.com`, `*.preview.emergentcf.cloud`, `localhost`). Custom production domains → HTTP 404 regardless of env flag.
+- Blocked attempts are logged to `audit_logs` as `dev_login_blocked`.
+
+**SEC-002 [HIGH] — Customer RBAC**
+- `GET /customers`, `GET /customers/{id}`, `GET /customers/{cid}/pos/{cpo_id}/attachment` now require role ∈ {admin, director, gm, pm, purchase}.
+- `site_engineer` and `store` roles get HTTP 403; MRF/GRN flows remain functional via snapshotted `customer_name`/`customer_id` on the record.
+
+**SEC-003 [MEDIUM] — Short-lived download tokens**
+- New `POST /api/auth/download-token` mints a `dt_<24>` token — 5-min TTL, single-use, atomically marked consumed on first read.
+- `get_current_user` extended to recognise `dt_` prefix and enforce single-use + expiry.
+- New TTL index `download_tokens.expires_at`.
+- All 10 frontend download call-sites migrated to `getDownloadToken()` helper (reports/mrf/PO/GRN/DC/comparative-statement/import).
+- Legacy raw session-token via `?token=` still accepted for backward compat during rollout.
+
+**Test coverage**: 19/19 backend pytest (`test_iter29_security.py`) + 6 frontend Playwright smokes.
