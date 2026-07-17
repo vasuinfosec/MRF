@@ -128,30 +128,35 @@ Thresholds (editable in Masters → PO Thresholds by Director/Admin):
 ## 7. Current server.py Refactor Status
 
 **Before Phase 9C round 2:** 5,276 lines monolithic.
-**After round 3:** 4,400 lines. Extracted modules in `/app/backend/routers/`:
+**After round 4 (Batches A + B complete):** 2,853 lines — **46% reduction** (~2,423 lines extracted). Modules in `/app/backend/routers/`:
 
 | Module | Endpoints | LOC |
 |---|---|---|
 | `llm.py` | /api/llm/item-standardise, /quotation-compare, /reconcile, /suggestions[/{id}[/decide]] | 570 |
+| `mrf.py` | Full MRF lifecycle: /mrf CRUD, /submit, /approve, /send-to-purchase, /items/{line_id} (change_log), /pdf, /export | 506 |
 | `masters.py` | /materials/*, /variants/*, /master-audit, /systems, /masters (generic), /import/materials[/template] | 464 |
+| `po.py` | PO lifecycle: create (threshold gate), /approve, list, get, /received (auto-GRN), /invoices | 379 |
+| `grn.py` | /grns, /po/{id}/grns, /grn/{id}, /approve, /pdf, /export, /export/grn (bulk) | 328 |
+| `dc.py` | /dc/*, /approve, /delete, /pdf, /export, /export/dc (bulk) | 286 |
+| `cs.py` | /comparative-statement/*, /download, /approve, /delete | 238 |
 | `customers.py` | /customers + /customers/{id}/pos/* | 223 |
 | `reports.py` | /api/reports/dashboard, /mrf-ageing, /grn-variance | 155 |
 | `audit.py` | /api/audit, /api/audit/facets | 142 |
 | `settings.py` | /api/settings/thresholds (GET, PUT) | 46 |
 | `notifications.py` | /api/notifications (GET), /api/notifications/{nid}/read | 30 |
 
-**Pending extraction (Batch B & C):**
-- `masters.py` — /materials, /variants, /master-audit, /systems, /masters (generic)
-- `customers.py` — /customers + /customers/{id}/pos
-- `mrf.py` — /mrf lifecycle
-- `po.py` — /po lifecycle + PO PDF/Excel/Tally exports
-- `grn.py` — /grn/* + GRN PDF/export
-- `dc.py` — /dc/* + DC PDF/export
-- `cs.py` — /comparative-statement/*
-- `imports.py` — /import/materials|vendors|mrf templates + upload
-- `exports.py` — /export/mrf|po|tally|grn|dc bulk endpoints
+**Deliberately kept in server.py (shared across routers):**
+- Access helpers `_check_mrf_access`, `_check_po_access` (used by mrf, po, grn, dc, audit, invoice routers)
+- PO PDF/Excel/Tally exports (large layout code + workbook helpers `_po_excel_workbook`, `_po_tally_workbook`)
+- Shared PDF/Excel/validation helpers: `_pdf_story`, `_vasu_footer`, `_excel_response`, `_validation_error`, `_log_export`, `_safe_cell`, `_resolve_material_info`, `_split_gst_amt`, `_is_intra_state`, `_po_initial_status`, `_mrf_pdf_bytes`, `_validate_mrf_for_export`, `_validate_po_for_export`, `_dc_pdf_story`, `_dc_excel_workbook`, `_validate_dc_for_export`
+
+**Pending extraction (Batch C — future rounds):**
+- `po_exports.py` — PO PDF/Excel/Tally endpoints
+- `imports.py` — /import/vendors|mrf templates + upload
+- `exports.py` — remaining bulk /export/* endpoints
 - `auth.py` — /auth/session|me|logout|dev-login + /users, /users/role
 - `projects.py` — /projects + /projects/{id}/sites|team
+- `vendors.py` — /vendors + PUT/DELETE (fragments across server.py)
 - `billing.py` — /billing/items, /billing/update
 - `invoice.py` — /invoice/*
 
