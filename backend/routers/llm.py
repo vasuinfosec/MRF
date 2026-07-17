@@ -28,8 +28,9 @@ import io as _io_llm
 
 EMERGENT_LLM_KEY = os.getenv("EMERGENT_LLM_KEY", "")
 
-# Tier → model name
+# Tier → model name.  ultra_cheap adds OpenAI gpt-4o-mini for ~20x cost savings.
 _LLM_MODELS = {
+    "ultra_cheap": ("openai", "gpt-4o-mini"),
     "cheap": ("anthropic", "claude-haiku-4-5-20251001"),
     "premium": ("anthropic", "claude-sonnet-4-5-20250929"),
 }

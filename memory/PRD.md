@@ -67,9 +67,17 @@ Thresholds (editable in Masters → PO Thresholds by Director/Admin):
 | Integration | Provider | Model | Purpose | Approx per-call cost |
 |---|---|---|---|---|
 | Emergent Google Auth | Google (via Emergent) | OAuth 2.0 | Real production login | **₹0** (bundled with Emergent Universal Key credits) |
-| Item Standardise | Anthropic (via Emergent) | claude-haiku-4-5-20251001 | Suggest MAT/VAR matches | ~$0.01–$0.03 (~₹1–₹2.5) per call |
-| Quotation Compare | Anthropic (via Emergent) | claude-sonnet-4-5-20250929 | L1/L2/L3 side-by-side analysis | ~$0.15–$0.25 (~₹12–₹21) per call |
-| Reconcile (3-way match) | Anthropic (via Emergent) | claude-sonnet-4-5-20250929 | PO vs GRN vs Invoice audit | ~$0.10–$0.20 (~₹8–₹17) per call |
+| Item Standardise | Anthropic (via Emergent) | claude-haiku-4-5-20251001 | Suggest MAT/VAR matches | ~₹1–₹2.5 per call |
+| Quotation Compare | Anthropic (via Emergent) | claude-sonnet-4-5-20250929 | L1/L2/L3 side-by-side analysis | ~₹12–₹21 per call |
+| Reconcile (3-way match) | Anthropic (via Emergent) | claude-sonnet-4-5-20250929 | PO vs GRN vs Invoice audit | ~₹8–₹17 per call |
+| **AI Purchase Manager** (Auto tier) | OpenAI / Anthropic (via Emergent) | **gpt-4o-mini (90%)** / **Claude Haiku 4.5 (10%)** | Buyer-side negotiation copilot: aggregates PO/GRN/invoice/DC/CS history, benchmarks vs market, recommends target/negotiated price, tactics, red flags | **~₹1–₹8 per call** (auto-routes based on category & value) |
+|   ↳ Explicit `premium` override | Anthropic (via Emergent) | claude-sonnet-4-5-20250929 | Used ONLY when a human forces it for high-stakes retenders | ~₹20–₹40 per call |
+
+**Auto-router rules (deterministic, zero LLM cost):**
+- 90% of purchases (everyday items) → **GPT-4o-mini** (~₹1–2/call)
+- Cables · wires · pipes · MS structural · fiber · copper · software · AMC · diesel / fuel → **Claude Haiku 4.5** (~₹4–8/call)
+- Line value ≥ ₹1,00,000 → escalated to Claude Haiku 4.5 too
+- Sonnet 4.5 is NEVER auto-selected — reserved for a manual override
 
 **Cost optimisation already built in:**
 - Content-hash cache (`db.llm_cache`) — identical prompts hit cache and cost ₹0. This is a huge saving during repeat testing/re-runs.

@@ -19,7 +19,7 @@ import LlmFilePicker, { LlmAttachment } from "@/src/components/LlmFilePicker";
 import { theme } from "@/src/theme";
 import { useAuth } from "@/src/auth";
 
-type Tab = "standardise" | "compare" | "reconcile" | "review";
+type Tab = "standardise" | "compare" | "reconcile" | "negotiate" | "review";
 
 /**
  * LLM Co-pilot — three suggestion-only tools.
@@ -67,6 +67,7 @@ export default function AssistantScreen() {
             { k: "standardise", label: "Standardise", icon: "sparkles-outline" as const, tier: "Haiku" },
             { k: "compare", label: "Compare Quotes", icon: "swap-vertical-outline" as const, tier: "Sonnet" },
             { k: "reconcile", label: "3-Way Match", icon: "git-compare-outline" as const, tier: "Sonnet" },
+            { k: "negotiate", label: "Negotiate", icon: "cash-outline" as const, tier: "Auto" },
             { k: "review", label: "Review", icon: "list-outline" as const, tier: "" },
           ] as { k: Tab; label: string; icon: any; tier: string }[]
         ).map((t) => (
@@ -87,6 +88,7 @@ export default function AssistantScreen() {
         {tab === "standardise" && <StandardisePanel />}
         {tab === "compare" && <ComparePanel />}
         {tab === "reconcile" && <ReconcilePanel />}
+        {tab === "negotiate" && <NegotiatePanel />}
         {tab === "review" && <ReviewPanel />}
       </ScrollView>
     </SafeAreaView>
@@ -413,6 +415,362 @@ function ReconcileResult({ doc, onDone }: { doc: any; onDone: () => void }) {
   );
 }
 
+// ---------- AI Purchase Manager (Negotiate) ----------
+
+function NegotiatePanel() {
+  const [description, setDescription] = useState("");
+  const [make, setMake] = useState("");
+  const [modelStr, setModelStr] = useState("");
+  const [unit, setUnit] = useState("Nos");
+  const [qty, setQty] = useState("1");
+  const [vendorName, setVendorName] = useState("");
+  const [rate, setRate] = useState("");
+  const [freight, setFreight] = useState("0");
+  const [gst, setGst] = useState("18");
+  const [paymentTerms, setPaymentTerms] = useState("30 days");
+  const [deliveryDays, setDeliveryDays] = useState("");
+  const [warranty, setWarranty] = useState("");
+  const [ctx, setCtx] = useState("");
+  const [tier, setTier] = useState<"auto" | "ultra_cheap" | "cheap" | "premium">("auto");
+  const [routePreview, setRoutePreview] = useState<any | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [aggBusy, setAggBusy] = useState(false);
+  const [aggregates, setAggregates] = useState<any | null>(null);
+  const [result, setResult] = useState<any | null>(null);
+  const [err, setErr] = useState("");
+
+  const previewRoute = useCallback(async () => {
+    if (!description.trim()) { setRoutePreview(null); return; }
+    try {
+      const p = new URLSearchParams({
+        description, make, model: modelStr,
+        qty: qty || "0", rate: rate || "0",
+      });
+      const d = await api<any>(`/llm/purchase-analysis/route?${p.toString()}`);
+      setRoutePreview(d);
+    } catch {
+      setRoutePreview(null);
+    }
+  }, [description, make, modelStr, qty, rate]);
+
+  useEffect(() => { previewRoute(); }, [previewRoute]);
+
+  const runAggregates = async () => {
+    setErr(""); setAggregates(null);
+    if (!description.trim()) { setErr("Description required"); return; }
+    setAggBusy(true);
+    try {
+      const p = new URLSearchParams({ description });
+      const d = await api<any>(`/llm/purchase-analysis/aggregates?${p.toString()}`);
+      setAggregates(d);
+    } catch (e: any) { setErr(e?.message || "aggregate failed"); }
+    setAggBusy(false);
+  };
+
+  const runAnalysis = async () => {
+    setErr(""); setResult(null);
+    if (!description.trim()) { setErr("Description required"); return; }
+    setBusy(true);
+    try {
+      const doc = await api<any>("/llm/purchase-analysis", {
+        method: "POST",
+        body: {
+          description, make, model: modelStr, unit,
+          qty: parseFloat(qty) || 1,
+          context: ctx,
+          tier,
+          current_quote: rate ? {
+            vendor_name: vendorName, make, model: modelStr, unit,
+            qty: parseFloat(qty) || 1, rate: parseFloat(rate) || 0,
+            gst: parseFloat(gst) || 18, freight: parseFloat(freight) || 0,
+            payment_terms: paymentTerms,
+            delivery_days: deliveryDays ? parseInt(deliveryDays, 10) : undefined,
+            warranty,
+          } : undefined,
+        },
+      });
+      setResult(doc);
+    } catch (e: any) { setErr(e?.message || "Analysis failed"); }
+    setBusy(false);
+  };
+
+  const parsed = result?.output_parsed || {};
+  const computed = parsed._computed_by_server || {};
+  const routing = computed.routing || {};
+  const history = parsed.history || {};
+  const market = parsed.market_benchmark || {};
+  const variance = parsed.variance || {};
+  const decisionColor: any = {
+    issue_at_target: "#065F46", ok_current: "#065F46",
+    negotiate_more: "#B45309", reject_and_retender: "#B91C1C",
+  }[parsed.decision] || theme.colors.muted;
+
+  return (
+    <View>
+      <H2>Negotiate — AI Purchase Manager</H2>
+      <Muted>
+        Aggregates history from POs, invoices, GRNs, DCs, comparative statements, then benchmarks
+        against market indicators. Every field is tagged verified / estimated.
+      </Muted>
+
+      <Card style={{ marginTop: 12 }}>
+        <Label>Item description *</Label>
+        <TextInput style={styles.input} placeholder="e.g. Cat6 UTP cable 305m box"
+          value={description} onChangeText={setDescription} />
+        <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+          <View style={{ flex: 1 }}><Label>Make</Label>
+            <TextInput style={styles.input} placeholder="e.g. D-Link" value={make} onChangeText={setMake} /></View>
+          <View style={{ flex: 1 }}><Label>Model</Label>
+            <TextInput style={styles.input} placeholder="e.g. NCB-C6UGRYR-305" value={modelStr} onChangeText={setModelStr} /></View>
+        </View>
+        <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+          <View style={{ flex: 1 }}><Label>Unit</Label>
+            <TextInput style={styles.input} value={unit} onChangeText={setUnit} /></View>
+          <View style={{ flex: 1 }}><Label>Quantity</Label>
+            <TextInput style={styles.input} value={qty} onChangeText={setQty} keyboardType="decimal-pad" /></View>
+        </View>
+
+        {routePreview ? (
+          <View style={styles.routeBar}>
+            <Ionicons name="hardware-chip-outline" size={14} color="#3730A3" />
+            <Text style={styles.routeText}>
+              AI: <Text style={{ fontWeight: "700" }}>{routePreview.model_label}</Text>
+              {"  ·  "}reason: {routePreview.reason}
+              {routePreview.matched_keyword ? `  ·  keyword: ${routePreview.matched_keyword}` : ""}
+            </Text>
+          </View>
+        ) : null}
+      </Card>
+
+      <Card style={{ marginTop: 12 }}>
+        <Text style={styles.sectionTitle}>Current vendor quote (optional but recommended)</Text>
+        <Label>Vendor</Label>
+        <TextInput style={styles.input} value={vendorName} onChangeText={setVendorName} placeholder="e.g. SecureAlarm India" />
+        <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+          <View style={{ flex: 1 }}><Label>Rate ₹</Label>
+            <TextInput style={styles.input} value={rate} onChangeText={setRate} keyboardType="decimal-pad" /></View>
+          <View style={{ flex: 1 }}><Label>Freight ₹</Label>
+            <TextInput style={styles.input} value={freight} onChangeText={setFreight} keyboardType="decimal-pad" /></View>
+          <View style={{ flex: 1 }}><Label>GST %</Label>
+            <TextInput style={styles.input} value={gst} onChangeText={setGst} keyboardType="decimal-pad" /></View>
+        </View>
+        <View style={{ flexDirection: "row", gap: 8, marginTop: 8 }}>
+          <View style={{ flex: 1 }}><Label>Payment terms</Label>
+            <TextInput style={styles.input} value={paymentTerms} onChangeText={setPaymentTerms} placeholder="e.g. 30 days credit" /></View>
+          <View style={{ flex: 1 }}><Label>Delivery (days)</Label>
+            <TextInput style={styles.input} value={deliveryDays} onChangeText={setDeliveryDays} keyboardType="number-pad" /></View>
+          <View style={{ flex: 1 }}><Label>Warranty</Label>
+            <TextInput style={styles.input} value={warranty} onChangeText={setWarranty} placeholder="e.g. 3Y" /></View>
+        </View>
+        <Label style={{ marginTop: 8 }}>Context / notes</Label>
+        <TextInput style={[styles.input, { minHeight: 48 }]} value={ctx} onChangeText={setCtx} multiline
+          placeholder="e.g. Bangalore retrofit, urgent, alternative L1 available" />
+      </Card>
+
+      <Card style={{ marginTop: 12 }}>
+        <Label>LLM tier</Label>
+        <View style={{ flexDirection: "row", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+          {(["auto", "ultra_cheap", "cheap", "premium"] as const).map((t) => (
+            <TouchableOpacity key={t} onPress={() => setTier(t)}
+              style={[styles.tierChip, tier === t ? styles.tierChipActive : null]}>
+              <Text style={[styles.tierChipText, tier === t ? styles.tierChipTextActive : null]}>
+                {t === "auto" ? "Auto (recommended)" :
+                 t === "ultra_cheap" ? "GPT-4o-mini (₹1-2)" :
+                 t === "cheap" ? "Haiku 4.5 (₹4-8)" :
+                 "Sonnet 4.5 (₹20-40)"}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
+
+        <View style={{ flexDirection: "row", gap: 8, marginTop: 12 }}>
+          <Btn variant="secondary" onPress={runAggregates} disabled={aggBusy}>
+            {aggBusy ? "Loading…" : "Preview history (free)"}
+          </Btn>
+          <Btn onPress={runAnalysis} disabled={busy}>
+            {busy ? "Analysing…" : "Run analysis"}
+          </Btn>
+        </View>
+        {err ? <Text style={styles.err}>{err}</Text> : null}
+      </Card>
+
+      {aggregates ? (
+        <Card style={{ marginTop: 12 }}>
+          <Text style={styles.sectionTitle}>Verified history — data coverage</Text>
+          <View style={styles.covRow}>
+            <Kpi label="PO lines" value={aggregates.matched_po_lines} />
+            <Kpi label="Invoices" value={aggregates.matched_invoices} />
+            <Kpi label="GRNs" value={aggregates.matched_grns} />
+            <Kpi label="Vendors" value={aggregates.unique_vendors} />
+          </View>
+          {aggregates.stats_unit_landed_inr?.count ? (
+            <View style={{ marginTop: 10 }}>
+              <Muted>Landed cost / unit history (₹)</Muted>
+              <View style={styles.statRow}>
+                <StatCell label="Lowest" value={aggregates.stats_unit_landed_inr.lowest} />
+                <StatCell label="Median" value={aggregates.stats_unit_landed_inr.median} />
+                <StatCell label="Average" value={aggregates.stats_unit_landed_inr.average} />
+                <StatCell label="Highest" value={aggregates.stats_unit_landed_inr.highest} />
+              </View>
+              {aggregates.last_purchase ? (
+                <Muted>
+                  Last purchase: ₹{aggregates.last_purchase.rate} from{" "}
+                  {aggregates.last_purchase.vendor_name || aggregates.last_purchase.vendor_id}
+                  {aggregates.last_purchase.po_number ? ` · ${aggregates.last_purchase.po_number}` : ""}
+                </Muted>
+              ) : null}
+              {aggregates.recent_trend_pct !== null ? (
+                <Muted>90-day trend: {aggregates.recent_trend_pct > 0 ? "↑" : "↓"} {Math.abs(aggregates.recent_trend_pct)}%</Muted>
+              ) : null}
+            </View>
+          ) : <Muted>No verified historical rates for this description.</Muted>}
+        </Card>
+      ) : null}
+
+      {result ? (
+        <Card style={{ marginTop: 12 }}>
+          <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
+            <Text style={styles.sectionTitle}>Analysis</Text>
+            <Pill status={parsed.decision === "issue_at_target" || parsed.decision === "ok_current" ? "approved" :
+                          parsed.decision === "reject_and_retender" ? "rejected" : "pending"} />
+          </View>
+          <Muted>
+            Model: <Text style={{ fontWeight: "600" }}>{result.model}</Text> · tier: {result.tier} · routing: {routing.reason || "—"}
+            {routing.matched_keyword ? ` · kw: ${routing.matched_keyword}` : ""}
+          </Muted>
+
+          <View style={styles.summaryBox}>
+            <Text style={styles.summaryText}>{parsed.commercial_summary || "(no commercial summary)"}</Text>
+          </View>
+
+          <View style={styles.numberGrid}>
+            <NumCell label="Current landed / unit" value={computed.current_quote_landed_cost_per_unit} suffix="₹" />
+            <NumCell label="Target price" value={parsed.recommended_target_price_per_unit} suffix="₹" emphasis />
+            <NumCell label="Negotiate to" value={parsed.recommended_negotiated_price_per_unit} suffix="₹" emphasis />
+            <NumCell label="Saving %" value={parsed.expected_saving_pct} suffix="%" emphasis color="#065F46" />
+            <NumCell label="Total saving" value={parsed.expected_saving_total} suffix="₹" color="#065F46" />
+            <NumCell label="Confidence" value={parsed.confidence !== undefined ? parsed.confidence : null} />
+          </View>
+
+          <Text style={styles.pillGroupLabel}>Decision:</Text>
+          <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6 }}>
+            <Text style={[styles.decisionPill, { backgroundColor: decisionColor + "20", color: decisionColor }]}>
+              {parsed.decision?.replace(/_/g, " ") || "—"}
+            </Text>
+          </View>
+
+          {parsed.negotiation_tactics?.length ? (
+            <>
+              <Text style={styles.pillGroupLabel}>Negotiation tactics:</Text>
+              {parsed.negotiation_tactics.map((t: string, i: number) => (
+                <View key={i} style={styles.tacticRow}>
+                  <Text style={styles.tacticBullet}>▸</Text>
+                  <Text style={styles.tacticText}>{t}</Text>
+                </View>
+              ))}
+            </>
+          ) : null}
+
+          <Text style={styles.pillGroupLabel}>Historical & market context:</Text>
+          <View style={styles.tableGrid}>
+            <Row label="Last purchase" value={history.last_purchase_rate ? `₹${history.last_purchase_rate}` : "—"} sub={history.last_supplier || ""} />
+            <Row label="Historical low" value={history.historical_lowest_rate ? `₹${history.historical_lowest_rate}` : "—"} />
+            <Row label="Historical avg" value={history.historical_average_rate ? `₹${history.historical_average_rate}` : "—"} />
+            <Row label="Trend 90d" value={history.trend_last_90_days_pct !== null && history.trend_last_90_days_pct !== undefined ? `${history.trend_last_90_days_pct}%` : "—"} />
+            <Row label={`Market ref (${market.commodity_link || "n/a"})`}
+                 value={market.value_per_unit ? `₹${market.value_per_unit}` : "—"}
+                 sub={market.source_note || ""} estimated />
+            <Row label="vs Last" value={variance.current_vs_last_pct !== null && variance.current_vs_last_pct !== undefined ? `${variance.current_vs_last_pct}%` : "—"} />
+            <Row label="vs Market" value={variance.current_vs_market_pct !== null && variance.current_vs_market_pct !== undefined ? `${variance.current_vs_market_pct}%` : "—"} estimated />
+          </View>
+
+          {parsed.verified_fields?.length || parsed.estimated_fields?.length ? (
+            <View style={{ marginTop: 10 }}>
+              <Text style={styles.pillGroupLabel}>Data provenance:</Text>
+              {parsed.verified_fields?.length ? (
+                <Text style={styles.provenance}>
+                  <Text style={styles.badgeVerified}> ✓ VERIFIED </Text> {parsed.verified_fields.join(", ")}
+                </Text>
+              ) : null}
+              {parsed.estimated_fields?.length ? (
+                <Text style={styles.provenance}>
+                  <Text style={styles.badgeEstimated}> ~ ESTIMATED </Text> {parsed.estimated_fields.join(", ")}
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+
+          {parsed.vendor_red_flags?.length ? (
+            <View style={{ marginTop: 10 }}>
+              <Text style={[styles.pillGroupLabel, { color: "#B91C1C" }]}>Vendor red flags:</Text>
+              {parsed.vendor_red_flags.map((f: string, i: number) => (
+                <Text key={i} style={styles.flagText}>⚠ {f}</Text>
+              ))}
+            </View>
+          ) : null}
+
+          {parsed.assumptions?.length ? (
+            <>
+              <Text style={styles.pillGroupLabel}>Assumptions / gaps:</Text>
+              {parsed.assumptions.map((a: string, i: number) => (
+                <Muted key={i}>• {a}</Muted>
+              ))}
+            </>
+          ) : null}
+
+          <Muted style={{ marginTop: 10, fontSize: 11 }}>
+            Suggestion ID: {result.suggestion_id} · saved in AI (pending human review)
+          </Muted>
+        </Card>
+      ) : null}
+    </View>
+  );
+}
+
+// --- Small helper components used by NegotiatePanel ---
+function Kpi({ label, value }: { label: string; value: any }) {
+  return (
+    <View style={styles.kpiCell}>
+      <Text style={styles.kpiValue}>{value ?? 0}</Text>
+      <Text style={styles.kpiLabel}>{label}</Text>
+    </View>
+  );
+}
+function StatCell({ label, value }: { label: string; value: any }) {
+  return (
+    <View style={styles.statCell}>
+      <Text style={styles.statLabel}>{label}</Text>
+      <Text style={styles.statValue}>{value !== null && value !== undefined ? `₹${value}` : "—"}</Text>
+    </View>
+  );
+}
+function NumCell({ label, value, suffix, emphasis, color }: any) {
+  const display = value !== null && value !== undefined && value !== ""
+    ? (suffix === "%" ? `${value}${suffix}` : `${suffix || ""}${value}`)
+    : "—";
+  return (
+    <View style={[styles.numCell, emphasis ? styles.numCellEmph : null]}>
+      <Text style={[styles.numValue, color ? { color } : null]}>{display}</Text>
+      <Text style={styles.numLabel}>{label}</Text>
+    </View>
+  );
+}
+function Row({ label, value, sub, estimated }: { label: string; value: string; sub?: string; estimated?: boolean }) {
+  return (
+    <View style={styles.tableRow}>
+      <Text style={styles.tableLabel}>
+        {label}
+        {estimated ? <Text style={styles.badgeEstimatedInline}> ~est</Text> : null}
+      </Text>
+      <View style={{ flex: 1, alignItems: "flex-end" }}>
+        <Text style={styles.tableValue}>{value}</Text>
+        {sub ? <Text style={styles.tableSub} numberOfLines={2}>{sub}</Text> : null}
+      </View>
+    </View>
+  );
+}
+
+
 // ---------- Review pending suggestions ----------
 
 function ReviewPanel() {
@@ -536,4 +894,56 @@ const styles = StyleSheet.create({
   subTabActive: { backgroundColor: theme.colors.action, borderColor: theme.colors.action },
   subTabText: { fontSize: 11, fontWeight: "700", color: theme.colors.text },
   subTabTextActive: { color: "#fff" },
+  // ---- Negotiate panel styles ----
+  sectionTitle: { fontSize: 14, fontWeight: "700", color: theme.colors.text, marginBottom: 6 },
+  routeBar: {
+    flexDirection: "row", alignItems: "center", gap: 6, marginTop: 10,
+    backgroundColor: "#EEF2FF", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 6,
+  },
+  routeText: { fontSize: 11, color: "#3730A3", flex: 1 },
+  tierChip: {
+    paddingHorizontal: 10, paddingVertical: 6, borderRadius: 999,
+    borderWidth: 1, borderColor: theme.colors.border, backgroundColor: "#fff",
+  },
+  tierChipActive: { backgroundColor: theme.colors.action, borderColor: theme.colors.action },
+  tierChipText: { fontSize: 11, fontWeight: "700", color: theme.colors.text },
+  tierChipTextActive: { color: "#fff" },
+  covRow: { flexDirection: "row", gap: 8, marginTop: 4 },
+  kpiCell: {
+    flex: 1, backgroundColor: "#F7F8FC", borderRadius: 6, padding: 8, alignItems: "center",
+  },
+  kpiValue: { fontSize: 16, fontWeight: "800", color: theme.colors.text },
+  kpiLabel: { fontSize: 10, color: theme.colors.textMuted },
+  statRow: { flexDirection: "row", gap: 8, marginTop: 6, marginBottom: 6 },
+  statCell: { flex: 1, backgroundColor: "#F7F8FC", borderRadius: 6, padding: 6, alignItems: "center" },
+  statLabel: { fontSize: 10, color: theme.colors.textMuted },
+  statValue: { fontSize: 13, fontWeight: "700", color: theme.colors.text },
+  summaryBox: {
+    backgroundColor: "#F7F8FC", padding: 10, borderRadius: 6, marginVertical: 10,
+    borderLeftWidth: 3, borderLeftColor: theme.colors.action,
+  },
+  summaryText: { fontSize: 12, color: theme.colors.text, lineHeight: 17 },
+  numberGrid: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginTop: 6 },
+  numCell: {
+    minWidth: "31%", flexGrow: 1, borderWidth: 1, borderColor: theme.colors.border,
+    borderRadius: 6, padding: 8, backgroundColor: "#fff",
+  },
+  numCellEmph: { borderColor: theme.colors.action, backgroundColor: "#EEF2FF" },
+  numValue: { fontSize: 15, fontWeight: "800", color: theme.colors.text },
+  numLabel: { fontSize: 10, color: theme.colors.textMuted, marginTop: 2 },
+  pillGroupLabel: { fontSize: 11, fontWeight: "700", color: theme.colors.text, marginTop: 12, marginBottom: 4, textTransform: "uppercase", letterSpacing: 0.4 },
+  decisionPill: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, fontSize: 12, fontWeight: "800", textTransform: "uppercase" },
+  tacticRow: { flexDirection: "row", gap: 6, marginTop: 4 },
+  tacticBullet: { color: theme.colors.action, fontWeight: "800" },
+  tacticText: { flex: 1, fontSize: 12, color: theme.colors.text, lineHeight: 17 },
+  tableGrid: { marginTop: 6, borderWidth: 1, borderColor: theme.colors.border, borderRadius: 6, overflow: "hidden" },
+  tableRow: { flexDirection: "row", paddingVertical: 6, paddingHorizontal: 8, borderBottomWidth: 1, borderBottomColor: theme.colors.border },
+  tableLabel: { flex: 1, fontSize: 12, color: theme.colors.textMuted },
+  tableValue: { fontSize: 12, fontWeight: "700", color: theme.colors.text, textAlign: "right" },
+  tableSub: { fontSize: 10, color: theme.colors.textMuted, textAlign: "right" },
+  badgeVerified: { backgroundColor: "#D1FAE5", color: "#065F46", fontSize: 9, fontWeight: "800", paddingHorizontal: 4, paddingVertical: 1, borderRadius: 3 },
+  badgeEstimated: { backgroundColor: "#FEF3C7", color: "#B45309", fontSize: 9, fontWeight: "800", paddingHorizontal: 4, paddingVertical: 1, borderRadius: 3 },
+  badgeEstimatedInline: { backgroundColor: "#FEF3C7", color: "#B45309", fontSize: 9, fontWeight: "700", paddingHorizontal: 3, borderRadius: 2 },
+  provenance: { fontSize: 11, color: theme.colors.text, marginTop: 4, lineHeight: 16 },
+  flagText: { fontSize: 12, color: "#B91C1C", marginTop: 2 },
 });
