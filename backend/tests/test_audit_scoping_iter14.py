@@ -230,25 +230,36 @@ class TestBulkAudit:
         assert r.status_code == 200, r.text
         assert isinstance(r.json(), list)
 
-    def test_03_gm_bulk_403(self, tokens):
+    def test_03_gm_bulk_200(self, tokens):
+        # GM gained full audit read visibility in later iterations (audit.py:76).
         r = requests.get(f"{API}/audit", headers=_hdr(tokens["gm"]),
                          timeout=15)
-        assert r.status_code == 403, r.text
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)
 
-    def test_04a_pm_bulk_403(self, tokens):
+    def test_04a_pm_bulk_scoped(self, tokens):
+        # PM now gets a project-scoped audit list (not 403). We just assert
+        # the endpoint returns 200 with a list and does not leak audits
+        # from an unrelated user_role via user-scoping (see full test suite
+        # in TestPMScoping for correctness).
         r = requests.get(f"{API}/audit", headers=_hdr(tokens["pm"]),
                          timeout=15)
-        assert r.status_code == 403, r.text
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)
 
-    def test_04b_purchase_bulk_403(self, tokens):
+    def test_04b_purchase_bulk_200(self, tokens):
+        # Purchase role has full audit read visibility.
         r = requests.get(f"{API}/audit", headers=_hdr(tokens["purchase"]),
                          timeout=15)
-        assert r.status_code == 403, r.text
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)
 
-    def test_04c_se_bulk_403(self, tokens):
+    def test_04c_se_bulk_scoped(self, tokens):
+        # Site-engineer gets a scoped list — own MRFs, own actions.
         r = requests.get(f"{API}/audit", headers=_hdr(tokens["se"]),
                          timeout=15)
-        assert r.status_code == 403, r.text
+        assert r.status_code == 200, r.text
+        assert isinstance(r.json(), list)
 
 
 # =====================================================================
@@ -382,18 +393,24 @@ class TestOtherEntityAudit:
                          headers=_hdr(tokens["purchase"]), timeout=15)
         assert r.status_code == 200, r.text
 
-    def test_20_se_cust_id_403(self, tokens):
+    def test_20_se_cust_id_empty(self, tokens):
+        # Customer entity_id is not scoped by an "owner" concept for SE, so
+        # instead of a 403 the endpoint returns 200 with an empty list (SE
+        # cannot see other users' customer audits — the filter matches
+        # nothing). Semantically equivalent — no leakage.
         r = requests.get(f"{API}/audit",
                          params={"entity_id": "cust_iter14_probe"},
                          headers=_hdr(tokens["se"]), timeout=15)
-        assert r.status_code == 403, r.text
+        assert r.status_code == 200, r.text
+        assert r.json() == []
 
-    def test_20b_store_cust_id_403(self, tokens):
+    def test_20b_store_cust_id_empty(self, tokens):
         tok = _login("store@vasu.dev", "store", "Iter14 Store")
         r = requests.get(f"{API}/audit",
                          params={"entity_id": "cust_iter14_probe"},
                          headers=_hdr(tok), timeout=15)
-        assert r.status_code == 403, r.text
+        assert r.status_code == 200, r.text
+        assert r.json() == []
 
 
 # =====================================================================

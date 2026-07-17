@@ -243,11 +243,18 @@ class TestTallyExport:
         assert r.status_code == 200
         wb = openpyxl.load_workbook(io.BytesIO(r.content))
         ws = wb.active
+        # Header spec expanded in later iterations to satisfy Tally GST filings:
+        # company GSTIN block, customer GSTIN, project code, master IDs
+        # (MAT UID / VAR UID), and make/model.
         expected = [
             "Voucher Date", "Voucher Type", "Voucher No", "Reference No", "Reference Date",
+            "Company GSTIN", "Company State", "Company State Code",
             "Party Ledger", "Party GSTIN", "Party State",
-            "Customer ID", "Customer Name",
-            "Item Name", "HSN/SAC", "Unit", "Quantity", "Rate", "Discount",
+            "Customer ID", "Customer Name", "Customer GSTIN",
+            "Project Code",
+            "MAT UID", "VAR UID",
+            "Item Name", "Make", "Model",
+            "HSN/SAC", "Unit", "Quantity", "Rate", "Discount",
             "Taxable Value", "GST Rate %", "CGST", "SGST", "IGST",
             "Line Total", "Narration",
         ]
