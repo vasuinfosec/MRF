@@ -484,7 +484,7 @@ async def llm_item_standardise(body: ItemStandardiseIn,
     return doc
 
 
-# ---- 2) Quotation Comparison (Sonnet / premium) -----------------------------
+# ---- 2) Quotation Comparison (deterministic OR gpt-4o-mini — Sonnet retired) -
 
 class QuotationCompareIn(BaseModel):
     mrf_id: Optional[str] = ""
@@ -492,6 +492,127 @@ class QuotationCompareIn(BaseModel):
     context: Optional[str] = ""
     quotes: Optional[List[Dict[str, Any]]] = None  # [{vendor_name, currency, items:[...]}]
     attachments: Optional[List[LlmAttachment]] = None  # PDF/Excel/CSV vendor quotes to auto-parse
+    # Cost tiers — as of iter-28 the premium (Sonnet 4.5) tier is retired for
+    # Compare. Choose between:
+    #   deterministic → LLM-free math ranking (₹0). Uses the structured quotes
+    #                   payload directly (skips file text extraction).
+    #   cheap         → gpt-4o-mini (default; ~₹0.05–₹0.20/call).
+    tier: Optional[str] = "cheap"
+
+
+def _deterministic_compare(quotes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Rank vendors by line-item totals. LLM-free.
+
+    Each quote is `{vendor_name, items:[{description, qty, rate, gst?, discount?}]}`.
+    We compute per-vendor totals, delta% vs L1, per-item delta, and flag
+    numeric anomalies (missing rate, huge deviation from mean).
+    """
+    ranking: List[Dict[str, Any]] = []
+    for q in quotes:
+        items = q.get("items") or []
+        total_taxable = 0.0
+        total_with_tax = 0.0
+        for it in items:
+            qty = float(it.get("qty") or 0)
+            rate = float(it.get("rate") or 0)
+            disc = float(it.get("discount") or 0)
+            gst = float(it.get("gst") or 0)
+            taxable = max(0.0, qty * rate - disc)
+            with_tax = taxable * (1 + gst / 100.0)
+            total_taxable += taxable
+            total_with_tax += with_tax
+        ranking.append({
+            "vendor_name": q.get("vendor_name") or "(unnamed)",
+            "total_taxable": round(total_taxable, 2),
+            "total_with_tax": round(total_with_tax, 2),
+        })
+    ranking.sort(key=lambda r: r["total_with_tax"] if r["total_with_tax"] > 0 else 9e18)
+    l1 = ranking[0]["total_with_tax"] if ranking and ranking[0]["total_with_tax"] > 0 else 0
+    for i, r in enumerate(ranking):
+        r["rank"] = i + 1
+        r["delta_pct_vs_L1"] = round((r["total_with_tax"] - l1) / l1 * 100.0, 2) if l1 else None
+
+    # ---- Per-line comparison ----
+    all_descriptions: Dict[str, Dict[str, Any]] = {}
+    for q in quotes:
+        vendor = q.get("vendor_name") or "(unnamed)"
+        for it in (q.get("items") or []):
+            desc = (it.get("description") or "").strip()
+            if not desc:
+                continue
+            row = all_descriptions.setdefault(desc, {"description": desc, "vendors": {}})
+            row["vendors"][vendor] = {
+                "rate": float(it.get("rate") or 0),
+                "qty": float(it.get("qty") or 0),
+                "gst": float(it.get("gst") or 0),
+            }
+
+    line_comparison: List[Dict[str, Any]] = []
+    for desc, row in all_descriptions.items():
+        rates = [v["rate"] for v in row["vendors"].values() if v["rate"] > 0]
+        min_rate = min(rates) if rates else 0
+        l1_vendor = next((v for v, d in row["vendors"].items() if d["rate"] == min_rate), None) if rates else None
+        vendors_out = []
+        for vname, d in row["vendors"].items():
+            delta = round((d["rate"] - min_rate) / min_rate * 100.0, 2) if min_rate else None
+            vendors_out.append({"vendor_name": vname, "rate": d["rate"],
+                                  "qty": d["qty"], "gst": d["gst"],
+                                  "delta_pct": delta})
+        line_comparison.append({
+            "description": desc,
+            "l1_vendor": l1_vendor, "l1_rate": min_rate,
+            "vendors": vendors_out,
+            "notes": ("" if l1_vendor else "no valid rate provided"),
+        })
+
+    # ---- Anomalies: rate outliers (>50% above per-line mean) ----
+    anomalies: List[Dict[str, Any]] = []
+    for row in line_comparison:
+        rates = [v["rate"] for v in row["vendors"] if v.get("rate", 0) > 0]
+        if len(rates) < 2:
+            continue
+        mean = sum(rates) / len(rates)
+        for v in row["vendors"]:
+            r = v.get("rate", 0)
+            if r > mean * 1.5 and mean > 0:
+                anomalies.append({
+                    "severity": "warning", "vendor_name": v["vendor_name"],
+                    "description": row["description"],
+                    "reason": f"Rate ₹{r} is {round((r - mean) / mean * 100)}% above the average ₹{round(mean, 2)} for this item.",
+                })
+    # Vendors missing lines that others quoted
+    all_vendors = {q.get("vendor_name") or "(unnamed)" for q in quotes}
+    for row in line_comparison:
+        provided = {v["vendor_name"] for v in row["vendors"]}
+        missing = all_vendors - provided
+        for m in missing:
+            anomalies.append({
+                "severity": "info", "vendor_name": m,
+                "description": row["description"],
+                "reason": "Vendor did not quote this line.",
+            })
+
+    if ranking and len(ranking) > 1:
+        l1_total = ranking[0]["total_with_tax"]
+        l2_total = ranking[1]["total_with_tax"]
+        cheaper_by = round((l2_total - l1_total) / l2_total * 100.0, 2) if l2_total else 0
+        recommendation = (
+            f"Award to {ranking[0]['vendor_name']} at ₹{l1_total:,.2f} — "
+            f"{cheaper_by}% cheaper than the next bidder ({ranking[1]['vendor_name']} @ ₹{l2_total:,.2f})."
+        )
+    elif ranking:
+        recommendation = "Only 1 valid quote — negotiate before award."
+    else:
+        recommendation = "No valid quotes."
+
+    return {
+        "ranking": ranking,
+        "line_comparison": line_comparison,
+        "anomalies": anomalies,
+        "summary": f"Deterministic comparison across {len(quotes)} vendors, {len(line_comparison)} line(s).",
+        "recommendation": recommendation,
+        "_engine": "deterministic",
+    }
 
 
 @api.post("/llm/quotation-compare")
@@ -503,9 +624,13 @@ async def llm_quotation_compare(body: QuotationCompareIn,
     if u.role not in LLM_ROLES_COMPARE:
         raise HTTPException(403, "Not allowed")
     quotes = body.quotes or []
+    tier = (body.tier or "cheap").lower()
+    # Sonnet 4.5 is disallowed here as of iter-28 — silently downshift.
+    if tier == "premium":
+        tier = "cheap"
     attach_summary: List[dict] = []
     attach_chunks: List[str] = []
-    if body.attachments:
+    if body.attachments and tier != "deterministic":
         # Enforce hard cap BEFORE any expensive processing.
         if len(body.attachments) > 8:
             raise HTTPException(400, "Max 8 vendor quote attachments per comparison")
@@ -514,7 +639,32 @@ async def llm_quotation_compare(body: QuotationCompareIn,
             attach_summary.append({"file_name": att.file_name, "kind": kind, "chars": len(text)})
             if text:
                 attach_chunks.append(f"--- Quotation file: {att.file_name} ({kind}) ---\n{text}")
-    # Require either ≥2 structured quotes OR ≥2 attachments
+    # Deterministic path only needs structured quotes (no file OCR/LLM).
+    if tier == "deterministic":
+        if len(quotes) < 2:
+            raise HTTPException(400, "Deterministic mode needs at least 2 structured quotes")
+        parsed = _deterministic_compare(quotes)
+        cost0 = {"model": "deterministic", "input_tokens_approx": 0,
+                  "output_tokens_approx": 0, "input_rate_usd_per_m": 0,
+                  "output_rate_usd_per_m": 0, "cost_usd": 0.0, "cost_inr": 0.0,
+                  "cache_saved": False}
+        doc = await _save_suggestion(
+            "quotation_compare",
+            entity=("po" if body.po_id else "mrf"),
+            entity_id=body.po_id or body.mrf_id or "",
+            user=u,
+            input_payload={"quote_count": len(quotes), "attachment_count": 0,
+                            "attachments": [], "tier": "deterministic"},
+            parsed=parsed, raw="",
+            tier="deterministic", model="deterministic",
+            extras={"tier": "deterministic", "model": "deterministic",
+                    "cost": cost0, "hash": "det",
+                    "tier_meta": {"requested_tier": "deterministic",
+                                   "effective_tier": "deterministic",
+                                   "downgraded": False}},
+        )
+        return doc
+    # LLM path: require ≥2 structured quotes OR ≥2 attachments
     if len(quotes) + len(attach_chunks) < 2:
         raise HTTPException(400, "Provide at least 2 vendor quotes (structured or file attachments)")
     if len(quotes) > 6:
@@ -542,7 +692,7 @@ async def llm_quotation_compare(body: QuotationCompareIn,
     })
     if attach_chunks:
         prompt += "\n\nAttached quotation documents:\n" + "\n\n".join(attach_chunks)
-    raw, extras = await _call_llm("premium", system, prompt, u,
+    raw, extras = await _call_llm(tier, system, prompt, u,
                                    kind="quotation_compare",
                                    entity=("po" if body.po_id else "mrf"),
                                    entity_id=(body.po_id or body.mrf_id or ""),
@@ -557,18 +707,124 @@ async def llm_quotation_compare(body: QuotationCompareIn,
         entity_id=body.po_id or body.mrf_id or "",
         user=u,
         input_payload={"quote_count": len(quotes), "attachment_count": len(attach_chunks),
-                       "attachments": attach_summary},
+                       "attachments": attach_summary, "tier": tier},
         parsed=parsed, raw=raw,
-        tier="premium", model=extras["model"], extras=extras,
+        tier=tier, model=extras["model"], extras=extras,
     )
     return doc
 
 
-# ---- 3) PO-GRN-Invoice Mismatch Detection (Sonnet / premium) ----------------
+# ---- 3) PO-GRN-Invoice Mismatch Detection (deterministic OR gpt-4o-mini) ----
 
 class ReconcileIn(BaseModel):
     po_id: str
     attachments: Optional[List[LlmAttachment]] = None  # e.g. vendor invoice PDFs
+    # Iter-28: Sonnet retired. Choose deterministic (pure arithmetic diff) or
+    # cheap (gpt-4o-mini narrative).
+    tier: Optional[str] = "cheap"
+
+
+def _deterministic_reconcile(po: dict, grns: List[dict], invs: List[dict]) -> Dict[str, Any]:
+    """Pure-arithmetic 3-way match. Compares PO qty/rate against summed GRN qty
+    and summed invoice qty/rate — no LLM."""
+    def _canon(s):
+        return (s or "").strip().lower()
+
+    # Aggregate GRN qty by description
+    grn_qty_by_desc: Dict[str, float] = {}
+    for g in grns:
+        for it in (g.get("items") or []):
+            grn_qty_by_desc[_canon(it.get("description"))] = grn_qty_by_desc.get(
+                _canon(it.get("description")), 0.0) + float(it.get("qty") or 0)
+
+    # Aggregate invoice qty/rate by description
+    inv_by_desc: Dict[str, Dict[str, float]] = {}
+    for i in invs:
+        for it in (i.get("items") or []):
+            d = _canon(it.get("description"))
+            row = inv_by_desc.setdefault(d, {"qty": 0.0, "rate": 0.0, "gst": 0.0, "n": 0})
+            row["qty"] += float(it.get("qty") or 0)
+            row["rate"] += float(it.get("rate") or 0)
+            row["gst"] += float(it.get("gst") or 0)
+            row["n"] += 1
+
+    per_line: List[Dict[str, Any]] = []
+    exceptions: List[Dict[str, Any]] = []
+    po_total = 0.0
+    grn_total_est = 0.0
+    inv_total_est = 0.0
+    for idx, it in enumerate(po.get("items") or []):
+        desc = it.get("description") or ""
+        d = _canon(desc)
+        po_qty = float(it.get("qty") or 0)
+        po_rate = float(it.get("rate") or 0)
+        po_gst = float(it.get("gst") or 0)
+        po_line_total = po_qty * po_rate * (1 + po_gst / 100.0)
+        po_total += po_line_total
+
+        grn_qty = grn_qty_by_desc.get(d, 0.0)
+        grn_total_est += grn_qty * po_rate * (1 + po_gst / 100.0)
+
+        inv_row = inv_by_desc.get(d)
+        inv_qty = inv_row["qty"] if inv_row else 0.0
+        inv_rate = (inv_row["rate"] / max(1, inv_row["n"])) if inv_row else 0.0
+        inv_gst = (inv_row["gst"] / max(1, inv_row["n"])) if inv_row else 0.0
+        inv_line_total = inv_qty * inv_rate * (1 + inv_gst / 100.0)
+        inv_total_est += inv_line_total
+
+        # Compute variances
+        qty_variance = round(inv_qty - po_qty, 3) if inv_qty else round(grn_qty - po_qty, 3)
+        rate_variance_pct = round((inv_rate - po_rate) / po_rate * 100.0, 2) if (po_rate and inv_rate) else None
+
+        status = "match"
+        if not inv_row and not grn_qty:
+            status = "not_invoiced"
+        elif inv_qty > po_qty * 1.001:
+            status = "over_delivered"
+        elif inv_qty and inv_qty < po_qty * 0.999:
+            status = "under_delivered"
+        elif rate_variance_pct is not None and abs(rate_variance_pct) > 0.5:
+            status = "rate_mismatch"
+        elif inv_gst and abs(inv_gst - po_gst) > 0.01:
+            status = "gst_mismatch"
+
+        per_line.append({
+            "line": idx + 1, "description": desc,
+            "po_qty": po_qty, "grn_qty": grn_qty, "invoice_qty": inv_qty,
+            "po_rate": po_rate, "invoice_rate": inv_rate,
+            "qty_variance": qty_variance,
+            "rate_variance_pct": rate_variance_pct,
+            "status": status,
+        })
+        if status == "rate_mismatch":
+            exceptions.append({"severity": "critical", "reason": f"Line {idx + 1} '{desc}': invoice rate ₹{inv_rate} vs PO rate ₹{po_rate} ({rate_variance_pct}% deviation)."})
+        elif status == "over_delivered":
+            exceptions.append({"severity": "warning", "reason": f"Line {idx + 1} '{desc}': over-delivered by {round(inv_qty - po_qty, 3)} {it.get('unit') or ''}."})
+        elif status == "under_delivered":
+            exceptions.append({"severity": "warning", "reason": f"Line {idx + 1} '{desc}': under-delivered by {round(po_qty - inv_qty, 3)} {it.get('unit') or ''}."})
+        elif status == "not_invoiced" and po_qty > 0:
+            exceptions.append({"severity": "info", "reason": f"Line {idx + 1} '{desc}': not received, not invoiced yet."})
+        elif status == "gst_mismatch":
+            exceptions.append({"severity": "critical", "reason": f"Line {idx + 1} '{desc}': GST% mismatch (PO {po_gst}% vs invoice {inv_gst}%)."})
+
+    inv_total_actual = sum(float(i.get("total") or 0) for i in invs) or inv_total_est
+    delta = round(inv_total_actual - po_total, 2)
+    summary_bits = [f"{sum(1 for r in per_line if r['status'] == 'match')} of {len(per_line)} lines matched cleanly."]
+    if exceptions:
+        summary_bits.append(f"{len(exceptions)} exception(s) — see details.")
+    return {
+        "po_number": po.get("po_number"),
+        "per_line": per_line,
+        "aggregate": {
+            "po_total": round(po_total, 2),
+            "grn_total_est": round(grn_total_est, 2),
+            "invoice_total": round(inv_total_actual, 2),
+            "delta": delta,
+        },
+        "exceptions": exceptions,
+        "summary": " ".join(summary_bits),
+        "_engine": "deterministic",
+    }
 
 
 @api.post("/llm/reconcile")
@@ -586,7 +842,34 @@ async def llm_reconcile(body: ReconcileIn,
     await _check_po_access(u, po)
     grns = await db.grns.find({"po_id": body.po_id}, {"_id": 0}).to_list(100)
     invs = await db.invoices.find({"po_id": body.po_id}, {"_id": 0}).to_list(100)
-    # Minimise payload so we don't burn premium tokens
+
+    tier = (body.tier or "cheap").lower()
+    if tier == "premium":
+        tier = "cheap"  # Sonnet retired for Reconcile in iter-28
+
+    # ─── Deterministic (LLM-free) path ────────────────────────────
+    if tier == "deterministic":
+        parsed = _deterministic_reconcile(po, grns, invs)
+        cost0 = {"model": "deterministic", "input_tokens_approx": 0,
+                  "output_tokens_approx": 0, "input_rate_usd_per_m": 0,
+                  "output_rate_usd_per_m": 0, "cost_usd": 0.0, "cost_inr": 0.0,
+                  "cache_saved": False}
+        doc = await _save_suggestion(
+            "reconcile", "po", body.po_id, u,
+            input_payload={"po_number": po.get("po_number"),
+                            "grn_count": len(grns), "invoice_count": len(invs),
+                            "attachments": [], "tier": "deterministic"},
+            parsed=parsed, raw="",
+            tier="deterministic", model="deterministic",
+            extras={"tier": "deterministic", "model": "deterministic",
+                    "cost": cost0, "hash": "det",
+                    "tier_meta": {"requested_tier": "deterministic",
+                                   "effective_tier": "deterministic",
+                                   "downgraded": False}},
+        )
+        return doc
+
+    # Minimise payload so we don't burn cheap tokens either
     po_slim = {
         "po_number": po.get("po_number"),
         "vendor_name": (po.get("vendor_name") or ""),
@@ -647,7 +930,7 @@ async def llm_reconcile(body: ReconcileIn,
                 chunks.append(f"--- Vendor invoice: {att.file_name} ({kind}) ---\n{text}")
         if chunks:
             prompt += "\n\nAttached vendor invoices:\n" + "\n\n".join(chunks)
-    raw, extras = await _call_llm("premium", system, prompt, u,
+    raw, extras = await _call_llm(tier, system, prompt, u,
                                    kind="reconcile",
                                    entity="po", entity_id=body.po_id,
                                    input_payload={"po_number": po.get("po_number"),
@@ -660,9 +943,9 @@ async def llm_reconcile(body: ReconcileIn,
         "reconcile", "po", body.po_id, u,
         input_payload={"po_number": po.get("po_number"),
                        "grn_count": len(grns), "invoice_count": len(invs),
-                       "attachments": attach_summary},
+                       "attachments": attach_summary, "tier": tier},
         parsed=parsed, raw=raw,
-        tier="premium", model=extras["model"], extras=extras,
+        tier=tier, model=extras["model"], extras=extras,
     )
     return doc
 

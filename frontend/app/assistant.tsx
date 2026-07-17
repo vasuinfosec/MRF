@@ -65,8 +65,8 @@ export default function AssistantScreen() {
         {(
           [
             { k: "standardise", label: "Standardise", icon: "sparkles-outline" as const, tier: "gpt-4o-mini" },
-            { k: "compare", label: "Compare Quotes", icon: "swap-vertical-outline" as const, tier: "Sonnet" },
-            { k: "reconcile", label: "3-Way Match", icon: "git-compare-outline" as const, tier: "Sonnet" },
+            { k: "compare", label: "Compare Quotes", icon: "swap-vertical-outline" as const, tier: "Free / gpt-4o-mini" },
+            { k: "reconcile", label: "3-Way Match", icon: "git-compare-outline" as const, tier: "Free / gpt-4o-mini" },
             { k: "negotiate", label: "Negotiate", icon: "cash-outline" as const, tier: "Auto" },
             { k: "review", label: "Review", icon: "list-outline" as const, tier: "" },
           ] as { k: Tab; label: string; icon: any; tier: string }[]
@@ -95,7 +95,57 @@ export default function AssistantScreen() {
   );
 }
 
-// ---------- Standardise (Haiku) ----------
+function ModelChip({ doc }: { doc: any }) {
+  const model = doc?.model || "—";
+  const tier = doc?.tier || "";
+  const det = tier === "deterministic";
+  return (
+    <View style={[styles.modelChip, det ? styles.modelChipDet : null]}>
+      <Ionicons
+        name={det ? "calculator-outline" : "hardware-chip-outline"}
+        size={12}
+        color={det ? "#065F46" : "#3730A3"}
+      />
+      <Text style={[styles.modelChipText, det ? { color: "#065F46" } : null]}>
+        {det ? "Deterministic · ₹0" : `${model}`}
+      </Text>
+    </View>
+  );
+}
+
+function TierPicker({
+  value, onChange, testIDPrefix,
+}: {
+  value: "deterministic" | "cheap";
+  onChange: (t: "deterministic" | "cheap") => void;
+  testIDPrefix: string;
+}) {
+  return (
+    <View style={{ marginTop: 8 }}>
+      <Label>Engine</Label>
+      <View style={{ flexDirection: "row", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+        {([
+          { k: "deterministic", label: "Deterministic (Free, ₹0)" },
+          { k: "cheap", label: "GPT-4o-mini (₹0.05–₹0.20)" },
+        ] as const).map((t) => (
+          <TouchableOpacity
+            key={t.k}
+            onPress={() => onChange(t.k)}
+            style={[styles.tierChip, value === t.k ? styles.tierChipActive : null]}
+            testID={`${testIDPrefix}-tier-${t.k}`}
+          >
+            <Text style={[
+              styles.tierChipText,
+              value === t.k ? styles.tierChipTextActive : null,
+            ]}>{t.label}</Text>
+          </TouchableOpacity>
+        ))}
+      </View>
+    </View>
+  );
+}
+
+// ---------- Standardise (gpt-4o-mini) ----------
 
 function StandardisePanel() {
   const [description, setDescription] = useState("");
@@ -130,7 +180,7 @@ function StandardisePanel() {
   return (
     <View>
       <H2>Standardise Item</H2>
-      <Muted>Match free-text descriptions to MAT-#### / VAR-#### UIDs from the approved master. Optionally attach a BOQ PDF/Excel. Uses Claude Haiku 4.5 (cheap tier).</Muted>
+      <Muted>Match free-text descriptions to MAT-#### / VAR-#### UIDs from the approved master. Optionally attach a BOQ PDF/Excel. Uses GPT-4o-mini (cheap tier, ~₹0.05–₹0.20/call).</Muted>
       <Card style={{ marginTop: 10 }}>
         <Label>Description *</Label>
         <TextInput value={description} onChangeText={setDescription} placeholder='e.g. "CAT6 UTP cable 305m box"' style={styles.input} testID="std-desc" />
@@ -163,7 +213,10 @@ function StdResult({ doc, onDone }: { doc: any; onDone: () => void }) {
     <Card style={{ marginTop: 14, backgroundColor: "#EEF2FF" }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
         <Text style={{ fontWeight: "800" }}>Top matches</Text>
-        <Pill status="pending_approval" />
+        <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+          <ModelChip doc={doc} />
+          <Pill status="pending_approval" />
+        </View>
       </View>
       {suggestions.length ? suggestions.map((s: any, i: number) => (
         <View key={i} style={styles.stdRow}>
@@ -188,6 +241,7 @@ function StdResult({ doc, onDone }: { doc: any; onDone: () => void }) {
 function ComparePanel() {
   const [ctx, setCtx] = useState("");
   const [linkedId, setLinkedId] = useState("");
+  const [tier, setTier] = useState<"deterministic" | "cheap">("cheap");
   const [quotes, setQuotes] = useState<any[]>([
     { vendor_name: "", items: [{ description: "", qty: 1, unit: "nos", rate: 0, gst: 18 }] },
     { vendor_name: "", items: [{ description: "", qty: 1, unit: "nos", rate: 0, gst: 18 }] },
@@ -205,22 +259,30 @@ function ComparePanel() {
 
   const run = async () => {
     setErr("");
-    // With attachments, we can rely on LLM to parse; otherwise need ≥2 named vendors
     const namedQuotes = quotes.filter((q) => q.vendor_name.trim());
-    if (namedQuotes.length + attachments.length < 2) {
-      setErr("Provide at least 2 vendor quotes (either structured or attach vendor quotation files).");
-      return;
+    if (tier === "deterministic") {
+      if (namedQuotes.length < 2) {
+        setErr("Deterministic mode needs at least 2 named vendors with structured line items (attachments not used).");
+        return;
+      }
+    } else {
+      // With attachments, we can rely on LLM to parse; otherwise need ≥2 named vendors
+      if (namedQuotes.length + attachments.length < 2) {
+        setErr("Provide at least 2 vendor quotes (either structured or attach vendor quotation files).");
+        return;
+      }
     }
     setBusy(true); setResult(null);
     try {
       const doc = await api<any>("/llm/quotation-compare", {
         method: "POST",
         body: {
+          tier,
           context: ctx,
           mrf_id: linkedId.startsWith("mrf_") ? linkedId : "",
           po_id: linkedId.startsWith("po_") ? linkedId : "",
           quotes: namedQuotes,
-          attachments: attachments.length ? attachments : undefined,
+          attachments: (tier === "cheap" && attachments.length) ? attachments : undefined,
         },
       });
       setResult(doc);
@@ -231,19 +293,26 @@ function ComparePanel() {
   return (
     <View>
       <H2>Compare Vendor Quotes</H2>
-      <Muted>Rank L1/L2/L3, per-item delta % and anomaly flags. Enter structured lines OR attach vendor PDFs/Excels and let the LLM parse them. Uses Claude Sonnet 4.5 (premium tier).</Muted>
+      <Muted>Rank L1/L2/L3, per-item delta % and anomaly flags. Deterministic mode is free (no LLM); GPT-4o-mini adds narrative + can parse PDFs.</Muted>
       <Card style={{ marginTop: 10 }}>
-        <Label>Context (optional)</Label>
+        <TierPicker value={tier} onChange={setTier} testIDPrefix="cmp" />
+        <Label style={{ marginTop: 8 }}>Context (optional)</Label>
         <TextInput value={ctx} onChangeText={setCtx} placeholder="MRF-2026-0287 — CAT6 procurement" style={styles.input} />
         <Label style={{ marginTop: 8 }}>Attach to (MRF or PO id, optional)</Label>
         <TextInput value={linkedId} onChangeText={setLinkedId} placeholder="mrf_… or po_…" style={styles.input} />
-        <LlmFilePicker
-          attachments={attachments}
-          onChange={setAttachments}
-          max={6}
-          label="Vendor quotation files (optional)"
-          helperText="Upload each vendor's quote (PDF/Excel/CSV). LLM will extract vendor name + line rates automatically."
-        />
+        {tier === "cheap" ? (
+          <LlmFilePicker
+            attachments={attachments}
+            onChange={setAttachments}
+            max={6}
+            label="Vendor quotation files (optional)"
+            helperText="Upload each vendor's quote (PDF/Excel/CSV). LLM will extract vendor name + line rates automatically."
+          />
+        ) : (
+          <Muted style={{ marginTop: 8, fontStyle: "italic" }}>
+            Deterministic mode uses only the structured lines below (no file parsing).
+          </Muted>
+        )}
       </Card>
       {quotes.map((q, qi) => (
         <Card key={qi} style={{ marginTop: 10 }}>
@@ -284,7 +353,10 @@ function CompareResult({ doc, onDone }: { doc: any; onDone: () => void }) {
     <Card style={{ marginTop: 14, backgroundColor: "#F0FDF4" }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
         <Text style={{ fontWeight: "800" }}>Ranking</Text>
-        <Pill status="pending_approval" />
+        <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+          <ModelChip doc={doc} />
+          <Pill status="pending_approval" />
+        </View>
       </View>
       {(p.ranking || []).map((r: any, i: number) => (
         <View key={i} style={styles.rankRow}>
@@ -318,10 +390,11 @@ function CompareResult({ doc, onDone }: { doc: any; onDone: () => void }) {
   );
 }
 
-// ---------- Reconcile (Sonnet) ----------
+// ---------- Reconcile (deterministic / gpt-4o-mini) ----------
 
 function ReconcilePanel() {
   const [poId, setPoId] = useState("");
+  const [tier, setTier] = useState<"deterministic" | "cheap">("cheap");
   const [attachments, setAttachments] = useState<LlmAttachment[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -336,7 +409,8 @@ function ReconcilePanel() {
         method: "POST",
         body: {
           po_id: poId.trim(),
-          attachments: attachments.length ? attachments : undefined,
+          tier,
+          attachments: (tier === "cheap" && attachments.length) ? attachments : undefined,
         },
       });
       setResult(doc);
@@ -347,17 +421,24 @@ function ReconcilePanel() {
   return (
     <View>
       <H2>PO – GRN – Invoice 3-Way Match</H2>
-      <Muted>Line-by-line qty + rate reconciliation with exception flags. Optionally attach vendor invoice PDFs so the LLM can cross-check totals. Uses Sonnet 4.5. Purchase/GM/Director gated.</Muted>
+      <Muted>Line-by-line qty + rate reconciliation with exception flags. Deterministic mode is a pure arithmetic diff (₹0). GPT-4o-mini can additionally parse attached vendor invoice PDFs.</Muted>
       <Card style={{ marginTop: 10 }}>
-        <Label>PO ID</Label>
+        <TierPicker value={tier} onChange={setTier} testIDPrefix="rec" />
+        <Label style={{ marginTop: 8 }}>PO ID</Label>
         <TextInput value={poId} onChangeText={setPoId} placeholder="po_xxx" style={styles.input} testID="rec-po" />
-        <LlmFilePicker
-          attachments={attachments}
-          onChange={setAttachments}
-          max={5}
-          label="Vendor invoice files (optional)"
-          helperText="Upload vendor invoice PDFs to include in the reconciliation."
-        />
+        {tier === "cheap" ? (
+          <LlmFilePicker
+            attachments={attachments}
+            onChange={setAttachments}
+            max={5}
+            label="Vendor invoice files (optional)"
+            helperText="Upload vendor invoice PDFs to include in the reconciliation."
+          />
+        ) : (
+          <Muted style={{ marginTop: 8, fontStyle: "italic" }}>
+            Deterministic mode uses only stored PO / GRN / Invoice records (no file parsing).
+          </Muted>
+        )}
       </Card>
       {err ? <Text style={styles.err}>{err}</Text> : null}
       <Btn testID="rec-run" title={busy ? "Analysing…" : "Run 3-Way Match"} variant="primary" onPress={run} disabled={busy} />
@@ -378,7 +459,10 @@ function ReconcileResult({ doc, onDone }: { doc: any; onDone: () => void }) {
     <Card style={{ marginTop: 14, backgroundColor: "#FEFCE8" }}>
       <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center" }}>
         <Text style={{ fontWeight: "800" }}>{p.po_number || doc.entity_id}</Text>
-        <Pill status="pending_approval" />
+        <View style={{ flexDirection: "row", gap: 6, alignItems: "center" }}>
+          <ModelChip doc={doc} />
+          <Pill status="pending_approval" />
+        </View>
       </View>
       {p.aggregate ? (
         <View style={{ flexDirection: "row", gap: 6, marginTop: 4 }}>
@@ -1035,6 +1119,13 @@ const styles = StyleSheet.create({
   tierChipText: { fontSize: 11, fontWeight: "700", color: theme.colors.text },
   tierChipTextActive: { color: "#fff" },
   tierChipTextDisabled: { color: theme.colors.textMuted },
+  modelChip: {
+    flexDirection: "row", alignItems: "center", gap: 4,
+    paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999,
+    backgroundColor: "#EEF2FF", borderWidth: 1, borderColor: "#C7D2FE",
+  },
+  modelChipDet: { backgroundColor: "#D1FAE5", borderColor: "#6EE7B7" },
+  modelChipText: { fontSize: 10, fontWeight: "700", color: "#3730A3" },
   walletBar: {
     flexDirection: "row", alignItems: "center", gap: 8, marginTop: 10,
     padding: 10, borderRadius: 8, backgroundColor: "#F0FDF4",

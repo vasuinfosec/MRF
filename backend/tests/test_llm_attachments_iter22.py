@@ -210,7 +210,9 @@ class TestQuotationCompareAttachments:
             pytest.skip("LLM upstream unavailable")
         assert r.status_code == 200, r.text
         d = r.json()
-        assert d.get("tier") == "premium"
+        # Iter-28: Compare with attachments now runs on gpt-4o-mini
+        # (Sonnet 4.5 was retired for Compare/Reconcile per user directive).
+        assert d.get("tier") == "cheap"
         sm = d.get("input_summary") or {}
         assert sm.get("attachment_count") == 2
         atts = sm.get("attachments") or []
@@ -293,7 +295,8 @@ class TestReconcileAttachment:
             pytest.skip("LLM upstream unavailable")
         assert r.status_code == 200, r.text
         d = r.json()
-        assert d.get("tier") == "premium"
+        # Iter-28: Reconcile now runs on gpt-4o-mini (Sonnet retired).
+        assert d.get("tier") == "cheap"
         assert d.get("kind") == "reconcile"
         parsed = d.get("output_parsed") or {}
         assert isinstance(parsed, dict)
