@@ -1758,6 +1758,7 @@ from routers import projects as _projects_router  # noqa: E402,F401
 from routers import auth as _auth_router  # noqa: E402,F401
 from routers import po_exports as _po_exports_router  # noqa: E402,F401
 from routers import ai_purchase as _ai_purchase_router  # noqa: E402,F401
+from routers import access_security_v2 as _access_security_v2_router  # noqa: E402,F401
 
 app.include_router(api)
 app.add_middleware(

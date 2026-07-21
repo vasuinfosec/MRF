@@ -70,70 +70,123 @@ async def create_session(body: SessionRequest):
     email = data["email"]
     email_norm = (email or "").strip().lower()
 
-    # ------------------------------------------------------------------
-    # First-login role assignment rules (highest priority first):
-    #
-    #   1) email in OWNER_EMAILS         → director (organisation owners)
-    #   2) very first user in the DB     → admin   (bootstrap only)
-    #   3) email domain in TRUSTED_DOMAINS
-    #                                     → pm     (company employees:
-    #                                                  Reports / AI Co-pilot /
-    #                                                  MRF-PO flows visible)
-    #   4) everyone else                 → site_engineer (safe default)
-    #
-    # For EXISTING accounts we only promote upward (never demote):
-    #   * OWNER_EMAILS → director if currently below that.
-    #   * TRUSTED_DOMAINS → pm if currently `site_engineer`.
-    # ------------------------------------------------------------------
-    owner_list = {
-        e.strip().lower()
-        for e in (os.environ.get("OWNER_EMAILS", "") or "").split(",")
-        if e.strip()
-    }
-    trusted_domains = {
-        d.strip().lower().lstrip("@")
-        for d in (os.environ.get("TRUSTED_DOMAINS", "") or "").split(",")
-        if d.strip()
-    }
-    is_owner = email_norm in owner_list
-    domain = email_norm.rsplit("@", 1)[-1] if "@" in email_norm else ""
-    is_trusted_domain = domain in trusted_domains
+    # ─── Access-Security V2 gate (Task 3A) ─────────────────────────────
+    # When ACCESS_SECURITY_V2=1 (staging only), retire all automatic role
+    # assignment: OWNER_EMAILS ignored, first-user auto-admin retired, new
+    # signups require an active invitation OR land inactive+role-free.
+    v2 = os.environ.get("ACCESS_SECURITY_V2", "0") == "1"
 
-    existing = await db.users.find_one({"email": email}, {"_id": 0})
-    if existing:
-        user_id = existing["user_id"]
-        role = existing.get("role", "site_engineer")
-        if role in LEGACY_ROLE_MAP:
-            role = LEGACY_ROLE_MAP[role]
-            await db.users.update_one({"email": email}, {"$set": {"role": role}})
-        # Owner allowlist wins — always promote to director if below.
-        if is_owner and role != "director":
-            role = "director"
-            await db.users.update_one({"email": email}, {"$set": {"role": role}})
-        # Trusted domain gets at least PM — never overwrite a higher role.
-        elif is_trusted_domain and role == "site_engineer":
-            role = "pm"
-            await db.users.update_one({"email": email}, {"$set": {"role": role}})
-    else:
-        user_id = f"user_{uuid.uuid4().hex[:12]}"
-        count = await db.users.count_documents({})
-        if is_owner:
-            role = "director"
-        elif count == 0:
-            role = "admin"
-        elif is_trusted_domain:
-            role = "pm"
+    if v2:
+        existing = await db.users.find_one({"email": email}, {"_id": 0})
+        if existing:
+            user_id = existing["user_id"]
+            role = existing.get("role")
+            # Legacy remap still applied for prior-provisioned accounts
+            if role in LEGACY_ROLE_MAP:
+                role = LEGACY_ROLE_MAP[role]
+                await db.users.update_one({"email": email}, {"$set": {"role": role}})
+            if not existing.get("is_active", False):
+                raise HTTPException(403, {
+                    "error": "access_pending",
+                    "message": "Your access is pending Director approval.",
+                    "user_id": user_id,
+                })
         else:
-            role = "site_engineer"
-        await db.users.insert_one({
-            "user_id": user_id,
-            "email": email,
-            "name": data.get("name", email),
-            "picture": data.get("picture", ""),
-            "role": role,
-            "is_active": True,
-            "created_at": now_utc(),
-        })
+            # New signup path — check invitations
+            invite = await db.invitations.find_one({
+                "email": email_norm, "consumed": False,
+                "expires_at": {"$gt": now_utc()},
+            })
+            user_id = f"user_{uuid.uuid4().hex[:12]}"
+            if invite:
+                role = invite["role"]
+                await db.users.insert_one({
+                    "user_id": user_id, "email": email,
+                    "name": data.get("name", email), "picture": data.get("picture", ""),
+                    "role": role, "is_active": True,
+                    "created_at": now_utc(),
+                    "activated_via_invitation": invite["invitation_id"],
+                })
+                await db.invitations.update_one(
+                    {"invitation_id": invite["invitation_id"]},
+                    {"$set": {"consumed": True, "consumed_by": user_id,
+                                "consumed_at": now_utc()}},
+                )
+            else:
+                # Role-free, inactive by default
+                role = None
+                await db.users.insert_one({
+                    "user_id": user_id, "email": email,
+                    "name": data.get("name", email), "picture": data.get("picture", ""),
+                    "role": None, "is_active": False,
+                    "created_at": now_utc(),
+                    "pending_since": now_utc(),
+                })
+                # Anonymous audit entry for the pending signup
+                await db.audit_logs.insert_one({
+                    "audit_id": f"aud_{uuid.uuid4().hex[:12]}",
+                    "entity": "user", "entity_id": user_id,
+                    "action": "pending_signup",
+                    "user_id": user_id, "user_name": data.get("name", email),
+                    "user_role": "pending", "severity": "critical",
+                    "details": {"email": email},
+                    "timestamp": now_utc(),
+                })
+                raise HTTPException(403, {
+                    "error": "access_pending",
+                    "message": "Access requires Director approval. You have been added to the pending list.",
+                    "user_id": user_id,
+                })
+    else:
+        # ───────── Legacy prod path (unchanged) ─────────
+        # Owner allowlist and first-user bootstrap kept for prod compatibility.
+        owner_list = {
+            e.strip().lower()
+            for e in (os.environ.get("OWNER_EMAILS", "") or "").split(",")
+            if e.strip()
+        }
+        trusted_domains = {
+            d.strip().lower().lstrip("@")
+            for d in (os.environ.get("TRUSTED_DOMAINS", "") or "").split(",")
+            if d.strip()
+        }
+        is_owner = email_norm in owner_list
+        domain = email_norm.rsplit("@", 1)[-1] if "@" in email_norm else ""
+        is_trusted_domain = domain in trusted_domains
+
+        existing = await db.users.find_one({"email": email}, {"_id": 0})
+        if existing:
+            user_id = existing["user_id"]
+            role = existing.get("role", "site_engineer")
+            if role in LEGACY_ROLE_MAP:
+                role = LEGACY_ROLE_MAP[role]
+                await db.users.update_one({"email": email}, {"$set": {"role": role}})
+            if is_owner and role != "director":
+                role = "director"
+                await db.users.update_one({"email": email}, {"$set": {"role": role}})
+            elif is_trusted_domain and role == "site_engineer":
+                role = "pm"
+                await db.users.update_one({"email": email}, {"$set": {"role": role}})
+        else:
+            user_id = f"user_{uuid.uuid4().hex[:12]}"
+            count = await db.users.count_documents({})
+            if is_owner:
+                role = "director"
+            elif count == 0:
+                role = "admin"
+            elif is_trusted_domain:
+                role = "pm"
+            else:
+                role = "site_engineer"
+            await db.users.insert_one({
+                "user_id": user_id,
+                "email": email,
+                "name": data.get("name", email),
+                "picture": data.get("picture", ""),
+                "role": role,
+                "is_active": True,
+                "created_at": now_utc(),
+            })
 
     session_token = data["session_token"]
     await db.user_sessions.update_one(
@@ -189,6 +242,9 @@ async def dev_login(body: dict, request: Request):
     On any failure we return 404 (not 403) so the endpoint appears absent.
     """
     if os.environ.get("ENABLE_DEV_LOGIN", "0") != "1":
+        raise HTTPException(404, "Not found")
+    # Task 3A: Access-Security V2 disables dev-login regardless of host.
+    if os.environ.get("ACCESS_SECURITY_V2", "0") == "1":
         raise HTTPException(404, "Not found")
     host_direct = request.headers.get("host") or ""
     host_fwd = request.headers.get("x-forwarded-host") or ""
