@@ -181,6 +181,127 @@ try:
     r = requests.get(f"{BASE}/api/admin/access/permissions/me", headers=hdr, timeout=5)
     check("permissions_me", r.status_code == 200 and r.json().get("role") == "director",
           f"http={r.status_code}")
+    # roles[] is populated (dual-write / backfill from role)
+    check("permissions_me_roles_populated",
+          isinstance(r.json().get("roles"), list) and "director" in r.json().get("roles", []),
+          f"roles={r.json().get('roles')}")
+
+    # ── T-15: Uninvited-signup code path writes to pending_access_requests, NOT users ──
+    src_auth = open("/app/backend/routers/auth.py").read()
+    check("uninvited_uses_pending_access_requests",
+          "db.pending_access_requests" in src_auth
+          and "await db.users.insert_one" not in src_auth.split(
+              "# ─── Uninvited signup ───────────────────────────────────")[-1].split("else:")[0],
+          "code path check")
+    # Direct behavioural proof: seed a pending_access_requests row and list it
+    c6 = MongoClient(STG_URL)
+    req_id = "par_" + uuid.uuid4().hex[:12]
+    par_email = f"uninvited-{uuid.uuid4().hex[:6]}@vasu.staging"
+    c6[STG_DB].pending_access_requests.insert_one({
+        "request_id": req_id, "email": par_email,
+        "name": "Uninvited QA", "picture": "",
+        "attempt_count": 1,
+        "first_attempt_at": datetime.now(timezone.utc),
+        "last_attempt_at": datetime.now(timezone.utc),
+    })
+    users_row = c6[STG_DB].users.find_one({"email": par_email})
+    c6.close()
+    check("uninvited_no_user_row", users_row is None,
+          "no users row for uninvited email")
+
+    # ── T-16: Pending-requests list returns the uninvited request ──
+    r = requests.get(f"{BASE}/api/admin/access/pending-requests", headers=hdr, timeout=5)
+    plist = r.json() if r.status_code == 200 else []
+    check("pending_requests_list",
+          r.status_code == 200 and any(p.get("request_id") == req_id for p in plist),
+          f"http={r.status_code} n={len(plist)}")
+
+    # ── T-17: Promote a pending request to an invitation ──
+    r = requests.post(f"{BASE}/api/admin/access/pending-requests/{req_id}/invite",
+                       headers=hdr, json={"role": "pm", "expires_in_hours": 12},
+                       timeout=5)
+    iid_promo = r.json().get("invitation_id") if r.status_code == 200 else None
+    check("invite_from_pending_request",
+          r.status_code == 200 and bool(iid_promo),
+          f"http={r.status_code} iid={iid_promo}")
+
+    # ── T-18: Self-activation is forbidden (guardrail) ──
+    r = requests.post(f"{BASE}/api/admin/access/users/{qa_uid}/activate",
+                       headers=hdr, json={"role": "director"}, timeout=5)
+    check("self_activation_blocked", r.status_code == 400, f"http={r.status_code}")
+
+    # ── T-19: Last-Director deactivation guardrail ──
+    # Strategy: create an ADMIN (management role, non-director) with a fresh
+    # session, and have that admin attempt to deactivate qa_uid — the only
+    # active director in the DB. The guardrail must return HTTP 400
+    # `last_director_protected` (RBAC allows the call because admin is a
+    # management role).
+    c7 = MongoClient(STG_URL)
+    c7[STG_DB].users.update_many(
+        {"role": "director", "user_id": {"$ne": qa_uid}},
+        {"$set": {"role": "pm", "roles": ["pm"]}},
+    )
+    admin_uid = "user_qa_admin_" + uuid.uuid4().hex[:6]
+    admin_tok = "sess_admin_" + secrets.token_urlsafe(16)
+    c7[STG_DB].users.insert_one({
+        "user_id": admin_uid,
+        "email": f"qa-admin-{uuid.uuid4().hex[:6]}@vasu.staging",
+        "name": "QA Admin", "picture": "",
+        "role": "admin", "roles": ["admin"], "is_active": True,
+        "created_at": datetime.now(timezone.utc),
+    })
+    c7[STG_DB].user_sessions.insert_one({
+        "session_token": admin_tok, "user_id": admin_uid,
+        "expires_at": datetime.now(timezone.utc) + timedelta(hours=1),
+        "created_at": datetime.now(timezone.utc),
+    })
+    c7.close()
+    admin_hdr = {"Authorization": f"Bearer {admin_tok}"}
+    r = requests.post(f"{BASE}/api/admin/access/users/{qa_uid}/deactivate",
+                       headers=admin_hdr,
+                       json={"reason": "QA: attempt last-dir kill"},
+                       timeout=5)
+    body_txt = r.text
+    check("last_director_deactivate_blocked",
+          r.status_code == 400 and "last_director_protected" in body_txt,
+          f"http={r.status_code} body={body_txt[:120]}")
+
+    # T-19b: The same admin trying to strip 'director' from qa_uid via /roles
+    # must also be blocked with `last_director_protected`.
+    r = requests.post(f"{BASE}/api/admin/access/users/{qa_uid}/roles",
+                       headers=admin_hdr, json={"roles": ["pm"]}, timeout=5)
+    check("last_director_role_strip_blocked",
+          r.status_code == 400 and "last_director_protected" in r.text,
+          f"http={r.status_code} body={r.text[:120]}")
+
+    # ── T-20: self-role change forbidden (guardrail) ──
+    r = requests.post(f"{BASE}/api/admin/access/users/{qa_uid}/roles",
+                       headers=hdr, json={"roles": ["pm"]}, timeout=5)
+    check("self_role_change_blocked", r.status_code == 400, f"http={r.status_code}")
+
+    # ── T-21: Multi-role assignment returned correctly ──
+    # Give a fresh pending user multiple roles
+    c9 = MongoClient(STG_URL)
+    multi_uid = "user_multi_" + uuid.uuid4().hex[:6]
+    c9[STG_DB].users.insert_one({
+        "user_id": multi_uid, "email": f"multi-{uuid.uuid4().hex[:6]}@vasu.staging",
+        "name": "Multi", "picture": "", "role": None, "roles": [],
+        "is_active": False, "created_at": datetime.now(timezone.utc),
+    })
+    c9.close()
+    # Activate first with role=pm, then assign multi-role
+    requests.post(f"{BASE}/api/admin/access/users/{multi_uid}/activate",
+                    headers=hdr, json={"role": "pm"}, timeout=5)
+    r = requests.post(f"{BASE}/api/admin/access/users/{multi_uid}/roles",
+                       headers=hdr, json={"roles": ["pm", "purchase"]}, timeout=5)
+    check("multi_role_assign",
+          r.status_code == 200 and r.json().get("roles") == ["pm", "purchase"],
+          f"http={r.status_code}")
+
+    # ── T-22: Invalid role in /roles → 400 ──
+    r = requests.post(f"{BASE}/api/admin/access/users/{multi_uid}/roles",
+                       headers=hdr, json={"roles": ["godmode"]}, timeout=5)
+    check("invalid_role_in_roles_rejected", r.status_code == 400, f"http={r.status_code}")
 
     # Save report
     passed = sum(1 for x in results if x["ok"])

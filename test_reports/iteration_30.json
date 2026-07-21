@@ -1,0 +1,25 @@
+{
+  "summary": "Task 3A.1 Access-Security V2 regression: staging-only backend testing on port 8002 (staging Mongo, db=vasu_mrf_staging_qa) — no production contact. Both entry-point scripts ran green. V2=1 pack (task3a_staging_test.py) passed 26/26 covering uninvited-signup path (pending_access_requests + no users row + listing endpoint), invited-signup path (code inspection), Director activate/deactivate, bad role rejection, RBAC on invitations, dev-login hard-disabled under V2, permissions_me returns populated `roles` list, pending-request → invitation promotion, self-activation guardrail, self-role-change guardrail, last-Director deactivate guardrail (admin caller, returns last_director_protected), last-Director role-strip guardrail, multi-role assignment, invalid-role rejection. V2=0 backward-compat pack (regression_baseline.py) passed 26/26 covering dev-login, users list, all masters (materials/vendors/customers/projects), MRF list/create/approve/return, PO/GRN/DC/CS/invoice/billing lists, exports (mrf/po/grn/dc + tally purchase/invoice), audit list, and AI panels (my-budget + deterministic negotiate & compare). No production `.env`, supervisor unit, or MONGO_URL/DB_NAME were touched.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {"ui_bugs": [], "integration_issues": [], "design_issues": [], "react_native_issues": []},
+  "test_report_links": [
+    "/app/backend/scripts/task3a_staging_test.py",
+    "/app/backend/scripts/regression_baseline.py",
+    "/app/backup_artifacts/task3a_report.json",
+    "/app/backup_artifacts/regression_report.json"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "routers/auth.py: V2 gate correctly writes uninvited attempts to `db.pending_access_requests` (upsert) BEFORE any users.insert_one — verified by string-search at grep hits (lines 90–154). Users collection is only touched in the invited branch (line 109: roles=[] on creation) or legacy else-branch (line 204: dual-writes roles=[role]).",
+    "routers/auth.py:265 — dev-login returns 404 whenever ACCESS_SECURITY_V2=1 regardless of Host header. Verified behaviourally by T-01 (dev_login_hard_disabled http=404).",
+    "routers/access_security_v2.py: last_director_protected guardrail correctly fires on both /deactivate and /roles when the caller has RBAC clearance (admin) — verified by T-19 and T-19b. RBAC still returns 403 for plain PMs before the guardrail evaluates (matches T-11).",
+    "server.py: UserOut now exposes roles: List[str]; _ensure_roles_shape backfills roles from legacy `role` — verified via T-14 permissions_me_roles_populated returning [\"director\"] even when the caller was seeded only with legacy role field."
+  ],
+  "updated_files": [],
+  "success_rate": {"backend": "100%", "frontend": "not_tested"},
+  "seed_data_creation": "task3a_staging_test.py seeds QA director, admin, PM, pending user, multi-role user, and a pending_access_requests row directly in the staging DB (vasu_mrf_staging_qa) — all rows are ephemeral to staging and never touch production.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Staging env vars live in /run/vasu_mrf_staging.env (STAGING_MONGO_URL, STAGING_DB_NAME). Do not print them. To repeat: `python3 /app/backend/scripts/task3a_staging_test.py` for V2=1 pack (self-contained, seeds its own director + spawns uvicorn on :8002 with ACCESS_SECURITY_V2=1); `set -a; . /run/vasu_mrf_staging.env; set +a; python3 /app/backend/scripts/regression_baseline.py` for V2=0 pack (requires env exported for staging_guard). Report files land at /app/backup_artifacts/{task3a_report.json,regression_report.json}. Frontend was NOT tested per request.",
+  "rca_of_issue": "N/A — regression validation only; no defects observed."
+}

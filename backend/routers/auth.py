@@ -99,43 +99,60 @@ async def create_session(body: SessionRequest):
             })
             user_id = f"user_{uuid.uuid4().hex[:12]}"
             if invite:
-                role = invite["role"]
+                # Corrected per T3A.1: invitation creates the user record
+                # but leaves it INACTIVE. Director must explicitly activate.
+                role = None
                 await db.users.insert_one({
                     "user_id": user_id, "email": email,
                     "name": data.get("name", email), "picture": data.get("picture", ""),
-                    "role": role, "is_active": True,
+                    "role": None,
+                    "roles": [],   # T3A.1 multi-role — populated at activation
+                    "is_active": False,
                     "created_at": now_utc(),
-                    "activated_via_invitation": invite["invitation_id"],
+                    "invited_role": invite["role"],
+                    "invited_by": invite.get("issued_by"),
+                    "invitation_consumed": invite["invitation_id"],
+                    "pending_since": now_utc(),
                 })
                 await db.invitations.update_one(
                     {"invitation_id": invite["invitation_id"]},
                     {"$set": {"consumed": True, "consumed_by": user_id,
                                 "consumed_at": now_utc()}},
                 )
-            else:
-                # Role-free, inactive by default
-                role = None
-                await db.users.insert_one({
-                    "user_id": user_id, "email": email,
-                    "name": data.get("name", email), "picture": data.get("picture", ""),
-                    "role": None, "is_active": False,
-                    "created_at": now_utc(),
-                    "pending_since": now_utc(),
+                raise HTTPException(403, {
+                    "error": "access_pending_activation",
+                    "message": "Invitation accepted. Awaiting Director activation.",
+                    "user_id": user_id,
                 })
-                # Anonymous audit entry for the pending signup
+            else:
+                # ─── Uninvited signup ───────────────────────────────────
+                # Corrected per T3A.1: do NOT create a user record. Instead
+                # log the request in `pending_access_requests` so Director
+                # can review + explicitly issue an invitation. HTTP 403.
+                await db.pending_access_requests.update_one(
+                    {"email": email_norm},
+                    {"$set": {
+                        "email": email_norm,
+                        "name": data.get("name", email),
+                        "picture": data.get("picture", ""),
+                        "last_attempt_at": now_utc(),
+                    },
+                     "$setOnInsert": {"request_id": f"par_{uuid.uuid4().hex[:12]}",
+                                        "first_attempt_at": now_utc()},
+                     "$inc": {"attempt_count": 1}},
+                    upsert=True,
+                )
                 await db.audit_logs.insert_one({
                     "audit_id": f"aud_{uuid.uuid4().hex[:12]}",
-                    "entity": "user", "entity_id": user_id,
-                    "action": "pending_signup",
-                    "user_id": user_id, "user_name": data.get("name", email),
-                    "user_role": "pending", "severity": "critical",
-                    "details": {"email": email},
+                    "entity": "access_request", "entity_id": email_norm,
+                    "action": "uninvited_signup_blocked",
+                    "user_id": "anonymous", "user_name": data.get("name", email),
+                    "user_role": "pending", "details": {"email": email_norm},
                     "timestamp": now_utc(),
                 })
                 raise HTTPException(403, {
                     "error": "access_pending",
-                    "message": "Access requires Director approval. You have been added to the pending list.",
-                    "user_id": user_id,
+                    "message": "Access requires an invitation. Your request has been recorded for Director review.",
                 })
     else:
         # ───────── Legacy prod path (unchanged) ─────────
@@ -184,6 +201,7 @@ async def create_session(body: SessionRequest):
                 "name": data.get("name", email),
                 "picture": data.get("picture", ""),
                 "role": role,
+                "roles": [role],   # T3A.1 dual-write (BC preserved)
                 "is_active": True,
                 "created_at": now_utc(),
             })
@@ -280,12 +298,14 @@ async def dev_login(body: dict, request: Request):
     if existing:
         user_id = existing["user_id"]
         await db.users.update_one({"user_id": user_id},
-                                    {"$set": {"role": role, "name": name}})
+                                    {"$set": {"role": role, "roles": [role],
+                                              "name": name}})
     else:
         user_id = f"user_{uuid.uuid4().hex[:12]}"
         await db.users.insert_one({
             "user_id": user_id, "email": email, "name": name, "picture": "",
-            "role": role, "is_active": True, "created_at": now_utc(),
+            "role": role, "roles": [role],
+            "is_active": True, "created_at": now_utc(),
         })
     session_token = f"dev_{uuid.uuid4().hex}"
     await db.user_sessions.insert_one({
@@ -343,8 +363,28 @@ async def set_role(body: RoleUpdate, authorization: Optional[str] = Header(None)
         raise HTTPException(403, "Only admin can change roles")
     if body.role not in ROLES:
         raise HTTPException(400, "Invalid role")
+    # T3A.1 guardrails (apply on legacy path too): no self-elevation; last-Director protection
+    if body.user_id == u.user_id:
+        raise HTTPException(400, "Cannot modify your own role")
+    target = await db.users.find_one({"user_id": body.user_id}, {"_id": 0})
+    if not target:
+        raise HTTPException(404, "User not found")
+    if (target.get("role") == "director" or "director" in (target.get("roles") or [])) \
+            and body.role != "director":
+        # Would strip Director — ensure at least one other active director remains
+        remaining = await db.users.count_documents({
+            "is_active": True,
+            "user_id": {"$ne": body.user_id},
+            "$or": [{"role": "director"}, {"roles": "director"}],
+        })
+        if remaining < 1:
+            raise HTTPException(400, {
+                "error": "last_director_protected",
+                "message": "Refusing to remove the last active Director.",
+            })
     r = await db.users.update_one({"user_id": body.user_id},
-                                     {"$set": {"role": body.role}})
+                                     {"$set": {"role": body.role,
+                                               "roles": [body.role]}})
     if r.matched_count == 0:
         raise HTTPException(404, "User not found")
     user = await db.users.find_one({"user_id": body.user_id}, {"_id": 0})

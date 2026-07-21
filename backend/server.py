@@ -54,6 +54,45 @@ LEGACY_ROLE_MAP = {
 def _canon_role(r: str) -> str:
     return LEGACY_ROLE_MAP.get(r, r) if r in LEGACY_ROLE_MAP else r
 
+
+def _ensure_roles_shape(user: dict) -> dict:
+    """Task 3A.1 — DB-driven multi-role backfill.
+
+    Ensures every user dict has both:
+      * `role`  : legacy scalar (source of truth when ACCESS_SECURITY_V2=0)
+      * `roles` : canonical list (source of truth when ACCESS_SECURITY_V2=1)
+
+    Rules (non-mutating on DB, only mutates in-memory dict):
+      1. If `roles` is missing / empty and `role` is set → roles = [role].
+      2. If `roles` is set and `role` missing → role = roles[0].
+      3. Legacy role names inside `roles` are canonicalised.
+      4. Duplicates removed while preserving order.
+      5. If both empty (fresh pending user) → role="", roles=[].
+    """
+    if not isinstance(user, dict):
+        return user
+    role = user.get("role") or ""
+    roles = user.get("roles") or []
+    if isinstance(roles, str):
+        roles = [roles]
+    # Canonicalise
+    roles = [_canon_role(r) for r in roles if r]
+    # Dedupe while preserving order
+    seen = set()
+    dedup = []
+    for r in roles:
+        if r and r not in seen:
+            seen.add(r)
+            dedup.append(r)
+    roles = dedup
+    if not roles and role:
+        roles = [_canon_role(role)]
+    if not role and roles:
+        role = roles[0]
+    user["role"] = role or ""
+    user["roles"] = roles
+    return user
+
 MRF_APPROVERS = {"pm", "gm", "director", "admin"}
 MRF_EDITORS = {"site_engineer", "pm", "gm", "purchase", "director", "admin"}
 MRF_CREATORS = {"site_engineer", "pm", "director", "admin"}
@@ -121,12 +160,19 @@ class UserOut(BaseModel):
     email: str
     name: str
     picture: Optional[str] = None
-    role: str = "site_engineer"
+    role: str = "site_engineer"          # LEGACY (mirrors roles[0]) — kept for BC
+    roles: List[str] = []                # NEW (Task 3A.1) — DB-driven source of truth
     is_active: bool = True
 
 class RoleUpdate(BaseModel):
     user_id: str
     role: str
+
+class RolesUpdate(BaseModel):
+    """Multi-role update — Task 3A.1.
+    `roles` is a canonical set (order not significant, deduped)."""
+    user_id: str
+    roles: List[str]
 
 class SessionRequest(BaseModel):
     session_id: str
@@ -456,6 +502,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> UserO
             canon = LEGACY_ROLE_MAP[user["role"]]
             await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": canon}})
             user["role"] = canon
+        user = _ensure_roles_shape(user)
         return UserOut(**user)
 
     sess = await db.user_sessions.find_one({"session_token": token}, {"_id": 0})
@@ -474,6 +521,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> UserO
         canon = LEGACY_ROLE_MAP[user["role"]]
         await db.users.update_one({"user_id": user["user_id"]}, {"$set": {"role": canon}})
         user["role"] = canon
+    user = _ensure_roles_shape(user)
     return UserOut(**user)
 
 def require_roles(*allowed):
