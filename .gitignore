@@ -84,3 +84,9 @@ android-sdk/
 backup_artifacts/
 **/backup_artifacts/
 
+.env
+.env.*
+*.env
+credentials.json
+*.key
+.credentials
