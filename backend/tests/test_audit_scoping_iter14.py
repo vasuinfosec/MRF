@@ -394,23 +394,22 @@ class TestOtherEntityAudit:
         assert r.status_code == 200, r.text
 
     def test_20_se_cust_id_empty(self, tokens):
-        # Customer entity_id is not scoped by an "owner" concept for SE, so
-        # instead of a 403 the endpoint returns 200 with an empty list (SE
-        # cannot see other users' customer audits — the filter matches
-        # nothing). Semantically equivalent — no leakage.
+        # SEC-001 remediation: customer/vendor/material entity_id audit reads
+        # are now restricted to management roles (BOLA fix). Site-engineer
+        # must get 403 (no empty-list bypass) so PII in details.old/new can
+        # never be probed by non-management callers.
         r = requests.get(f"{API}/audit",
                          params={"entity_id": "cust_iter14_probe"},
                          headers=_hdr(tokens["se"]), timeout=15)
-        assert r.status_code == 200, r.text
-        assert r.json() == []
+        assert r.status_code == 403, r.text
 
     def test_20b_store_cust_id_empty(self, tokens):
+        # SEC-001 remediation (same as above for `store` role).
         tok = _login("store@vasu.dev", "store", "Iter14 Store")
         r = requests.get(f"{API}/audit",
                          params={"entity_id": "cust_iter14_probe"},
                          headers=_hdr(tok), timeout=15)
-        assert r.status_code == 200, r.text
-        assert r.json() == []
+        assert r.status_code == 403, r.text
 
 
 # =====================================================================

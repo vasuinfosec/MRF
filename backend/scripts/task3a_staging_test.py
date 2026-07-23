@@ -11,7 +11,10 @@ import requests
 STG_PORT = 8002
 BASE = f"http://127.0.0.1:{STG_PORT}"
 
-env_file = "/run/vasu_mrf_staging.env"
+env_file = os.environ.get("STAGING_ENV_FILE", "/run/vasu_mrf_staging.env")
+if not os.path.exists(env_file):
+    # Fallback for post-restart environments where /run was cleared
+    env_file = "/app/backup_artifacts/staging.env"
 env = {}
 for line in open(env_file):
     if "=" in line and line.strip() and not line.startswith("#"):

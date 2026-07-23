@@ -156,10 +156,13 @@ class TestSec003DownloadToken:
         assert ("spreadsheet" in ct) or ("excel" in ct) or ("octet" in ct), ct
 
     def test_legacy_session_token_query_still_works(self, tokens):
-        # Backward-compat: raw session token via ?token= must still work
+        # SEC-003 (post-audit hardening): raw session tokens can NO LONGER be
+        # passed via ?token= — only single-use dt_* tokens are accepted from
+        # the URL, to prevent long-lived token leakage via Referer / history
+        # / server logs. Header-based session tokens continue to work.
         r = requests.get(f"{API}/export/mrf",
                          params={"token": tokens["admin"]}, timeout=60)
-        assert r.status_code == 200, r.text[:200]
+        assert r.status_code == 401, r.text[:200]
 
     def test_legacy_session_token_header_still_works(self, tokens):
         r = requests.get(f"{API}/export/mrf",

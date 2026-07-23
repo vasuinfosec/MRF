@@ -504,9 +504,16 @@ class TestPOExportsRouter:
         assert r.content[:4] == b"%PDF"
 
     def test_po_pdf_via_token_query(self, tokens):
+        # SEC-003 (post-audit hardening): URL `?token=` no longer accepts raw
+        # session tokens — a short-lived `dt_*` download token is required.
+        # Mint one, then use it. The old direct session-token flow is asserted
+        # in test_iter29_security.py.
         pid = TestPOExportsRouter._po_id
-        tok = tokens["admin"]
-        r = requests.get(f"{API}/po/{pid}/pdf?force=1&token={tok}", timeout=15)
+        mint = requests.post(f"{API}/auth/download-token",
+                              headers={"Authorization": f"Bearer {tokens['admin']}"},
+                              timeout=15).json()
+        dt = mint["token"]
+        r = requests.get(f"{API}/po/{pid}/pdf?force=1&token={dt}", timeout=15)
         assert r.status_code == 200
         assert r.content[:4] == b"%PDF"
 

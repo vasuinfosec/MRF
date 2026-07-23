@@ -34,6 +34,9 @@ def main():
     env["MONGO_URL"] = stg_url
     env["DB_NAME"] = stg_db
     env["ENABLE_DEV_LOGIN"] = "1"   # for QA fixtures — only on staging port
+    # Force V2 OFF for this backward-compat regression pack. load_dotenv() will
+    # NOT override this because dotenv respects pre-set env vars.
+    env["ACCESS_SECURITY_V2"] = "0"
     log = open("/tmp/staging_api.log", "w")
     print(f"[regression] Spawning staging FastAPI on :{STAGING_PORT} against db='{stg_db}'…")
     proc = subprocess.Popen(
