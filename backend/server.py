@@ -468,6 +468,26 @@ class ComparativeStatement(ComparativeStatementCreate):
     deleted: bool = False
 
 # ---------------------- Auth ----------------------
+def bearer_from_url_token(token: Optional[str]) -> Optional[str]:
+    """SEC-003 tightener — URL `?token=` params must be short-lived, single-use
+    dt_ download tokens. Long-lived session tokens are rejected to prevent
+    accidental leakage via Referer, browser history, or server logs.
+
+    Callers replaced the pattern:
+        auth = authorization or (f"Bearer {token}" if token else None)
+    with:
+        auth = authorization or bearer_from_url_token(token)
+    """
+    if not token:
+        return None
+    if not token.startswith("dt_"):
+        raise HTTPException(
+            401,
+            "URL token must be a short-lived download token (obtain via /api/auth/download-token).",
+        )
+    return f"Bearer {token}"
+
+
 async def get_current_user(authorization: Optional[str] = Header(None)) -> UserOut:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing token")
@@ -1809,9 +1829,13 @@ from routers import ai_purchase as _ai_purchase_router  # noqa: E402,F401
 from routers import access_security_v2 as _access_security_v2_router  # noqa: E402,F401
 
 app.include_router(api)
+# CORS: Bearer-token auth (no cookies) — allow_credentials MUST be False when
+# allow_origins is a wildcard, per CORS spec (browsers reject `*` with
+# credentials). Explicit False also prevents any future cookie-based flow
+# from accidentally becoming cross-origin.
 app.add_middleware(
     CORSMiddleware,
-    allow_credentials=True,
+    allow_credentials=False,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],

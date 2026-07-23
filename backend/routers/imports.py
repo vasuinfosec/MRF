@@ -22,13 +22,14 @@ from server import (
     next_mrf_number,
     MRF, MRFItem,
     MAX_UPLOAD_BYTES,
+    bearer_from_url_token,
 )
 
 
 @api.get("/import/vendors/template")
 async def vendor_template(token: Optional[str] = None,
                             authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     await get_current_user(auth)
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -46,7 +47,7 @@ async def vendor_template(token: Optional[str] = None,
 @api.get("/import/mrf/template")
 async def mrf_template(token: Optional[str] = None,
                         authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     await get_current_user(auth)
     wb = openpyxl.Workbook()
     ws = wb.active

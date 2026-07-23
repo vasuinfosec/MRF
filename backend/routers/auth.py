@@ -388,4 +388,11 @@ async def set_role(body: RoleUpdate, authorization: Optional[str] = Header(None)
     if r.matched_count == 0:
         raise HTTPException(404, "User not found")
     user = await db.users.find_one({"user_id": body.user_id}, {"_id": 0})
+    # SEC-002: audit legacy role changes (V2 path already audits)
+    await audit("user", body.user_id, "role_change", u, {
+        "old_role": target.get("role"),
+        "old_roles": target.get("roles") or [],
+        "new_role": body.role,
+        "new_roles": [body.role],
+    })
     return UserOut(**user)

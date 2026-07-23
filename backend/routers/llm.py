@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from typing import List, Optional, Dict, Any, Tuple
 import os
+import uuid
 from fastapi import HTTPException, Header, Body
 from pydantic import BaseModel
 
@@ -214,6 +215,10 @@ def _month_start_utc() -> Any:
 async def _user_month_spend_inr(user_id: str) -> float:
     """Sum of cost.cost_inr from llm_suggestions for this user this calendar
     month. Cached-hits contribute ₹0 because their cost is stored as 0.
+
+    Also includes any un-settled *reservations* from `llm_budget_reservations`
+    (see `_enforce_tier_and_budget`) so concurrent in-flight calls cannot
+    each pass the budget check before their cost has been recorded.
     """
     start = _month_start_utc()
     pipeline = [
@@ -222,9 +227,21 @@ async def _user_month_spend_inr(user_id: str) -> float:
     ]
     try:
         rows = await db.llm_suggestions.aggregate(pipeline).to_list(1)
-        return round(float(rows[0]["total"]) if rows else 0.0, 4)
+        spent = float(rows[0]["total"]) if rows else 0.0
     except Exception:
-        return 0.0
+        spent = 0.0
+    # Add live reservations (racy in-flight calls)
+    try:
+        res_rows = await db.llm_budget_reservations.aggregate([
+            {"$match": {"user_id": user_id,
+                         "created_at": {"$gte": start},
+                         "settled": {"$ne": True}}},
+            {"$group": {"_id": None, "total": {"$sum": "$reserved_inr"}}},
+        ]).to_list(1)
+        reserved = float(res_rows[0]["total"]) if res_rows else 0.0
+    except Exception:
+        reserved = 0.0
+    return round(spent + reserved, 4)
 
 
 async def _budget_status(user: UserOut) -> Dict[str, Any]:
@@ -249,13 +266,23 @@ async def _enforce_tier_and_budget(user: UserOut, requested_tier: str) -> Tuple[
     * Non-director whose monthly ₹ cap is exhausted → HTTP 402.
     * Director → always allowed at requested tier, no cap.
 
-    Returns: (effective_tier, tier_meta)
+    Race-safety (SEC hardening):
+      A short-lived *reservation* is written to `llm_budget_reservations`
+      BEFORE the LLM call, and its amount counts against `spent_inr` via
+      `_user_month_spend_inr()` for the duration of the call. This closes
+      the concurrent-request window where two calls could each pass the
+      budget check before either had settled. Reservations are settled
+      (or discarded on failure) by `_call_llm`.
+
+    Returns: (effective_tier, tier_meta) — `tier_meta` includes the
+    `reservation_id` when a reservation was written.
     """
     meta: Dict[str, Any] = {
         "requested_tier": requested_tier,
         "effective_tier": requested_tier,
         "downgraded": False,
         "downgrade_reason": None,
+        "reservation_id": None,
     }
     effective = requested_tier
 
@@ -286,7 +313,53 @@ async def _enforce_tier_and_budget(user: UserOut, requested_tier: str) -> Tuple[
                 ),
             },
         )
+
+    # SEC race-safety: reserve the maximum plausible cost for this call.
+    # 5% of the remaining monthly budget or ₹5, whichever is larger, capped at
+    # ₹25. If the actual cost is lower, the reservation is settled to the
+    # exact number; if higher (rare), the settle overwrites with the true value.
+    if not budget["unlimited"]:
+        remaining = float(budget["remaining_inr"] or 0.0)
+        reserved = max(5.0, min(25.0, round(remaining * 0.05, 4)))
+        rid = f"res_{uuid.uuid4().hex[:12]}"
+        await db.llm_budget_reservations.insert_one({
+            "reservation_id": rid,
+            "user_id": user.user_id,
+            "role": user.role,
+            "reserved_inr": reserved,
+            "created_at": now_utc(),
+            "settled": False,
+        })
+        meta["reservation_id"] = rid
+        meta["reserved_inr"] = reserved
+
     return effective, meta
+
+
+async def _settle_budget_reservation(reservation_id: Optional[str],
+                                      actual_cost_inr: float) -> None:
+    """Mark a reservation settled with the true cost. Idempotent."""
+    if not reservation_id:
+        return
+    try:
+        await db.llm_budget_reservations.update_one(
+            {"reservation_id": reservation_id, "settled": {"$ne": True}},
+            {"$set": {"settled": True, "settled_at": now_utc(),
+                      "actual_inr": round(float(actual_cost_inr or 0.0), 4)}},
+        )
+    except Exception:
+        pass
+
+
+async def _release_budget_reservation(reservation_id: Optional[str]) -> None:
+    """Delete a reservation whose call errored out (nothing was spent).
+    Idempotent."""
+    if not reservation_id:
+        return
+    try:
+        await db.llm_budget_reservations.delete_one({"reservation_id": reservation_id})
+    except Exception:
+        pass
 
 
 async def _call_llm(tier: str, system: str, user_text: str,
@@ -301,8 +374,9 @@ async def _call_llm(tier: str, system: str, user_text: str,
     """
     if not EMERGENT_LLM_KEY:
         raise HTTPException(500, "EMERGENT_LLM_KEY not configured on server")
-    # Central cost-control gate
+    # Central cost-control gate (writes a reservation for race-safety)
     effective_tier, tier_meta = await _enforce_tier_and_budget(user, tier)
+    reservation_id = tier_meta.get("reservation_id")
     tier = effective_tier
     provider, model = _LLM_MODELS.get(tier, _LLM_MODELS["cheap"])
     # Simple content-hash-based cache to avoid burning credits on identical prompts
@@ -315,6 +389,8 @@ async def _call_llm(tier: str, system: str, user_text: str,
         cb["cost_usd"] = 0.0
         cb["cost_inr"] = 0.0
         cb["cache_saved"] = True
+        # Cache hit — no cost, release the reservation
+        await _release_budget_reservation(reservation_id)
         return cached["response"], {"cached": True, "tier": tier, "model": model,
                                       "hash": h, "cost": cb,
                                       "tier_meta": tier_meta}
@@ -324,7 +400,8 @@ async def _call_llm(tier: str, system: str, user_text: str,
     try:
         resp = await chat.send_message(UserMessage(text=user_text))
     except Exception as e:
-        # Fail closed — do not fabricate suggestions
+        # Fail closed — do not fabricate suggestions AND release the reservation
+        await _release_budget_reservation(reservation_id)
         raise HTTPException(502, f"LLM call failed: {e}")
     text = str(resp or "")
     await db.llm_cache.update_one(
@@ -343,6 +420,9 @@ async def _call_llm(tier: str, system: str, user_text: str,
         "cost": cost,
         "tier_meta": tier_meta,
     }
+    # Settle the reservation with the true cost so subsequent budget checks
+    # see the exact figure (not the conservative reserved amount).
+    await _settle_budget_reservation(reservation_id, float(cost.get("cost_inr") or 0.0))
     await audit("llm", entity_id or "n/a", f"llm_call_{kind}", user,
                 {"tier": tier, "model": model, "entity": entity,
                  "record_number": input_payload.get("record_number", ""),

@@ -22,6 +22,7 @@ from server import (
     _strip_oids, _excel_response, now_utc,
     MAT_WORD_LIMIT, SYSTEMS, MaterialIn, MasterItem,
     openpyxl,
+    bearer_from_url_token,
 )
 from openpyxl.styles import Font, PatternFill
 
@@ -231,7 +232,7 @@ async def bulk_material_action(body: dict, authorization: Optional[str] = Header
 @api.get("/import/materials/template")
 async def material_import_template(token: Optional[str] = None,
                                     authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "admin", "director"):
         raise HTTPException(403, "Only Purchase/Admin/Director")

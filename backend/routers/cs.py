@@ -17,6 +17,7 @@ from server import (
     _strip_oids, _log_export, next_cs_number,
     ComparativeStatementCreate, ComparativeStatement,
     CS_APPROVER_ROLES,
+    bearer_from_url_token,
 )
 
 
@@ -129,7 +130,7 @@ async def get_cs(cs_id: str, authorization: Optional[str] = Header(None)):
 async def download_cs(cs_id: str, token: Optional[str] = None,
                        authorization: Optional[str] = Header(None)):
     """Return the original imported file as an attachment."""
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in CS_ROLES_VIEW:
         raise HTTPException(403, "Not allowed")

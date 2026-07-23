@@ -6,6 +6,7 @@ server.py implementation (see docstring on `audit_logs`).
 """
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 from fastapi import Header, HTTPException
@@ -14,6 +15,11 @@ from server import (
     api, db, get_current_user, _check_mrf_access, _check_po_access,
     _strip_oids,
 )
+
+# SEC-001 (audit BOLA): non-MRF / non-PO entity audits (customer / vendor /
+# material / project etc.) contain PII in `details.old/new`. Restrict them
+# to management roles — matching CUSTOMER_READ_ROLES in customers.py.
+MANAGEMENT_READ_ROLES = {"admin", "director", "gm", "pm", "purchase"}
 
 
 @api.get("/audit")
@@ -52,16 +58,25 @@ async def audit_logs(entity_id: Optional[str] = None,
                 raise HTTPException(404, "PO not found")
             await _check_po_access(u, p)
         else:
-            # Customer / vendor / material / master audits — visible to
-            # management (admin/director/gm/purchase/pm) and to the acting user.
-            if u.role not in ("admin", "director", "purchase", "pm", "gm"):
-                # site_engineer / store can still see logs they themselves generated
-                pass
+            # SEC-001 fix: Customer / vendor / material / master audits contain
+            # PII (GSTIN, PAN, phone, email, addresses) in details.old/new.
+            # Restrict entity-scoped reads for these entity types to management
+            # roles. Non-management callers can still see their own actions
+            # against the same entity via the {"user_id": u.user_id} filter
+            # applied below.
+            if u.role not in MANAGEMENT_READ_ROLES:
+                raise HTTPException(
+                    403,
+                    "Entity audit history is restricted to management roles."
+                )
 
     q: Dict[str, Any] = {}
     if entity_id: q["entity_id"] = entity_id
     if entity: q["entity"] = entity
-    if action: q["action"] = {"$regex": f"^{action}"}
+    if action:
+        # SEC hardening: escape the user-controlled action prefix to prevent
+        # ReDoS on audit_logs (Mongo regex is anchored + literal only).
+        q["action"] = {"$regex": f"^{re.escape(action)}"}
     if user_id: q["user_id"] = user_id
     if user_role: q["user_role"] = user_role
     if since:

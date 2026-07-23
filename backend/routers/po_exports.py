@@ -44,6 +44,7 @@ from server import (
     _validate_mrf_for_export, _safe_cell,
     VASU_PRIMARY, VASU_STATE, VASU_STATE_CODE, VASU_GSTIN,
     _ALLOWED_PO_FORMATS, _ALLOWED_MRF_FORMATS,
+    bearer_from_url_token,
 )
 
 
@@ -52,7 +53,7 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
                  force: Optional[int] = 0,
                  authorization: Optional[str] = Header(None)):
     # Allow token via query for browser download
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:
@@ -236,7 +237,7 @@ async def po_pdf(po_id: str, token: Optional[str] = None,
 @api.get("/export/mrf")
 async def export_mrf(token: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "director", "admin", "pm", "gm"):
         raise HTTPException(403, "Not allowed")
@@ -296,7 +297,7 @@ async def export_mrf(token: Optional[str] = None,
 @api.get("/export/po")
 async def export_po(token: Optional[str] = None,
                     authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "director", "admin", "gm", "pm"):
         raise HTTPException(403, "Not allowed")
@@ -310,7 +311,7 @@ async def export_po(token: Optional[str] = None,
 async def export_tally(kind: str = "purchase", token: Optional[str] = None,
                        authorization: Optional[str] = Header(None)):
     """Bulk Tally purchase-voucher rows. kind=purchase | invoice."""
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/director/admin")
@@ -391,7 +392,7 @@ async def po_export_dispatch(po_id: str,
     fmt = (format or "pdf").lower()
     if fmt not in _ALLOWED_PO_FORMATS:
         raise HTTPException(400, f"format must be one of {_ALLOWED_PO_FORMATS}")
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     po = await db.pos.find_one({"po_id": po_id}, {"_id": 0})
     if not po:

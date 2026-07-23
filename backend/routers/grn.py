@@ -30,6 +30,7 @@ from server import (
     _log_export, _vasu_footer, _excel_response, _validation_error,
     _safe_cell,
     VASU_PRIMARY, GRN_APPROVER_ROLES,
+    bearer_from_url_token,
 )
 
 
@@ -108,7 +109,7 @@ async def get_grn(grn_id: str, authorization: Optional[str] = Header(None)):
 async def grn_pdf(grn_id: str, token: Optional[str] = None,
                    force: Optional[int] = 0,
                    authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     grn = await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
     if not grn:
@@ -287,7 +288,7 @@ async def grn_export_dispatch(grn_id: str,
     fmt = (format or "pdf").lower()
     if fmt not in ("pdf", "excel"):
         raise HTTPException(400, "format must be 'pdf' or 'excel'")
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     grn = await db.grns.find_one({"grn_id": grn_id}, {"_id": 0})
     if not grn:
@@ -318,7 +319,7 @@ async def grn_export_dispatch(grn_id: str,
 @api.get("/export/grn")
 async def export_grn(token: Optional[str] = None,
                       authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "director", "admin", "store", "pm", "gm"):
         raise HTTPException(403, "Not allowed")

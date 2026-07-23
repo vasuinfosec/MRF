@@ -22,6 +22,7 @@ from server import (
     next_invoice_number,
     VASU_PRIMARY,
     InvoiceCreate,
+    bearer_from_url_token,
 )
 
 
@@ -124,7 +125,7 @@ async def get_invoice(inv_id: str, authorization: Optional[str] = Header(None)):
 @api.get("/invoice/{inv_id}/pdf")
 async def invoice_pdf(inv_id: str, token: Optional[str] = None,
                        authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "director", "admin"):
         raise HTTPException(403, "Only purchase/billing/admin")

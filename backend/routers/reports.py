@@ -6,17 +6,79 @@ Read-only — no writes, no audit rows produced here.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Set
 from fastapi import Header
 
 from server import api, db, get_current_user, now_utc
 
+# SEC hardening: dashboard/report scope by role. Management sees all;
+# PM sees their projects; site_engineer sees MRFs they created; store
+# sees MRFs they raised or received.
+_MGMT_ROLES = {"admin", "director", "gm", "purchase"}
+
+
+async def _scoped_mrf_po_ids(user_id: str, role: str) -> Optional[Dict[str, Set[str]]]:
+    """Return None for management (no filter). Otherwise return the caller's
+    reachable mrf_ids / po_ids as sets — used to filter mrfs/pos lists."""
+    if role in _MGMT_ROLES:
+        return None
+    mrf_ids: Set[str] = set()
+    po_ids: Set[str] = set()
+    if role == "pm":
+        prjs = await db.projects.find(
+            {"project_managers": user_id}, {"_id": 0, "project_id": 1}
+        ).to_list(500)
+        proj_ids = [p["project_id"] for p in prjs]
+        if proj_ids:
+            mrfs = await db.mrfs.find(
+                {"project_id": {"$in": proj_ids}, "deleted": False},
+                {"_id": 0, "mrf_id": 1},
+            ).to_list(5000)
+            mrf_ids = {m["mrf_id"] for m in mrfs}
+            pos = await db.pos.find(
+                {"project_id": {"$in": proj_ids}, "deleted": False},
+                {"_id": 0, "po_id": 1},
+            ).to_list(5000)
+            po_ids = {p["po_id"] for p in pos}
+    elif role == "site_engineer":
+        mrfs = await db.mrfs.find(
+            {"created_by": user_id, "deleted": False},
+            {"_id": 0, "mrf_id": 1},
+        ).to_list(5000)
+        mrf_ids = {m["mrf_id"] for m in mrfs}
+        if mrf_ids:
+            pos = await db.pos.find(
+                {"mrf_refs": {"$in": list(mrf_ids)}, "deleted": False},
+                {"_id": 0, "po_id": 1},
+            ).to_list(5000)
+            po_ids = {p["po_id"] for p in pos}
+    elif role == "store":
+        mrfs = await db.mrfs.find(
+            {"created_by": user_id, "deleted": False},
+            {"_id": 0, "mrf_id": 1},
+        ).to_list(5000)
+        mrf_ids = {m["mrf_id"] for m in mrfs}
+        # Store also sees PO events for POs that reference "their" MRFs
+        if mrf_ids:
+            pos = await db.pos.find(
+                {"mrf_refs": {"$in": list(mrf_ids)}, "deleted": False},
+                {"_id": 0, "po_id": 1},
+            ).to_list(5000)
+            po_ids = {p["po_id"] for p in pos}
+    return {"mrf_ids": mrf_ids, "po_ids": po_ids}
+
 
 @api.get("/reports/dashboard")
 async def dashboard(authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
-    mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
-    pos = await db.pos.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    u = await get_current_user(authorization)
+    scope = await _scoped_mrf_po_ids(u.user_id, u.role)
+    mrf_q: Dict[str, Any] = {"deleted": False}
+    po_q: Dict[str, Any] = {"deleted": False}
+    if scope is not None:
+        mrf_q["mrf_id"] = {"$in": list(scope["mrf_ids"])} if scope["mrf_ids"] else "__none__"
+        po_q["po_id"] = {"$in": list(scope["po_ids"])} if scope["po_ids"] else "__none__"
+    mrfs = await db.mrfs.find(mrf_q, {"_id": 0}).to_list(5000) if mrf_q.get("mrf_id") != "__none__" else []
+    pos = await db.pos.find(po_q, {"_id": 0}).to_list(5000) if po_q.get("po_id") != "__none__" else []
     total_mrf = len(mrfs)
     pending_pm = sum(1 for m in mrfs if m["status"] in ["pm_review", "submitted"])
     pending_purchase = sum(1 for m in mrfs if m["status"] in
@@ -75,8 +137,14 @@ async def dashboard(authorization: Optional[str] = Header(None)):
 
 @api.get("/reports/mrf-ageing")
 async def mrf_ageing(authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
-    mrfs = await db.mrfs.find({"deleted": False}, {"_id": 0}).to_list(1000)
+    u = await get_current_user(authorization)
+    scope = await _scoped_mrf_po_ids(u.user_id, u.role)
+    mrf_q: Dict[str, Any] = {"deleted": False}
+    if scope is not None:
+        mrf_q["mrf_id"] = {"$in": list(scope["mrf_ids"])} if scope["mrf_ids"] else "__none__"
+        if mrf_q["mrf_id"] == "__none__":
+            return []
+    mrfs = await db.mrfs.find(mrf_q, {"_id": 0}).to_list(5000)
     now = now_utc()
     out = []
     for m in mrfs:
@@ -99,13 +167,18 @@ async def mrf_ageing(authorization: Optional[str] = Header(None)):
 async def grn_variance(project_id: Optional[str] = None,
                         vendor_id: Optional[str] = None,
                         authorization: Optional[str] = Header(None)):
-    await get_current_user(authorization)
+    u = await get_current_user(authorization)
     q: Dict[str, Any] = {"deleted": False}
     if project_id:
         q["project_id"] = project_id
     if vendor_id:
         q["vendor_id"] = vendor_id
-    pos = await db.pos.find(q, {"_id": 0}).to_list(1000)
+    scope = await _scoped_mrf_po_ids(u.user_id, u.role)
+    if scope is not None:
+        if not scope["po_ids"]:
+            return []
+        q["po_id"] = {"$in": list(scope["po_ids"])}
+    pos = await db.pos.find(q, {"_id": 0}).to_list(5000)
     inv_totals: Dict[str, float] = {}
     inv_docs = await db.invoices.find({}, {"_id": 0}).to_list(2000)
     for iv in inv_docs:

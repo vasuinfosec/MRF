@@ -28,6 +28,7 @@ from server import (
     next_mrf_number,
     MRFCreate, MRF, MRFItem, ApprovalAction,
     MRF_CREATORS,
+    bearer_from_url_token,
 )
 
 
@@ -404,7 +405,7 @@ async def update_mrf_line(mrf_id: str, line_id: str, body: dict,
 async def mrf_pdf_route(mrf_id: str, token: Optional[str] = None,
                           force: Optional[int] = 0,
                           authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     mrf = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not mrf:
@@ -436,7 +437,7 @@ async def mrf_export_dispatch(mrf_id: str,
     fmt = (format or "pdf").lower()
     if fmt not in _ALLOWED_MRF_FORMATS:
         raise HTTPException(400, f"format must be one of {_ALLOWED_MRF_FORMATS}")
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     mrf = await db.mrfs.find_one({"mrf_id": mrf_id}, {"_id": 0})
     if not mrf:

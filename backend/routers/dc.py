@@ -22,6 +22,7 @@ from server import (
     next_dc_number,
     DCCreate, DC, UserOut,
     DC_ROLES, DC_APPROVER_ROLES,
+    bearer_from_url_token,
 )
 
 
@@ -217,7 +218,7 @@ async def delete_dc(dc_id: str, reason: Optional[str] = None,
 async def dc_pdf(dc_id: str, token: Optional[str] = None,
                   force: Optional[int] = 0,
                   authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
     if not dc:
@@ -255,7 +256,7 @@ async def dc_export_dispatch(dc_id: str,
     fmt = (format or "pdf").lower()
     if fmt not in ("pdf", "excel"):
         raise HTTPException(400, "format must be 'pdf' or 'excel'")
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     dc = await db.dcs.find_one({"dc_id": dc_id}, {"_id": 0})
     if not dc:
@@ -276,7 +277,7 @@ async def dc_export_dispatch(dc_id: str,
 @api.get("/export/dc")
 async def export_dc(token: Optional[str] = None,
                      authorization: Optional[str] = Header(None)):
-    auth = authorization or (f"Bearer {token}" if token else None)
+    auth = authorization or bearer_from_url_token(token)
     u = await get_current_user(auth)
     if u.role not in ("purchase", "director", "admin", "pm", "gm", "store"):
         raise HTTPException(403, "Not allowed")
