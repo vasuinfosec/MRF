@@ -667,14 +667,50 @@ frontend:
         -agent: "main"
         -comment: "Two validators: PO checks Vendor name, Customer ID+name, Project, PO number/date, line items (description, qty>0, rate≥0). HSN warning for PDF/Excel; MANDATORY for Tally. Missing Vasu GSTIN → warning for PDF/Excel, MANDATORY for Tally. MRF validator similar (customer_id is warning-only). _log_export writes to audit_logs collection with action='export_{format}', details include format, record_number, warnings list, forced flag. Verified via GET /api/audit shows all 8 test exports logged with correct format+record."
 
+  - task: "Task 4 — UOM Master & Conversion rules"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/routers/uom.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New router registered before app.include_router. Endpoints: GET/POST/PUT/DELETE /api/uom/units (backed by masters collection where category='unit'); GET/POST/DELETE /api/uom/conversions (uom_conversions collection); POST /api/uom/convert (BFS depth ≤4 over conversion graph, supports reverse via 1/f); GET /api/uom/units/template.csv & /api/uom/conversions/template.csv; POST /api/uom/units/import & /api/uom/conversions/import (multipart CSV). Write access limited to admin/director. Deleting a unit referenced by any conversion is blocked. Duplicate directional pairs, unregistered units, factor≤0, from==to all rejected. All writes audit-logged via master_audit."
+
+  - task: "Task 4 — Material Category tree"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/routers/categories.py"
+    stuck_count: 0
+    priority: "high"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "New router. Endpoints: GET /api/categories?tree=1|0&include_inactive=0|1; POST /api/categories (parent_id optional); PUT /api/categories/{id} (rename/move/toggle-active with reason required); DELETE /api/categories/{id} (soft, guarded by active children + material references); GET /api/categories/template.csv + POST /api/categories/import (path-based CSV, auto-creates missing parents). Cycle prevention via BFS on parent chain. Sibling-uniqueness enforced case-insensitively per parent. `path` auto-recomputed on every mutation and materialised as `category_path` when a material is linked."
+
+  - task: "Task 4 — Materials router integration with category_id + base_uom"
+    implemented: true
+    working: "NA"
+    file: "/app/backend/routers/masters.py"
+    stuck_count: 0
+    priority: "medium"
+    needs_retesting: true
+    status_history:
+        -working: "NA"
+        -agent: "main"
+        -comment: "MaterialIn extended with optional category_id (FK to material_categories.cat_id) and base_uom (must match an active unit in masters category='unit'). create_material and update_material validate both and persist category_path snapshot. Missing/inactive category_id returns 400 with 'category_id not found or inactive'; unregistered base_uom returns 400 with 'not registered — add under Units'. Backward-compatible: legacy calls without the two fields still work."
+
+
 test_plan:
   current_focus:
-    - "UAT: LLM file-upload path (BOQ / vendor quote / invoice PDFs) — /api/llm/item-standardise, /api/llm/quotation-compare, /api/llm/reconcile"
-    - "Phase 9C refactor: /api/notifications now served from routers/notifications.py"
-    - "Phase 9C refactor: /api/reports/dashboard, /api/reports/mrf-ageing, /api/reports/grn-variance now served from routers/reports.py"
-    - "Phase 9C refactor: /api/audit and /api/audit/facets now served from routers/audit.py"
-    - "Phase 9C refactor: /api/settings/thresholds (GET+PUT) now served from routers/settings.py"
-    - "server.py shrunk 5276 -> 4966 lines (~310 lines extracted)"
+    - "Task 4 backend: /api/uom/units CRUD + RBAC + duplicate detection"
+    - "Task 4 backend: /api/uom/conversions CRUD + BFS-based /api/uom/convert (direct/reverse/chained/no-path)"
+    - "Task 4 backend: /api/categories CRUD + cycle prevention + guarded delete"
+    - "Task 4 backend: /api/materials extended validation on category_id and base_uom (BC preserved)"
+    - "Task 4 backend: CSV templates + multipart CSV bulk imports for units/conversions/categories"
   stuck_tasks: []
   test_all: false
   test_priority: "high_first"
@@ -700,3 +736,7 @@ agent_communication:
 agent_communication:
     -agent: "main"
     -message: "Task 3A.1 corrections complete on staging (:8002 against :27018 vasu_mrf_staging_qa). Zero production changes. Files touched: /app/backend/server.py (UserOut adds `roles: List[str]`, added `_ensure_roles_shape` backfill helper), /app/backend/routers/auth.py (uninvited Google sign-ins now record ONLY into `pending_access_requests`, NO users row; invited sign-in creates INACTIVE user with roles=[]; legacy branch dual-writes roles=[role]; set_role guardrails; dev-login dual-writes roles), /app/backend/routers/access_security_v2.py (rewritten with guardrails: no self-elevation, no last-Director removal; new endpoints: GET /pending-requests, POST /pending-requests/{rid}/invite, POST /users/{uid}/roles for multi-role assignment). New artefacts: /app/backup_artifacts/mongo_v2_migration_plan.md (Part A mongod --auth cutover + Part B ACCESS_SECURITY_V2 flag, no rm/pkill/git-checkout, versioned rollback via .env backups), /app/backup_artifacts/access_review_20260721T185625Z.{json,md} (read-only, secrets masked). Staging QA: /app/backup_artifacts/task3a_report.json → 26/26 pass with V2=1; /app/backup_artifacts/regression_report.json → 26/26 pass with V2=0 (BC proof). Please run backend regression on the ACCESS_SECURITY_V2=1 code paths using the staging Mongo. Do NOT touch the production DB on :27017. Coverage requested: (a) Uninvited /api/auth/session → 403 with `access_pending` and a new row in `pending_access_requests` (no row in `users`). (b) Invited /api/auth/session → 403 `access_pending_activation`; users row inserted with is_active=False, role=None, roles=[]. (c) Director activation of pending user with role → is_active=True, roles=[role], role=role. (d) Self-activation attempt (uid==requester) → HTTP 400. (e) Deactivation of last active Director by admin → HTTP 400 last_director_protected. (f) POST /admin/access/users/{uid}/roles with valid list → dual-writes role & roles; last-director role strip → 400 last_director_protected; invalid role → 400. (g) POST /admin/access/pending-requests/{rid}/invite promotes to invitation. (h) dev-login returns 404 with V2=1 regardless of host. (i) V2=0 legacy path still works: users_list, mrf list/create/approve/return, po/grn/dc/cs/invoice/billing list, exports, audit_list, ai_my_budget & deterministic AI panels. Staging creds & Mongo URL are in /run/vasu_mrf_staging.env — do not persist them to any report. MOCKED: none. Backend-only test scope."
+
+agent_communication:
+    -agent: "main"
+    -message: "Task 4 (Material Master & UOM Controls) — backend + admin UI implemented. New routers: /app/backend/routers/uom.py, /app/backend/routers/categories.py. Endpoints: (a) GET/POST/PUT/DELETE /api/uom/units — CRUD on the `masters` collection where category='unit' with new fields symbol, kind, is_base. Roles: admin/director may write; anyone auth may read. (b) GET/POST/DELETE /api/uom/conversions — separate `uom_conversions` collection with { conv_id, from_uom, to_uom, factor, notes }. Rejects duplicate directional pairs; rejects unregistered units; rejects factor<=0. (c) POST /api/uom/convert body {qty, from_uom, to_uom} → { qty_out, factor } uses BFS (depth ≤4) over the conversion graph to resolve chained + reverse paths. Returns 400 if no path. (d) GET /api/uom/units/template.csv, /api/uom/conversions/template.csv; POST /api/uom/units/import, /api/uom/conversions/import — multipart CSV with de-dup & validation. (e) GET /api/categories?tree=1|0&include_inactive=0|1 — hierarchical tree in `material_categories` with auto-computed `path` (slash-joined). POST /api/categories (parent_id optional). PUT /api/categories/{id} rename/move/toggle-active with cycle-prevention (BFS) and sibling-uniqueness. DELETE deactivates (blocked if active children or referenced by materials). GET /api/categories/template.csv + POST /api/categories/import — path-based CSV import (auto-creates parents in order). (f) Materials router extended: POST/PUT /api/materials now accept + validate optional `category_id` (FK to material_categories) and `base_uom` (must match an active unit) and persist `category_path` snapshot. New DB indexes on server.py startup: uom_conversions.conv_id (unique), (from_uom_norm,to_uom_norm) (unique), material_categories.cat_id (unique), (parent_id,name_norm), path. New admin screens (Director/Admin gated via useAccessGuard): /app/frontend/app/admin/uom.tsx (units + conversions + live convert widget + CSV template/import buttons) and /app/frontend/app/admin/categories.tsx (tree with expand/collapse + parent chip picker + rename/move edit modal with reason + CSV template/import). Two new CTAs added to /app/frontend/app/masters.tsx (director/admin only). Manually smoke-tested via curl: created Metre + Centimetre + rule 100 → convert 5m=500cm and reverse 250cm=2.5m; validated cycle prevention on Fire Alarm ↔ Detectors; invalid category_id/base_uom on material create → 400 with clear message; CSV templates return correct bytes. Please run backend regression for Task 4: (a) UOM CRUD RBAC — anon/site_engineer/pm/purchase should be 401/403 on POST/PUT/DELETE /api/uom/units + /api/uom/conversions; admin & director should get 200. (b) POST /api/uom/units duplicate (case-insensitive) → 400. (c) POST /api/uom/conversions with unregistered unit → 400 with 'not registered' msg; duplicate directional pair → 400; factor=0 → 400; from==to → 400. (d) DELETE /api/uom/units that is in use by a conversion → 400. (e) POST /api/uom/convert — direct hit, reverse hit, 2-hop chain, no-path. (f) POST/DELETE + GET /api/categories — create root + child, tree structure correct, path auto-computed. (g) PUT /api/categories cycle move → 400. (h) DELETE parent with active children → 400. (i) POST /api/materials with valid category_id + base_uom → persists category_path; bad category_id → 400; bad base_uom → 400. (j) CSV templates return non-empty text/csv responses; POST /uom/units/import + /uom/conversions/import + /categories/import handle create/duplicate/error correctly (multipart). (k) Materials router should still let a director create material without category_id/base_uom (BC). MOCKED: none. Backend-only scope. Use staging DB where possible. Seeded director token for tests: /app/memory/test_credentials.md."

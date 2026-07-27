@@ -247,6 +247,38 @@ export default function Masters() {
           <Ionicons name="people-outline" size={26} color={theme.colors.primary} />
         </TouchableOpacity>
 
+        {/* Task 4 — Material Category tree */}
+        {isDirectorOrAdmin ? (
+          <TouchableOpacity
+            testID="open-categories"
+            onPress={() => router.push("/admin/categories")}
+            style={styles.cta}
+            activeOpacity={0.85}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.ctaTitle}>Material Category Tree →</Text>
+              <Text style={styles.ctaSub}>Hierarchical catalogue used by MRF/PO forms. CSV bulk-import supported.</Text>
+            </View>
+            <Ionicons name="git-branch-outline" size={26} color={theme.colors.primary} />
+          </TouchableOpacity>
+        ) : null}
+
+        {/* Task 4 — UOM & Conversion Rules */}
+        {isDirectorOrAdmin ? (
+          <TouchableOpacity
+            testID="open-uom"
+            onPress={() => router.push("/admin/uom")}
+            style={styles.cta}
+            activeOpacity={0.85}
+          >
+            <View style={{ flex: 1 }}>
+              <Text style={styles.ctaTitle}>UOM & Conversion Rules →</Text>
+              <Text style={styles.ctaSub}>Units of measure, base units and conversion factors (e.g. 1 Metre = 100 CM).</Text>
+            </View>
+            <Ionicons name="swap-horizontal-outline" size={26} color={theme.colors.primary} />
+          </TouchableOpacity>
+        ) : null}
+
         <ScrollView horizontal showsHorizontalScrollIndicator={false}
           contentContainerStyle={styles.chipRow} style={{ marginTop: 14, marginHorizontal: -16, paddingHorizontal: 16 }}>
           {visibleTabs.map((t) => {

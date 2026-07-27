@@ -74,12 +74,34 @@ async def create_material(body: MaterialIn, authorization: Optional[str] = Heade
     if dup:
         raise HTTPException(400, f"Material already exists as {dup['material_uid']} (status: {dup['status']})")
     n = await _next_seq("materials")
+    # Task 4: validate category_id (if provided) points to an active category
+    cat_id = (body.category_id or "").strip() or None
+    cat_path = ""
+    if cat_id:
+        cat = await db.material_categories.find_one(
+            {"cat_id": cat_id, "active": True}, {"_id": 0, "path": 1}
+        )
+        if not cat:
+            raise HTTPException(400, "category_id not found or inactive")
+        cat_path = cat.get("path") or ""
+    # Task 4: validate base_uom & unit against registered UOM master (if provided)
+    base_uom = (body.base_uom or "").strip()
+    if base_uom:
+        exists = await db.masters.find_one({
+            "category": "unit", "active": True,
+            "name": {"$regex": f"^{re.escape(base_uom)}$", "$options": "i"},
+        }, {"_id": 0, "name": 1})
+        if not exists:
+            raise HTTPException(400, f"base_uom '{base_uom}' is not registered — add under Units")
     doc = {
         "material_uid": _mat_uid(n),
         "description": desc,
         "description_norm": norm,
         "category": (body.category or "").strip(),
+        "category_id": cat_id,
+        "category_path": cat_path,
         "unit": (body.unit or "").strip(),
+        "base_uom": base_uom or None,
         "gst_rate": float(body.gst_rate) if body.gst_rate is not None else None,
         "item_code": (body.item_code or "").strip(),
         "remarks": (body.remarks or "").strip(),
@@ -115,6 +137,33 @@ async def update_material(material_uid: str, body: dict,
     for k in ("description", "category", "unit", "item_code", "remarks"):
         if k in body:
             updates[k] = (str(body[k] or "")).strip()
+    # Task 4: allow moving to a different tree-category
+    if "category_id" in body:
+        new_cid = (body.get("category_id") or "").strip() or None
+        if new_cid:
+            cat = await db.material_categories.find_one(
+                {"cat_id": new_cid, "active": True}, {"_id": 0, "path": 1}
+            )
+            if not cat:
+                raise HTTPException(400, "category_id not found or inactive")
+            updates["category_id"] = new_cid
+            updates["category_path"] = cat.get("path") or ""
+        else:
+            updates["category_id"] = None
+            updates["category_path"] = ""
+    # Task 4: allow updating base_uom (validate against masters)
+    if "base_uom" in body:
+        new_base = (body.get("base_uom") or "").strip()
+        if new_base:
+            exists = await db.masters.find_one({
+                "category": "unit", "active": True,
+                "name": {"$regex": f"^{re.escape(new_base)}$", "$options": "i"},
+            }, {"_id": 0, "name": 1})
+            if not exists:
+                raise HTTPException(400, f"base_uom '{new_base}' is not registered")
+            updates["base_uom"] = new_base
+        else:
+            updates["base_uom"] = None
     if "gst_rate" in body:
         try:
             updates["gst_rate"] = float(body["gst_rate"]) if body["gst_rate"] is not None else None

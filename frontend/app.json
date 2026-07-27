@@ -23,7 +23,17 @@
     "web": {
       "bundler": "metro",
       "output": "single",
-      "favicon": "./assets/images/favicon.png"
+      "favicon": "./assets/images/favicon.png",
+      "name": "ViL AI Prompt Control",
+      "shortName": "ViL AI",
+      "description": "Vasu Infosec — Material Requisition & Purchase Order System with AI Purchase Manager and role-based approvals.",
+      "themeColor": "#0F172A",
+      "backgroundColor": "#F8FAFC",
+      "display": "standalone",
+      "orientation": "any",
+      "lang": "en",
+      "startUrl": "/",
+      "scope": "/"
     },
     "plugins": [
       "expo-router",

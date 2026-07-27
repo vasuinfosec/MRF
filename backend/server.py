@@ -655,7 +655,9 @@ def _word_count(s: str) -> int: return len([w for w in re.split(r"\s+", (s or ""
 class MaterialIn(BaseModel):
     description: str
     category: str = ""      # system_category (FAS/FFT/GSS/CCTV etc.)
+    category_id: Optional[str] = None   # Task 4: FK -> material_categories.cat_id (tree)
     unit: str = ""
+    base_uom: Optional[str] = None      # Task 4: base UOM for conversions (unit name)
     gst_rate: Optional[float] = None
     item_code: Optional[str] = ""   # user-editable short recall code
     remarks: Optional[str] = ""
@@ -1800,6 +1802,14 @@ async def startup():
     await db.llm_budget_reservations.create_index("reservation_id", unique=True)
     await db.llm_budget_reservations.create_index("created_at",
                                                     expireAfterSeconds=1800)
+    # ---- Task 4: UOM conversions & Material Category tree ----
+    await db.uom_conversions.create_index("conv_id", unique=True)
+    await db.uom_conversions.create_index(
+        [("from_uom_norm", 1), ("to_uom_norm", 1)], unique=True
+    )
+    await db.material_categories.create_index("cat_id", unique=True)
+    await db.material_categories.create_index([("parent_id", 1), ("name_norm", 1)])
+    await db.material_categories.create_index("path")
 
 @app.on_event("shutdown")
 async def shutdown():
@@ -1833,6 +1843,8 @@ from routers import auth as _auth_router  # noqa: E402,F401
 from routers import po_exports as _po_exports_router  # noqa: E402,F401
 from routers import ai_purchase as _ai_purchase_router  # noqa: E402,F401
 from routers import access_security_v2 as _access_security_v2_router  # noqa: E402,F401
+from routers import uom as _uom_router  # noqa: E402,F401
+from routers import categories as _categories_router  # noqa: E402,F401
 
 app.include_router(api)
 # CORS: Bearer-token auth (no cookies) — allow_credentials MUST be False when
