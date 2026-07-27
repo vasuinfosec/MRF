@@ -1,0 +1,40 @@
+{
+  "summary": "Phase 2 (Site Engineer restoration + PO threshold approval chain) backend regression. 40/40 in-scope tests PASSED (100%) on first run — no code fixes required. Every case in the review request is verified: full E2E happy path (steps 2-14, incl. Site Engineer -> PM -> Purchase -> GM/Director gates), threshold settings CRUD (15-19), role visibility for MRFs/POs/Projects (20-26), and cross-role denials (27-30). PO threshold logic works exactly as specified: total <= 50000 -> issued; 50000 < total <= 500000 -> pending_gm_approval; total > 500000 -> pending_director_approval. MRF qty_ordered is deferred until PO is approved (verified 0 -> 5 after GM approve). GRN endpoint (/po/{id}/received) returns 400 while PO is pending_gm/director_approval or rejected. GM correctly denied on director-tier PO (403). Site engineer now first-class in dev-login and can create/submit MRFs and record GRN on POs originating from own MRFs. Threshold PUT enforces director >= gm (400 on violation) and is restricted to director/admin. Ran alongside 43 additional legacy tests: 4 pre-existing stale-assertion failures in test_phase1_role_reshuffle.py/test_phase1_followup.py are consistent with Phase 2 (site_engineer is no longer invalid/legacy; pm is now in GRN_ROLES) — these should be refreshed by the main agent but are NOT regressions.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase2_approval_chain.py",
+    "/app/test_reports/pytest/phase2_iter10.xml"
+  ],
+  "action_items": [
+    "STALE TEST CLEANUP (non-blocking): Update 4 assertions that pre-date Phase 2 role reshuffle: (a) test_phase1_role_reshuffle.py::TestNewRoles::test_invalid_role_rejected now passes 'site_engineer' expecting 400 but Phase 2 accepts it (200). (b) TestLegacyMigration::test_site_engineer_migrates_to_pm expects site_engineer->pm migration, but Phase 2 removed that mapping (site_engineer is first-class). (c) TestPOReceived::test_pm_forbidden and test_phase1_followup.py::TestPOReceivedRoles::test_pm_403 expect PM 403 on /po/received but Phase 2 added 'pm' to GRN_ROLES per operational chain. Fix by updating expected values to reflect Phase 2 spec.",
+    "Docstring drift in server.py line 43-44: comment says 'Admin is a system-management role and NOT part of the approval chain by default' but require_roles() has a global admin bypass. This is intentional per the code review (admin has admin-override powers on data), but the comment could be clarified so it matches behavior.",
+    "Consider extracting the 4 role-tuple sets (MRF_APPROVERS, MRF_EDITORS, MRF_CREATORS, GRN_ROLES) into named module-level constants that are then reused in `require_roles(*...)` calls at lines 700, 858, 921, 942, 1035, 1134, 1250, 1282, etc. Currently the same tuples are re-declared inline at every endpoint, which is where the bug class of duplicated/omitted role tuples (fixed 3 times in previous iterations) originates."
+  ],
+  "critical_code_review_comments": [
+    "server.py:78 `_po_initial_status()` uses strict > comparators consistent with the spec (total ≤ GM -> issued; GM < total ≤ Director -> pending_gm; total > Director -> pending_director). Verified with 10_000 (issued), 100_000 (pending_gm), 1_000_000 (pending_director), all with GST=0/freight=0 to make math deterministic.",
+    "server.py:1064-1081 correctly defers MRF item qty_ordered rollup until PO is approved. Verified: mid PO leaves MRF qty_ordered=0 while pending_gm_approval, then jumps to full qty after GM approve.",
+    "server.py:1047-1048 correctly blocks GM from approving director-tier POs with 403; but allows director to approve either tier (which is spec-correct).",
+    "server.py:1139 GRN endpoint correctly returns 400 when po.status is pending_gm_approval / pending_director_approval / rejected — before the _check_po_access check runs (so a SE calling GRN on a pending PO gets 400, not 403, matching the spec).",
+    "server.py:1443-1466 PUT /settings/thresholds enforces director/admin (403), numeric validation, non-negative, and director >= gm (400). Full 4-way validation coverage.",
+    "server.py:344-372 /auth/dev-login accepts site_engineer as first-class; legacy 'site_engineer' is no longer in LEGACY_ROLE_MAP (server.py:46-53), so a legacy-persisted site_engineer stays site_engineer. Migration comment inside dev_login is now truthful."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% (40/40 in-scope Phase 2 tests)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Reused idempotent POST /api/seed. Test data prefixed TEST_. Fresh MRFs/POs are created per E2E test class; no cleanup required (test project VIS-101 is a demo project).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run `EXPO_BACKEND_URL=https://purchase-workflow-10.preview.emergentagent.com python -m pytest /app/backend/tests/test_phase2_approval_chain.py -v` — expect 40/40 pass in ~10s. Phase 2 approval-chain suite is deterministic (resets thresholds to defaults on entry). For a fuller regression include test_phase1_followup.py + test_phase1_followup2.py (should be 19/19). Do NOT expect test_phase1_role_reshuffle.py to be fully green — 3 of its assertions are stale re: Phase 2. The stale suites (test_security_hardening.py, test_sec002_pdf_scoping.py, test_mrf_po_workflow.py) still use retired role names and will fail with 100+ errors unrelated to current code. ENABLE_DEV_LOGIN=1 must remain in /app/backend/.env.",
+  "rca_of_issue": "N/A — no bugs found. All 30 explicit review cases pass on first run. Prior iterations (7-9) had 3 rounds of copy-paste role-tuple bugs; Phase 2 code is clean of that pattern (verified `grep -nE \"'purchase',\\s*'purchase'|'pm',\\s*'pm'\" backend/server.py` returns zero). Only observation: the same role-tuple is redeclared inline in ~10 endpoints; extracting to a shared constant would harden future changes."
+}

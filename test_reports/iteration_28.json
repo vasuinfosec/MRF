@@ -1,0 +1,29 @@
+{
+  "summary": "Iter-28 verified: Sonnet 4.5 retired from Compare & Reconcile; Deterministic (LLM-free, ₹0) + GPT-4o-mini are the only tiers. Backend 9/9 spec cases PASS (deterministic compare with sorted ranking + %-cheaper recommendation + cost.cost_inr=0; single-vendor deterministic → 400; cheap compare → model=gpt-4o-mini; premium compare silently downshifts even for Director; deterministic reconcile with per_line + aggregate; cheap reconcile → gpt-4o-mini; premium reconcile silently downshifts; Negotiate premium still uses claude-sonnet-4-5-20250929 for Director; item-standardise regression cheap/gpt-4o-mini). iter-22 regression 5/5 PASS (attachments still routed as cheap/gpt-4o-mini). Frontend smoke on 390x844 (Director): Compare tab label shows 'Free / gpt-4o-mini' (Sonnet gone from Compare/3-Way Match); Engine chips cmp-tier-deterministic ('Deterministic (Free, ₹0)') and cmp-tier-cheap ('GPT-4o-mini (₹0.05–₹0.20)') both render; run compare in deterministic mode with 2 vendors → result card shows green 'Deterministic · ₹0' ModelChip, L1/L2 ranking rendered; 3-Way Match panel has matching rec-tier-* chips; Standardise panel does NOT leak compare TierPicker; Negotiate still exposes all 4 aipm-tier-* chips (deterministic/auto/cheap/premium).",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_llm_iter28_compare_reconcile.py",
+    "/app/test_reports/pytest/iter28_compare_reconcile.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "Non-blocking: /app/frontend/app/assistant.tsx:31 comment still says 'Haiku=cheap, Sonnet=premium' — stale doc-comment since iter-28 stripped Sonnet from Compare/Reconcile. Cosmetic only.",
+    "Non-blocking: /app/backend/routers/llm.py:487 header comment '(deterministic OR gpt-4o-mini — Sonnet retired)' is now the truth; keep matching in ai_purchase.py header if it still references Sonnet for Compare/Reconcile.",
+    "Non-blocking: In llm.py:629 and llm.py:847 the silent downshift from premium→cheap happens BEFORE _enforce_tier_and_budget, so a Director's premium request to Compare/Reconcile still counts against the cheap-tier monthly budget rules for non-directors (Director has no cap so this is fine); no fix needed."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_llm_iter28_compare_reconcile.py (created — 9 new iter-28 tests, all passing)"
+  ],
+  "success_rate": {"backend": "100% (14/14 — 9 new + 5 iter22 regression)", "frontend": "100% (all UI smoke checks passed)"},
+  "seed_data_creation": "None. Uses existing dev seed; Compare deterministic call persists 1 llm_suggestion row with tier=deterministic, model=deterministic, cost_inr=0.0.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Env key is EXPO_PUBLIC_BACKEND_URL (fallback EXPO_BACKEND_URL). Tier testIDs: Compare=cmp-tier-{deterministic|cheap}, Reconcile=rec-tier-{deterministic|cheap}, Negotiate=aipm-tier-{deterministic|auto|cheap|premium}. Compare run button: cmp-run. Deterministic Compare returns HTTP 200 with tier='deterministic', model='deterministic', output_parsed._engine='deterministic', cost.cost_inr=0.0 and requires ≥2 structured quotes (returns 400 otherwise). Compare/Reconcile with tier='premium' silently downshifts to cheap/gpt-4o-mini (even for Director). Negotiate (/api/llm/purchase-analysis) with tier='premium' by Director STILL returns model='claude-sonnet-4-5-20250929'. In JSON payload for purchase-analysis, use fields: description/make/unit/qty/tier + current_quote:{vendor_name,qty,rate,gst} (NOT 'quote:{items:[...]}').",
+  "rca_of_issue": "N/A — all iter-28 acceptance criteria met. During test authoring the purchase-analysis payload initially used {vendor_name, quote:{items:[...]}} which returned 400 'Provide at least material_uid, description, or a current_quote'; corrected to use PurchaseAnalysisIn schema (description + current_quote:{qty,rate,gst}) and the Director premium call then returned tier='premium', model='claude-sonnet-4-5-20250929' as expected."
+}

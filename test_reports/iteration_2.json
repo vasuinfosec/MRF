@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 2: Focused testing of GRN + receipts + Excel bulk import features on top of the previously verified MRF/PO/Billing app. Backend: 18/18 NEW pytest cases passing + 27/27 regression suite still green (45/45 total). Frontend: mobile-web preview verified end-to-end for the two new UI surfaces — (a) PO detail page now shows an inline 'Receipt History' box on each item card (date, +qty, user_name) and a 'Goods Received Notes' section at the bottom with a per-GRN PDF button (grn-pdf-*), and (b) /import screen (reached via More → 'Excel Bulk Import') renders both Vendors and MRF cards with all four action buttons; template download opens a new tab (window.open works on web). Backend coverage added: POST /api/po/{id}/received returns {ok, status, grn_id, grn_number}; per-line `receipts` array populated with {date, qty, user_id, user_name}; GET /api/po/{id}/grns is reverse-chronological; GET /api/grns lists all; GRN PDF is a real application/pdf (starts with %PDF); over-receiving is clamped and does NOT create an empty GRN; vendor & MRF template downloads are auth-gated xlsx (PK header); POST /api/import/vendors inserts new + skips duplicates by name + rejects site_engineer with 403 + returns 400 on non-xlsx; POST /api/import/mrf groups rows by (project_code, site, required_by, requesting_person, system_category) and reports errors for unknown project_code. Only one deprecation warning (React Native props.pointerEvents) originating from a library, already reported in iteration 1.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "PO detail (/po/[id])", "issues": ["The 'MRF Refs' line renders the raw MRF UUID (e.g. `mrf_bbf9b6e09deb`) instead of the human-readable MRF number (MRF/2026/xxxx). Same field is stored on the GRN record too; consider mapping to mrf_number on read. Reference: /app/frontend/app/po/[id].tsx line ~106 (label 'MRF Refs:')."]}
+    ],
+    "react_native_issues": [
+      {"component": "RN Web (framework-level)", "issue": "Deprecation warning: props.pointerEvents is deprecated. Use style.pointerEvents. Originates from RN Web / a library, not application code. Reference: browser console during load."}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_grn_and_import.py",
+    "/app/backend/tests/test_mrf_po_workflow.py",
+    "/app/test_reports/pytest/pytest_grn_import.xml"
+  ],
+  "action_items": [
+    "(Nice-to-have) On PO detail page, resolve MRF ids to their MRF numbers before rendering the 'MRF Refs' line. Same applies to the GRN document (po.mrf_refs currently stores ids on the PO — either store both or resolve on read).",
+    "(Optional / non-blocking) Consider surfacing a global GRN list screen — backend endpoint /api/grns already exists but there is no UI page listing all GRNs.",
+    "(Carried over from iteration 1) Locate and update usages of the deprecated `pointerEvents` prop when the upstream library ships a fix."
+  ],
+  "critical_code_review_comments": [
+    "server.py line 1155-1183: /api/import/{vendors,mrf}/template both accept `token` query param and use it as a Bearer auth fallback. This is required so the browser can fetch the xlsx via window.open (no header available). Confirm the token is short-lived / rotated because it will end up in browser history/logs.",
+    "server.py line 1225 (POST /api/import/mrf): the endpoint has NO role check — any authenticated user (including site_engineer, billing) can bulk-create MRFs owned by themselves. Consider restricting to site_engineer/pm/admin or at minimum documenting the intent. Contrast with /api/import/vendors which enforces admin|purchase.",
+    "server.py line 1252-1253: MRF grouping key uses `str(rec.get('required_by') or '')` — required_by from openpyxl can be a datetime, date, or string, so grouping may split logically-same MRFs when Excel returns date types vs strings. Consider coercing to ISO string consistently before grouping.",
+    "server.py line 1273-1276: builds MRFItem with qty_approved=qty_requested by default at import time, but the MRF is created with status='draft'. Once submitted, PM approval flow will overwrite qty_approved anyway, but this pre-approves items visually — verify this is intended.",
+    "server.py line 715-720: PO item `receipts` are appended without cap; over many partial receipts the PO doc could grow. Non-blocking for expected volume, but note for large fleets.",
+    "server.py mark_po_received: if the request supplies qty for a line larger than remaining, it is silently clamped (good). However, if the total clamped receive across all lines is 0 (e.g. everything already received), the endpoint still returns 200 with grn_id=null — clients need to check grn_id/grn_number for null before showing a success toast."
+  ],
+  "updated_files": [],
+  "success_rate": {
+    "backend": "100% new (18/18) + 100% regression (27/27) = 45/45",
+    "frontend": "100% of tested flows (login, PO detail with Receipt History + GRN section + GRN PDF button, /more → import navigation, /import cards + all 4 action buttons + template download popup)"
+  },
+  "seed_data_creation": "POST /api/seed called (idempotent). One TEST MRF and PO created during the GRN pytest run, receipts + 2 GRNs generated. One TEST vendor imported per run (unique name via os.urandom). Two TEST MRFs imported via Excel bulk import (all data prefixed TEST_).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Two backend suites now live at /app/backend/tests/: test_mrf_po_workflow.py (27 regression) and test_grn_and_import.py (18 new — GRN + receipts + Excel imports). Run both with `pytest /app/backend/tests/ -v`. Frontend testIDs to remember for GRN/import: on PO detail — `receipts-<idx>`, `grn-<grn_number-with-slashes-replaced-by-dashes>`, `grn-pdf-<grn_number-with-slashes-replaced-by-dashes>`; import navigation — More screen `import-btn` (routes to /import); import screen — `vendors-import-card`, `mrf-import-card`, `dl-vendor-template`, `upload-vendors-btn`, `dl-mrf-template`, `upload-mrf-btn`, `import-result`. `dl-*-template` uses window.open with ?token=<jwt> in the URL. `upload-*-btn` uses expo-document-picker which on web falls back to a native <input type=file>; file upload can be exercised with backend curl or Playwright's set_input_files if you need it. Server base is https://purchase-workflow-10.preview.emergentagent.com. Note: PO detail shows raw MRF id in 'MRF Refs' line — flagged as design issue for main agent."
+}

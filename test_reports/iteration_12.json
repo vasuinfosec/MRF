@@ -1,0 +1,42 @@
+{
+  "summary": "Iteration 12 — Phase 2c backend regression. 25/25 tests PASSED (100%) in ~7s on first run after test-scaffolding fixes only (no product-code changes). Coverage of every review-request case: Customer snapshot on MRF/PO list (1,2), snapshot copied at MRF create (3,5), PO create snapshots from linked project (4). Tally XLSX export — 200 for admin/purchase (6,7), 400 for bogus kind (8), 403 for site_engineer/pm (9,10), header row exactly matches the 23-column spec (11), default kind='purchase' equivalence (24). PDF smoke — PO/GRN/Invoice all 200 with content-type application/pdf and body starts with %PDF, size > 1KB (12,13,14; GRN triggered via POST /po/{id}/received side-effect, invoice created against the same PO). MRF line-item edit — no reason → 400 with correct detail (15), admin edit with reason returns changes+log and mirrors into master_audit_logs with entity='mrf.item' and entity_id='<mrf_number>#<line_id>' (16, verified via GET /master-audit?entity=mrf.item), no-diff → 400 'No changes provided' (17), SE creator can edit own MRF (18), non-creator SE blocked 403 (19), non-existent line_id 404 (22), non-numeric qty_requested 400 (23). Locked-status matrix — fully-received MRF (status='received') allows admin edits (20) and blocks SE (21). Master-audit filter=mrf.item returns non-empty typed entries (25). NO product bugs found — all fixes were in the test scaffolding (correct MRF submit→approve→send-to-purchase sequence, correct approve body shape {action:'approve'}, GRN-via-receive flow, invoice creation using /invoice endpoint).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_phase2c_backend.py",
+    "/app/test_reports/pytest/phase2c_iter12.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "server.py:1327-1385 `PUT /api/mrf/{mrf_id}/items/{line_id}` — reason enforcement, per-field diff into items[].change_log[], mirror into master_audit_logs via master_audit('mrf.item', f'{mrf_number}#{line_id}', ...): all clean. Numeric coercion for qty_requested/qty_approved raises 400 on non-numeric string. Editable-field allowlist is safe (rejects unknown keys silently, which is the right posture — no schema surprise).",
+    "server.py:1345-1347 locked-status set is {'received','fully_received','closed','cancelled','rejected'} and admin/director override works. Note: canonical_mrf_status() alias-resolves before the check, so both legacy and new status names are protected — good.",
+    "server.py:1100-1117 (create_mrf) and server.py:1418-1444 (create_po) both snapshot customer_id/customer_name from the linked project at write time, with fallback to project.client when the customer master lacks a name. Verified end-to-end.",
+    "server.py:2172-2267 `GET /api/export/tally` — RBAC (purchase/director/admin only), kind ∈ {'purchase','invoice'}, defaults to 'purchase', 400 on bogus values. openpyxl workbook returned via _excel_response with correct spreadsheetml content-type. Header row exactly matches spec (23 columns, correct order).",
+    "server.py:2210-2217 CGST/SGST vs IGST split uses `'MH' in address.upper() or 'MAHARASHTRA' in address.upper()`. Edge case (not tested in this run, worth noting): a vendor with address 'DELHI, PIN 110001, contact MHz Systems' would falsely be flagged intra-state because 'MH' matches inside 'MHz'. If Tally imports need higher fidelity, tighten to word-boundary regex or check a dedicated vendor.state field.",
+    "server.py:2233 `_safe_cell((vend or {}).get('address', '')[:20])` truncates the address to 20 chars for the Party State column — this is fine for a rough state hint but conflates address+state. If Vendor has a proper `state` field elsewhere, prefer it. (Minor cleanup; not in review scope.)",
+    "server.py:1948-... `_pdf_story` helper is reused by GRN/PO/Invoice PDF endpoints — smoke-verified all three return valid PDFs > 1KB with content-type application/pdf. Per review instructions, layout content was NOT re-inspected.",
+    "server.py:920-936 `GET /api/master-audit` supports `entity`, `entity_id`, and `since` filters, is admin/director-gated, and _strip_oids prevents ObjectId leaks. entity='mrf.item' filter works as advertised.",
+    "server.py:82-101 MRF_STATUS array now carries the full 12-status pipeline (draft/under_review/authorised/rejected/returned/purchase_pending/quotation_received/po_pending/po_issued/partially_received/fully_received/closed/cancelled) with legacy statuses preserved through MRF_STATUS_ALIAS + canonical_mrf_status(). Existing MRFs still list correctly (test 1) and submit→approve→send-to-purchase→received transitions all pass (used by locked_mrf fixture).",
+    "File size flag: /app/backend/server.py is 2960 lines. Per review-guideline 'files >700 lines should be split', consider extracting {master-data, mrf, po, grn, invoice, exports, pdf} routers into modules. Not a bug — noting for future refactor."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_phase2c_backend.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (25/25 phase2c tests)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Test file uses uuid-suffixed unique IDs for customers/projects created in fixtures (TESTCUST-XXXXXXXX, TP-XXXXXX, VINV-TEST-XXXXXX). It prefers existing seeded project-with-customer if one exists (RIL-DIG etc.); otherwise creates fresh customer+project. All test MRFs / POs / GRNs / invoice are prefixed 'TEST-' in descriptions or 'VINV-TEST-' in vendor invoice numbers for easy identification. No seed reset done. Idempotent — safe to re-run.",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `EXPO_PUBLIC_BACKEND_URL=https://purchase-workflow-10.preview.emergentagent.com python -m pytest /app/backend/tests/test_phase2c_backend.py -v` — expect 25/25 in ~7s. Prereq: ENABLE_DEV_LOGIN=1 in /app/backend/.env, at least one active vendor and one project with customer_id in DB (fixture auto-creates a customer+project if none exist). As documented in iteration_10.json & iteration_11.json, do NOT re-run legacy stale suites (test_phase1_role_reshuffle.py / test_security_hardening.py / test_sec002_pdf_scoping.py / test_mrf_po_workflow.py). Phase 2c test suite lives alongside iteration_11's test_admin_master_module.py and is fully independent of it.",
+  "rca_of_issue": "N/A — no product bugs. Two test-scaffolding issues surfaced and were fixed inside the test file only: (a) initial fixture called /submit /approve /send-to-purchase blindly with no body — /approve requires body.action='approve'. Fixed. (b) GRN has no direct POST /grn endpoint; GRNs are created as a side-effect of POST /po/{po_id}/received (documented behaviour). Fixed. (c) Invoice list endpoint is /invoice (singular), not /invoices; fixed. None of these are product defects — they are test-author confusion resolved by reading server.py."
+}

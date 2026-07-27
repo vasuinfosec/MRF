@@ -1,0 +1,218 @@
+{
+  "task": "3B \u2014 Admin Access Console",
+  "scope": "local code/staging only",
+  "generated_at_utc": "2026-07-23T12:32:47.024949+00:00",
+  "production_contacted": false,
+  "deployed": false,
+  "summary": {
+    "total": 30,
+    "passed": 30,
+    "failed": 0
+  },
+  "suites": [
+    {
+      "name": "Task 3A.2 retained security regression",
+      "command": "/private/tmp/task3b-run-venv/bin/python -u backend/tests/test_task3a2_access_security.py",
+      "exit_code": 0,
+      "passed": 14,
+      "failed": 0,
+      "raw_output": "test_active_director_may_manage_another_director (__main__.Task3A2SecurityTests.test_active_director_may_manage_another_director) ... ok\ntest_admin_can_never_create_assign_or_modify_director (__main__.Task3A2SecurityTests.test_admin_can_never_create_assign_or_modify_director) ... ok\ntest_admin_cannot_assign_director_on_activation_endpoint (__main__.Task3A2SecurityTests.test_admin_cannot_assign_director_on_activation_endpoint) ... ok\ntest_admin_cannot_create_director_invitation_endpoint (__main__.Task3A2SecurityTests.test_admin_cannot_create_director_invitation_endpoint) ... ok\ntest_admin_cannot_deactivate_director (__main__.Task3A2SecurityTests.test_admin_cannot_deactivate_director) ... ok\ntest_director_role_cannot_be_removed_from_last_active_director (__main__.Task3A2SecurityTests.test_director_role_cannot_be_removed_from_last_active_director) ... ok\ntest_inactive_director_cannot_manage_directors (__main__.Task3A2SecurityTests.test_inactive_director_cannot_manage_directors) ... ok\ntest_last_active_director_cannot_be_deactivated (__main__.Task3A2SecurityTests.test_last_active_director_cannot_be_deactivated) ... ok\ntest_legacy_users_role_is_closed_in_v2 (__main__.Task3A2SecurityTests.test_legacy_users_role_is_closed_in_v2) ... ok\ntest_role_free_inactive_users_list_without_validation_error (__main__.Task3A2SecurityTests.test_role_free_inactive_users_list_without_validation_error) ... ok\ntest_roles_array_is_authoritative_and_secondary_roles_work (__main__.Task3A2SecurityTests.test_roles_array_is_authoritative_and_secondary_roles_work) ... ok\ntest_self_deactivation_is_blocked (__main__.Task3A2SecurityTests.test_self_deactivation_is_blocked) ... ok\ntest_self_elevation_is_rejected (__main__.Task3A2SecurityTests.test_self_elevation_is_rejected) ... ok\ntest_v2_off_preserves_legacy_role_endpoint (__main__.Task3A2SecurityTests.test_v2_off_preserves_legacy_role_endpoint) ... ok\n\n----------------------------------------------------------------------\nRan 14 tests in 0.080s\n\nOK\n"
+    },
+    {
+      "name": "Task 3B backend integration/security",
+      "command": "/private/tmp/task3b-run-venv/bin/python -u backend/tests/test_task3b_access_console.py",
+      "exit_code": 0,
+      "passed": 8,
+      "failed": 0,
+      "raw_output": "test_access_history_returns_target_and_audit_rows (__main__.Task3BBackendTests.test_access_history_returns_target_and_audit_rows) ... ok\ntest_access_user_list_normalizes_legacy_roles (__main__.Task3BBackendTests.test_access_user_list_normalizes_legacy_roles) ... ok\ntest_active_director_can_revoke_other_director_sessions (__main__.Task3BBackendTests.test_active_director_can_revoke_other_director_sessions) ... ok\ntest_admin_cannot_revoke_director_sessions (__main__.Task3BBackendTests.test_admin_cannot_revoke_director_sessions) ... ok\ntest_external_email_invitation_is_rejected (__main__.Task3BBackendTests.test_external_email_invitation_is_rejected) ... ok\ntest_reject_pending_request_updates_state_and_audit (__main__.Task3BBackendTests.test_reject_pending_request_updates_state_and_audit) ... ok\ntest_session_revocation_returns_deleted_count_and_audits (__main__.Task3BBackendTests.test_session_revocation_returns_deleted_count_and_audits) ... ok\ntest_v2_off_hides_console_endpoints (__main__.Task3BBackendTests.test_v2_off_hides_console_endpoints) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 0.036s\n\nOK\n"
+    },
+    {
+      "name": "Task 3B frontend integration/contracts",
+      "command": "/Users/viveknarang/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --test frontend/tests/task3b_access_console.test.mjs",
+      "exit_code": 0,
+      "passed": 8,
+      "failed": 0,
+      "raw_output": "\u2714 renders the three required access sections (23.629535ms)\n\u2714 wires every Task 3B backend operation (0.861519ms)\n\u2714 supports multi-role assignment and Director restrictions (0.879711ms)\n\u2714 handles responsive and all required UI states (0.892363ms)\n\u2714 console is feature-detected and hidden when V2 is unavailable (5.677096ms)\n\u2714 frontend authorization supports roles array and active state (0.45622ms)\n\u2714 API surfaces structured backend security messages (2.952054ms)\n\u2714 console contains no hard-coded sample or test users (5.302027ms)\n\u2139 tests 8\n\u2139 suites 0\n\u2139 pass 8\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 550.865056\n"
+    }
+  ],
+  "tests": [
+    {
+      "name": "test_active_director_may_manage_another_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_admin_can_never_create_assign_or_modify_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_admin_cannot_assign_director_on_activation_endpoint",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_admin_cannot_create_director_invitation_endpoint",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_admin_cannot_deactivate_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_director_role_cannot_be_removed_from_last_active_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_inactive_director_cannot_manage_directors",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_last_active_director_cannot_be_deactivated",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_legacy_users_role_is_closed_in_v2",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_role_free_inactive_users_list_without_validation_error",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_roles_array_is_authoritative_and_secondary_roles_work",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_self_deactivation_is_blocked",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_self_elevation_is_rejected",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_v2_off_preserves_legacy_role_endpoint",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security regression"
+    },
+    {
+      "name": "test_access_history_returns_target_and_audit_rows",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_access_user_list_normalizes_legacy_roles",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_active_director_can_revoke_other_director_sessions",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_admin_cannot_revoke_director_sessions",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_external_email_invitation_is_rejected",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_reject_pending_request_updates_state_and_audit",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_session_revocation_returns_deleted_count_and_audits",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_v2_off_hides_console_endpoints",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "renders the three required access sections",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    },
+    {
+      "name": "wires every Task 3B backend operation",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    },
+    {
+      "name": "supports multi-role assignment and Director restrictions",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    },
+    {
+      "name": "handles responsive and all required UI states",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    },
+    {
+      "name": "console is feature-detected and hidden when V2 is unavailable",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    },
+    {
+      "name": "frontend authorization supports roles array and active state",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    },
+    {
+      "name": "API surfaces structured backend security messages",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    },
+    {
+      "name": "console contains no hard-coded sample or test users",
+      "status": "passed",
+      "suite": "Task 3B frontend integration/contracts"
+    }
+  ],
+  "files_changed": [
+    "backend/routers/access_security_v2.py",
+    "backend/tests/test_task3b_access_console.py",
+    "backend/scripts/task3b_test_report.py",
+    "frontend/app/access-console.tsx",
+    "frontend/app/more.tsx",
+    "frontend/src/api.ts",
+    "frontend/src/auth.tsx",
+    "frontend/tests/task3b_access_console.test.mjs"
+  ],
+  "screens_implemented": [
+    "Admin Access Console \u2014 responsive desktop",
+    "Admin Access Console \u2014 responsive mobile",
+    "Pending access requests section",
+    "Invited / inactive users section",
+    "Active / deactivated users section",
+    "Invitation, activation, multi-role, confirmation and history modals",
+    "Loading, empty, error, success and permission-denied states"
+  ],
+  "screenshots": [
+    "test_reports/task3b_access_console_desktop.png",
+    "test_reports/task3b_access_console_mobile.png"
+  ],
+  "validations": {
+    "python_compile": "passed",
+    "typescript_syntax_transpile": "passed",
+    "frontend_full_dependency_build": "not run: registry repeatedly failed while downloading the existing React Native dependency; frontend contract tests and TSX syntax transpile passed"
+  }
+}

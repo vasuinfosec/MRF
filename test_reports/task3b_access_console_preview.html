@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>VASU MRF — Admin Access Console Preview</title>
+  <style>
+    :root{--blue:#002fa7;--orange:#f97316;--ink:#0f172a;--muted:#64748b;--line:#e2e8f0;--surface:#f8fafc}
+    *{box-sizing:border-box}body{margin:0;overflow-x:hidden;background:var(--surface);font:14px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--ink)}
+    header{height:68px;background:#fff;border-bottom:1px solid var(--line);display:flex;align-items:center;padding:0 18px;gap:12px;position:sticky;top:0;z-index:2}
+    .icon{width:40px;height:40px;flex:0 0 40px;border-radius:8px;display:grid;place-items:center;color:var(--blue);font-size:20px}.head{flex:1;min-width:0}.head b{display:block;font-size:18px}.head small{color:var(--muted)}.head b,.head small{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+    main{max-width:1180px;margin:auto;padding:24px 18px 52px}.hero{display:flex;gap:24px;justify-content:space-between;align-items:center;padding:8px 0 18px}.eyebrow{font-size:11px;letter-spacing:1.5px;color:var(--muted);font-weight:800}.hero h1{font-size:30px;margin:5px 0}.hero p{color:var(--muted);margin:0;max-width:650px}.invite{border:0;background:var(--orange);color:#fff;border-radius:6px;padding:14px 18px;font-weight:800;white-space:nowrap}
+    .stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin-bottom:12px}.stat{min-width:0;background:#fff;border:1px solid var(--line);border-radius:8px;padding:14px;display:flex;gap:12px;align-items:center}.stat .i{width:42px;height:42px;flex:0 0 42px;display:grid;place-items:center;background:#eef2ff;color:var(--blue);border-radius:8px;font-size:19px}.stat strong{font-size:22px;display:block}.stat small{font-size:10px;text-transform:uppercase;letter-spacing:.7px;color:var(--muted);font-weight:800}
+    section{background:#fff;border:1px solid var(--line);border-radius:7px;margin-top:12px;overflow:hidden}.section-head{background:var(--surface);padding:16px;display:flex;gap:12px;align-items:center}.section-head>div:last-child{min-width:0}.section-head .si{width:42px;height:42px;flex:0 0 42px;display:grid;place-items:center;background:#eef2ff;color:var(--blue);border-radius:8px;font-size:20px}.title-line{display:flex;align-items:center;gap:8px;min-width:0}.title-line h2{font-size:18px;margin:0;overflow-wrap:anywhere}.count{flex:0 0 auto;background:var(--blue);color:#fff;border-radius:999px;min-width:24px;height:24px;padding:0 7px;display:grid;place-items:center;font-size:11px;font-weight:800}.section-head p{margin:3px 0 0;color:var(--muted);font-size:13px;overflow-wrap:anywhere}
+    .empty{margin:16px;border:1px dashed var(--line);border-radius:6px;padding:28px;text-align:center}.empty b{display:block}.empty small{display:block;color:var(--muted);margin-top:5px}.policy{margin-top:16px;display:flex;align-items:flex-start;gap:9px;color:#475569;font-size:12px}.shield{color:var(--blue);font-size:18px}
+    @media(max-width:759px){header{padding:0 8px;gap:6px}.head b{font-size:16px}.head small{font-size:10px}main{padding:16px 12px 40px}.hero{display:block;min-width:0}.hero h1{font-size:26px;overflow-wrap:anywhere}.hero p{overflow-wrap:anywhere}.invite{width:100%;margin-top:16px;white-space:normal}.stats{grid-template-columns:minmax(0,1fr)}.section-head{align-items:flex-start;padding:14px}.section-head p{font-size:12px}.title-line{align-items:flex-start}.empty{margin:12px;padding:24px 12px}}
+  </style>
+</head>
+<body>
+  <header>
+    <div class="icon">←</div>
+    <div class="head"><b>Admin Access Console</b><small>Identity, roles and session control</small></div>
+    <div class="icon">↻</div>
+  </header>
+  <main>
+    <div class="hero">
+      <div><div class="eyebrow">SECURITY ADMINISTRATION</div><h1>Access overview</h1><p>Backend policy remains authoritative. Director protections cannot be overridden here.</p></div>
+      <button class="invite">✉ &nbsp; Invite company user</button>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="i">◷</div><div><strong>0</strong><small>Pending requests</small></div></div>
+      <div class="stat"><div class="i">✉</div><div><strong>0</strong><small>Invited / inactive</small></div></div>
+      <div class="stat"><div class="i">♙</div><div><strong>0</strong><small>Managed users</small></div></div>
+    </div>
+    <section>
+      <div class="section-head"><div class="si">♙</div><div><div class="title-line"><h2>Pending access requests</h2><span class="count">0</span></div><p>Uninvited sign-in attempts awaiting approval or rejection.</p></div></div>
+      <div class="empty"><b>No pending access requests</b><small>New company sign-in requests will appear here.</small></div>
+    </section>
+    <section>
+      <div class="section-head"><div class="si">✉</div><div><div class="title-line"><h2>Invited / inactive users</h2><span class="count">0</span></div><p>Outstanding invitations and accepted accounts awaiting activation.</p></div></div>
+      <div class="empty"><b>No invited or inactive users</b><small>Use Invite company user to begin onboarding.</small></div>
+    </section>
+    <section>
+      <div class="section-head"><div class="si">◆</div><div><div class="title-line"><h2>Active / deactivated users</h2><span class="count">0</span></div><p>Manage roles, account status, sessions and access history.</p></div></div>
+      <div class="empty"><b>No managed users</b><small>Activated and deactivated accounts appear here.</small></div>
+    </section>
+    <div class="policy"><span class="shield">◆</span><span>Admin cannot manage Director authority. Only an active Director can manage another Director. Self-deactivation, self-elevation and removal of the last active Director remain blocked by the secured backend.</span></div>
+  </main>
+</body>
+</html>

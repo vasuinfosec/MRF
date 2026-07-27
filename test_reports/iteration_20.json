@@ -1,0 +1,45 @@
+{
+  "summary": "Iteration 20 — Approval workflow (GRN/DC/CS) + LLM Co-pilot (suggestion-only). 40/40 tests pass. Verified: (A.1) POST /api/grn/{id}/approve — admin/director approve (200), purchase 403, pm 403; audit_logs entry action='grn_approve' with old_value.status/new_value.status; re-approving already-approved GRN → 400. (A.2) GET /api/grn/{id} new endpoint returns single GRN and 404 for unknown id. (A.3) POST /api/dc/{id}/approve — admin/director 200, purchase 403, pm 403; audit action='dc_approve' with correct old/new status; rejected DCs can be re-approved; approved DCs cannot be re-approved (400); reject without comment still allowed. (A.4) PUT /api/dc/{id} on approved DC by purchase → 400 'locked'; admin/director can PUT-edit through the lock. (A.5) POST /api/comparative-statement/{id}/approve — pm/gm/director 200, purchase 403, admin 403 (role split enforced); audit action='cs_approve'. (A.6) PUT /api/comparative-statement/{id} on approved CS by purchase → 400 'locked'. (B.1) LLM item-standardise (Haiku cheap): returns suggestion_id, status='pending_review', tier='cheap', model='claude-haiku-4-5-20251001'; output_parsed.suggestions[] never references a MAT-#### UID outside the approved catalogue; site_engineer 403; empty description 400. (B.2) LLM quotation-compare (Sonnet premium): 2 quotes → 200 tier='premium', model='claude-sonnet-4-5-20250929'; 1 quote → 400; 7 quotes → 400. (B.3) LLM reconcile (Sonnet premium): valid po_id (po_29138a4399ed) → 200 with per_line 3-way structure; invalid po_id → 404; site_engineer 403. (B.4) GET /api/llm/suggestions — purchase can list pending_review, site_engineer 403. (B.5) POST /api/llm/suggestions/{id}/decide — accept updates status='accepted', decided_by set; audit_logs action='llm_accept' with old_value.status='pending_review' new_value.status='accepted'; reject with reason 200; already-decided → 400. (B.6) audit_logs entry per LLM call: entity='llm', action='llm_call_item_standardise' with details.tier + details.model + numeric details.chars_in/chars_out. (B.7) Cache: repeating identical prompt returns identical output_raw (llm_cache hit). (B.8) Workflow isolation: after running item-standardise + quotation-compare + reconcile, counts of mrfs/pos/grns/dcs/invoices/materials/variants/customers/vendors/comparative_statements are unchanged. (Regression) GRN/DC export PDFs and CS download still work — %PDF returned, file bytes stream through.",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_approvals_llm_iter20.py",
+    "/app/test_reports/pytest/iter20_approvals_llm.xml"
+  ],
+  "action_items": [
+    "None required — all iter20 acceptance criteria pass 40/40.",
+    "Minor: pytest deprecation warning for TestLlmDecide.pending_suggestion class-scoped instance-method fixture. Not blocking. Convert to @classmethod or module-scope in a future clean-up (pytest 10 will remove).",
+    "Optional code-review note (unchanged from iter19): server.py:62 DC_ROLES = {'purchase','admin'} — spec is fine but iter19 report described this set as broader; current single-source-of-truth is correct per DC create tests (SE 403 verified). No action needed."
+  ],
+  "critical_code_review_comments": [
+    "server.py:3725 approve_grn correctly gates on GRN_APPROVER_ROLES={admin,director}; audit uses grn_{action} with record_number = grn_number and both old_value/new_value {status:...} — matches iter20 spec exactly.",
+    "server.py:3760 get_grn(grn_id) new endpoint enforces _check_po_access when po exists, else limits to {purchase,director,admin,store,gm}. site_engineer without project scope will 403 (acceptable per iter19 access model).",
+    "server.py:4290 approve_dc gates on DC_APPROVER_ROLES={admin,director}; permits transition from pending_approval|rejected|issued to approved/rejected. Approved→approved returns 400 as required. Uses $set/$push atomically.",
+    "server.py:4266 PUT /api/dc/{id} enforces approval-lock: status=='approved' AND role not in {admin,director} → 400 with 'locked' substring. Admin/director bypass verified.",
+    "server.py:4569 approve_cs gates on CS_APPROVER_ROLES={pm,gm,director}; admin & purchase correctly 403 (matches spec role-split: admin only uploads/edits, does not approve CS).",
+    "server.py:4460 (PUT /comparative-statement) enforces approval-lock the same way as DC — verified purchase gets 400 on approved CS PUT.",
+    "server.py:4691 _call_llm hashes {tier,sys,user}, checks llm_cache, and short-circuits on cache hit BEFORE audit-logging — this means cached responses do NOT re-write an audit row. Not a bug per spec ('cache-hit hash entry in llm_cache' is acceptable), but consider adding a lightweight 'llm_call_cache_hit' audit for observability.",
+    "server.py:4826 item-standardise defensively strips any material_uid returned by the LLM that isn't in the fetched approved-catalogue set. Verified no hallucinated UIDs across multiple prompts.",
+    "server.py:4860 quotation-compare bounds: <2 quotes 400, >6 quotes 400. Spec 'With 7 quotes → 400' is satisfied.",
+    "server.py:5023 decide_suggestion refuses non-pending_review with 400 message including current status — matches 'Already-decided → 400'.",
+    "server.py:4729 audit row for llm_call_{kind} uses entity='llm' and puts tier/model/chars_in/chars_out in details — verified via /api/audit?entity=llm.",
+    "Workflow-isolation snapshot: 10 collections (mrf/po/grn/dc/invoice/material/variant/customer/vendor/cs) counted before + after 3 LLM calls (2 that write to llm_suggestions + 1 cache-hit); counts identical. Confirms LLM code path never mutates workflow collections."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_approvals_llm_iter20.py (new — canonical iter20 regression suite)"
+  ],
+  "success_rate": {"backend": "100% (40/40)", "frontend": "not_tested"},
+  "seed_data_creation": "Ephemeral DCs (TEST_ITER20) and CS docs created on each DC/CS approval test through admin/purchase. No cleanup necessary — DC/CS are cancellable and don't affect ordering. Reused existing PO po_29138a4399ed and its grn_2bdb739a88ea for reconcile tests. LLM item-standardise prompts kept short (single-line description) to minimise token spend; each call is ~200 chars in / <1 KB out.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Canonical iter20 suite: /app/backend/tests/test_approvals_llm_iter20.py. Run: pytest backend/tests/test_approvals_llm_iter20.py -v --junitxml=/app/test_reports/pytest/iter20_next.xml. Requires ENABLE_DEV_LOGIN=1 (already set) and EMERGENT_LLM_KEY (already set in /app/backend/.env). Tests auto-skip LLM assertions with 502 if the Emergent LLM gateway is unreachable, but pre-LLM checks (403/400/404) always run. BASE_URL from EXPO_PUBLIC_BACKEND_URL. Total wall-clock ~60s (dominated by 5-6 real LLM calls to Haiku + Sonnet). The reconcile test uses po_29138a4399ed as the canonical PO-with-GRN; if that PO is ever purged from the DB, the fixture falls back to any GRN's parent PO returned by /api/grns.",
+  "rca_of_issue": "No open bugs. All 40 tests green on first execution. The suite deliberately isolates LLM upstream failures (502) as pytest.skip() to keep the code-path assertions (RBAC, validation, cache, audit) deterministic; on this run all LLM upstream calls succeeded so nothing was skipped."
+}

@@ -1,0 +1,114 @@
+{
+  "pack": "VASU MRF Production Part A",
+  "task": "3B Admin Access Console",
+  "status": "not_executable_from_codex",
+  "published_app": "Purchase Workflow 10",
+  "execution_status": "planned_not_executed",
+  "handover_status": "prepared_for_emergent_republish",
+  "handover_artifacts": {
+    "markdown": "test_reports/production_part_a_handover.md",
+    "json": "test_reports/production_part_a_handover.json",
+    "code_package": "test_reports/production_part_a_task3b_code_package.tar.gz",
+    "code_package_sha256": "test_reports/production_part_a_task3b_code_package.tar.gz.sha256"
+  },
+  "platform_control": {
+    "deployment": "Emergent-controlled; unavailable to repository",
+    "rollback": "Emergent-controlled; unavailable to repository",
+    "host": "Emergent-managed platform value unavailable to repository",
+    "region": "Emergent-managed platform value unavailable to repository",
+    "cluster": "Emergent-managed platform value unavailable to repository"
+  },
+  "production_evidence": {
+    "production_touched": false,
+    "production_connected": false,
+    "supervisor_units_changed": false,
+    "mongo_endpoint": ":27017",
+    "backend_env_access_security_v2": "absent",
+    "backup_documents_exist": true,
+    "migration_rollback_documents_exist": true
+  },
+  "prepared_utc": "2026-07-23T16:21:18Z",
+  "scope": {
+    "mode": "code_artifact_only",
+    "feature_flag": {
+      "ACCESS_SECURITY_V2": "0",
+      "enablement": "excluded_from_part_a"
+    },
+    "runtime_files": [
+      "backend/routers/access_security_v2.py",
+      "frontend/app/access-console.tsx",
+      "frontend/app/more.tsx",
+      "frontend/src/api.ts",
+      "frontend/src/auth.tsx"
+    ],
+    "excluded": [
+      "Task 4 material-master changes",
+      "database migrations",
+      "seed/backfill",
+      "user or role changes",
+      "invitations/activations/deactivations",
+      "session revocations",
+      "production restart initiated by this pack"
+    ],
+    "data_write_budget": 0
+  },
+  "production_environment": {
+    "runtime_path": "/app/backend",
+    "backup_root": "/app/backup_artifacts/",
+    "mongo_url_source": "production secret manager only; production MongoDB remains on :27017",
+    "db_name_source": "production secret manager only",
+    "host": "Emergent-managed platform value unavailable to repository",
+    "region": "Emergent-managed platform value unavailable to repository",
+    "cluster": "Emergent-managed platform value unavailable to repository",
+    "host_region_cluster": "Emergent-managed platform value unavailable to repository",
+    "deployment_command": "Emergent-managed platform value unavailable to repository"
+  },
+  "backup": {
+    "command": "cd /app && umask 077 && test -n \"$MONGO_URL\" && test -n \"$DB_NAME\" && command -v mongodump && python3 /app/backend/scripts/backup_db.py",
+    "location": "/app/backup_artifacts/backup_<UTCstamp>/ plus backup_<UTCstamp>.tar.gz and its .sha256",
+    "read_only": true,
+    "required_verifications": [
+      "manifest.json exists and is non-empty",
+      "tarball SHA-256 validates",
+      "checksums.sha256 validates every dump file",
+      "collection/document/index counts recorded"
+    ]
+  },
+  "rollback": {
+    "primary": "Restore the previously approved API/frontend artifact and previous config; keep ACCESS_SECURITY_V2=0. Exact rollback command: Emergent-managed platform value unavailable to repository.",
+    "data": "No data rollback expected; do not run mongorestore automatically. Any exceptional production restore requires a separate incident approval."
+  },
+  "migration": {
+    "required": false,
+    "impact": "No collection/index/schema changes and no user/data writes."
+  },
+  "protection_checks": [
+    "Existing-user, active-user, Director, invitation, pending-request, session, MRF, PO, GRN, DC, and audit counts unchanged",
+    "ACCESS_SECURITY_V2 remains 0",
+    "No sample/test users or seed data",
+    "No deployment secrets in artifact",
+    "No deployment-attributed production write audit events"
+  ],
+  "post_deployment_validation": [
+    "API health/root returns HTTP 200",
+    "Frontend and assets load without 5xx",
+    "Read-only /api/auth/me succeeds for an existing user",
+    "/api/admin/access/* remains disabled with V2=0",
+    "Legacy user-list/role behavior remains unchanged",
+    "Error rate, latency, auth failures, and DB errors stay within baseline"
+  ],
+  "production_contacted": false,
+  "production_modified": false,
+  "approval_fields": [
+    "change_ticket_id",
+    "release_artifact_checksum",
+    "production_target",
+    "account_region_cluster",
+    "backup_utc_stamp_and_tar_sha256",
+    "operator",
+    "rollback_owner",
+    "change_window",
+    "approver",
+    "approval_timestamp"
+  ]
+}

@@ -1,0 +1,362 @@
+{
+  "task": "4 \u2014 Material Master & UOM Controls",
+  "scope": "local code/staging only",
+  "generated_at_utc": "2026-07-23T13:29:28.461214+00:00",
+  "production_contacted": false,
+  "deployed": false,
+  "summary": {
+    "total": 55,
+    "passed": 55,
+    "failed": 0
+  },
+  "suites": [
+    {
+      "name": "Task 3A.2 retained security",
+      "command": "/private/tmp/task3b-run-venv/bin/python -u backend/tests/test_task3a2_access_security.py",
+      "exit_code": 0,
+      "passed": 14,
+      "failed": 0,
+      "raw_output": "test_active_director_may_manage_another_director (__main__.Task3A2SecurityTests.test_active_director_may_manage_another_director) ... ok\ntest_admin_can_never_create_assign_or_modify_director (__main__.Task3A2SecurityTests.test_admin_can_never_create_assign_or_modify_director) ... ok\ntest_admin_cannot_assign_director_on_activation_endpoint (__main__.Task3A2SecurityTests.test_admin_cannot_assign_director_on_activation_endpoint) ... ok\ntest_admin_cannot_create_director_invitation_endpoint (__main__.Task3A2SecurityTests.test_admin_cannot_create_director_invitation_endpoint) ... ok\ntest_admin_cannot_deactivate_director (__main__.Task3A2SecurityTests.test_admin_cannot_deactivate_director) ... ok\ntest_director_role_cannot_be_removed_from_last_active_director (__main__.Task3A2SecurityTests.test_director_role_cannot_be_removed_from_last_active_director) ... ok\ntest_inactive_director_cannot_manage_directors (__main__.Task3A2SecurityTests.test_inactive_director_cannot_manage_directors) ... ok\ntest_last_active_director_cannot_be_deactivated (__main__.Task3A2SecurityTests.test_last_active_director_cannot_be_deactivated) ... ok\ntest_legacy_users_role_is_closed_in_v2 (__main__.Task3A2SecurityTests.test_legacy_users_role_is_closed_in_v2) ... ok\ntest_role_free_inactive_users_list_without_validation_error (__main__.Task3A2SecurityTests.test_role_free_inactive_users_list_without_validation_error) ... ok\ntest_roles_array_is_authoritative_and_secondary_roles_work (__main__.Task3A2SecurityTests.test_roles_array_is_authoritative_and_secondary_roles_work) ... ok\ntest_self_deactivation_is_blocked (__main__.Task3A2SecurityTests.test_self_deactivation_is_blocked) ... ok\ntest_self_elevation_is_rejected (__main__.Task3A2SecurityTests.test_self_elevation_is_rejected) ... ok\ntest_v2_off_preserves_legacy_role_endpoint (__main__.Task3A2SecurityTests.test_v2_off_preserves_legacy_role_endpoint) ... ok\n\n----------------------------------------------------------------------\nRan 14 tests in 0.072s\n\nOK\n"
+    },
+    {
+      "name": "Task 3B backend integration/security",
+      "command": "/private/tmp/task3b-run-venv/bin/python -u backend/tests/test_task3b_access_console.py",
+      "exit_code": 0,
+      "passed": 8,
+      "failed": 0,
+      "raw_output": "test_access_history_returns_target_and_audit_rows (__main__.Task3BBackendTests.test_access_history_returns_target_and_audit_rows) ... ok\ntest_access_user_list_normalizes_legacy_roles (__main__.Task3BBackendTests.test_access_user_list_normalizes_legacy_roles) ... ok\ntest_active_director_can_revoke_other_director_sessions (__main__.Task3BBackendTests.test_active_director_can_revoke_other_director_sessions) ... ok\ntest_admin_cannot_revoke_director_sessions (__main__.Task3BBackendTests.test_admin_cannot_revoke_director_sessions) ... ok\ntest_external_email_invitation_is_rejected (__main__.Task3BBackendTests.test_external_email_invitation_is_rejected) ... ok\ntest_reject_pending_request_updates_state_and_audit (__main__.Task3BBackendTests.test_reject_pending_request_updates_state_and_audit) ... ok\ntest_session_revocation_returns_deleted_count_and_audits (__main__.Task3BBackendTests.test_session_revocation_returns_deleted_count_and_audits) ... ok\ntest_v2_off_hides_console_endpoints (__main__.Task3BBackendTests.test_v2_off_hides_console_endpoints) ... ok\n\n----------------------------------------------------------------------\nRan 8 tests in 0.052s\n\nOK\n"
+    },
+    {
+      "name": "Task 3B frontend contracts",
+      "command": "/Users/viveknarang/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --test frontend/tests/task3b_access_console.test.mjs",
+      "exit_code": 0,
+      "passed": 8,
+      "failed": 0,
+      "raw_output": "\u2714 renders the three required access sections (21.089386ms)\n\u2714 wires every Task 3B backend operation (1.083191ms)\n\u2714 supports multi-role assignment and Director restrictions (0.641937ms)\n\u2714 handles responsive and all required UI states (1.480805ms)\n\u2714 console is feature-detected and hidden when V2 is unavailable (1.059082ms)\n\u2714 frontend authorization supports roles array and active state (0.931638ms)\n\u2714 API surfaces structured backend security messages (2.513576ms)\n\u2714 console contains no hard-coded sample or test users (2.766256ms)\n\u2139 tests 8\n\u2139 suites 0\n\u2139 pass 8\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 928.98508\n"
+    },
+    {
+      "name": "Task 4 backend material/UOM/security",
+      "command": "/private/tmp/task3b-run-venv/bin/python -u backend/tests/test_task4_material_master.py",
+      "exit_code": 0,
+      "passed": 16,
+      "failed": 0,
+      "raw_output": "test_admin_can_edit_threshold_only_with_positive_value_and_reason (__main__.Task4MaterialMasterTests.test_admin_can_edit_threshold_only_with_positive_value_and_reason) ... ok\ntest_base_uom_cannot_be_deactivated_while_packaging_conversion_is_active (__main__.Task4MaterialMasterTests.test_base_uom_cannot_be_deactivated_while_packaging_conversion_is_active) ... ok\ntest_box_and_lot_require_positive_conversion_and_base_uom (__main__.Task4MaterialMasterTests.test_box_and_lot_require_positive_conversion_and_base_uom) ... ok\ntest_deactivation_retains_historical_material_record (__main__.Task4MaterialMasterTests.test_deactivation_retains_historical_material_record) ... ok\ntest_description_is_limited_to_one_hundred_words (__main__.Task4MaterialMasterTests.test_description_is_limited_to_one_hundred_words) ... ok\ntest_fasteners_remain_traceable_below_threshold (__main__.Task4MaterialMasterTests.test_fasteners_remain_traceable_below_threshold) ... ok\ntest_high_value_and_force_traceable_materials_are_reconciled (__main__.Task4MaterialMasterTests.test_high_value_and_force_traceable_materials_are_reconciled) ... ok\ntest_inactive_admin_is_denied (__main__.Task4MaterialMasterTests.test_inactive_admin_is_denied) ... ok\ntest_low_value_consumable_needs_no_reconciliation (__main__.Task4MaterialMasterTests.test_low_value_consumable_needs_no_reconciliation) ... ok\ntest_material_creation_generates_uid_and_preserves_mrf_contract (__main__.Task4MaterialMasterTests.test_material_creation_generates_uid_and_preserves_mrf_contract) ... ok\ntest_mrf_picker_hides_deactivated_and_keeps_legacy_active_rows (__main__.Task4MaterialMasterTests.test_mrf_picker_hides_deactivated_and_keeps_legacy_active_rows) ... ok\ntest_normalized_category_duplicate_is_blocked (__main__.Task4MaterialMasterTests.test_normalized_category_duplicate_is_blocked) ... ok\ntest_normalized_composite_duplicate_is_blocked (__main__.Task4MaterialMasterTests.test_normalized_composite_duplicate_is_blocked) ... ok\ntest_secondary_admin_role_is_authorised_and_stale_scalar_is_denied (__main__.Task4MaterialMasterTests.test_secondary_admin_role_is_authorised_and_stale_scalar_is_denied) ... ok\ntest_task4_registers_no_delete_endpoints (__main__.Task4MaterialMasterTests.test_task4_registers_no_delete_endpoints) ... ok\ntest_valid_box_conversion_is_persisted (__main__.Task4MaterialMasterTests.test_valid_box_conversion_is_persisted) ... ok\n\n----------------------------------------------------------------------\nRan 16 tests in 0.139s\n\nOK\n"
+    },
+    {
+      "name": "Task 4 frontend contracts",
+      "command": "/Users/viveknarang/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node --test frontend/tests/task4_material_master.test.mjs",
+      "exit_code": 0,
+      "passed": 9,
+      "failed": 0,
+      "raw_output": "\u2714 renders material, category, UOM and classification controls (11.979115ms)\n\u2714 wires all Task 4 lifecycle endpoints without delete operations (1.646898ms)\n\u2714 material form covers linked identity and 100-word description (1.062903ms)\n\u2714 UOM controls include approved units and safe packaging conversion (9.566702ms)\n\u2714 classification keeps fasteners traceable and preserves AMC billing (4.354069ms)\n\u2714 Admin authorization uses roles array and handles required states (0.705657ms)\n\u2714 responsive desktop and mobile behavior is implemented (0.766493ms)\n\u2714 existing MRF material and unit contracts remain compatible (0.538962ms)\n\u2714 screen includes lifecycle confirmation and no sample records (8.96166ms)\n\u2139 tests 9\n\u2139 suites 0\n\u2139 pass 9\n\u2139 fail 0\n\u2139 cancelled 0\n\u2139 skipped 0\n\u2139 todo 0\n\u2139 duration_ms 1016.101035\n"
+    }
+  ],
+  "tests": [
+    {
+      "name": "test_active_director_may_manage_another_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_admin_can_never_create_assign_or_modify_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_admin_cannot_assign_director_on_activation_endpoint",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_admin_cannot_create_director_invitation_endpoint",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_admin_cannot_deactivate_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_director_role_cannot_be_removed_from_last_active_director",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_inactive_director_cannot_manage_directors",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_last_active_director_cannot_be_deactivated",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_legacy_users_role_is_closed_in_v2",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_role_free_inactive_users_list_without_validation_error",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_roles_array_is_authoritative_and_secondary_roles_work",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_self_deactivation_is_blocked",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_self_elevation_is_rejected",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_v2_off_preserves_legacy_role_endpoint",
+      "status": "passed",
+      "suite": "Task 3A.2 retained security"
+    },
+    {
+      "name": "test_access_history_returns_target_and_audit_rows",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_access_user_list_normalizes_legacy_roles",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_active_director_can_revoke_other_director_sessions",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_admin_cannot_revoke_director_sessions",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_external_email_invitation_is_rejected",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_reject_pending_request_updates_state_and_audit",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_session_revocation_returns_deleted_count_and_audits",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "test_v2_off_hides_console_endpoints",
+      "status": "passed",
+      "suite": "Task 3B backend integration/security"
+    },
+    {
+      "name": "renders the three required access sections",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "wires every Task 3B backend operation",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "supports multi-role assignment and Director restrictions",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "handles responsive and all required UI states",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "console is feature-detected and hidden when V2 is unavailable",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "frontend authorization supports roles array and active state",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "API surfaces structured backend security messages",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "console contains no hard-coded sample or test users",
+      "status": "passed",
+      "suite": "Task 3B frontend contracts"
+    },
+    {
+      "name": "test_admin_can_edit_threshold_only_with_positive_value_and_reason",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_base_uom_cannot_be_deactivated_while_packaging_conversion_is_active",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_box_and_lot_require_positive_conversion_and_base_uom",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_deactivation_retains_historical_material_record",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_description_is_limited_to_one_hundred_words",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_fasteners_remain_traceable_below_threshold",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_high_value_and_force_traceable_materials_are_reconciled",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_inactive_admin_is_denied",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_low_value_consumable_needs_no_reconciliation",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_material_creation_generates_uid_and_preserves_mrf_contract",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_mrf_picker_hides_deactivated_and_keeps_legacy_active_rows",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_normalized_category_duplicate_is_blocked",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_normalized_composite_duplicate_is_blocked",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_secondary_admin_role_is_authorised_and_stale_scalar_is_denied",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_task4_registers_no_delete_endpoints",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "test_valid_box_conversion_is_persisted",
+      "status": "passed",
+      "suite": "Task 4 backend material/UOM/security"
+    },
+    {
+      "name": "renders material, category, UOM and classification controls",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "wires all Task 4 lifecycle endpoints without delete operations",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "material form covers linked identity and 100-word description",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "UOM controls include approved units and safe packaging conversion",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "classification keeps fasteners traceable and preserves AMC billing",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "Admin authorization uses roles array and handles required states",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "responsive desktop and mobile behavior is implemented",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "existing MRF material and unit contracts remain compatible",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    },
+    {
+      "name": "screen includes lifecycle confirmation and no sample records",
+      "status": "passed",
+      "suite": "Task 4 frontend contracts"
+    }
+  ],
+  "files_changed": [
+    "backend/routers/material_master.py",
+    "backend/server.py",
+    "backend/routers/masters.py",
+    "backend/tests/test_task4_material_master.py",
+    "backend/scripts/task4_test_report.py",
+    "frontend/app/material-master.tsx",
+    "frontend/app/masters.tsx",
+    "frontend/tests/task4_material_master.test.mjs"
+  ],
+  "screens_implemented": [
+    "Material Master \u2014 responsive desktop",
+    "Material Master \u2014 responsive mobile",
+    "Category-linked Materials (category \u2192 item \u2192 specification)",
+    "Categories lifecycle controls",
+    "Approved UOM controls and box/lot conversions",
+    "Classification threshold, fastener traceability, AMC and billing options",
+    "Loading, empty, error and permission-denied states"
+  ],
+  "screenshots": [
+    "test_reports/task4_material_master_desktop.png",
+    "test_reports/task4_material_master_mobile.png"
+  ],
+  "migration": {
+    "required": false,
+    "notes": "No destructive migration. Existing material records are preserved; startup indexes are idempotent and legacy material rows remain readable through the MRF picker."
+  },
+  "environment_notes": [
+    "Backend suites ran in the healthy local staging test runtime.",
+    "The project .venv has an unrelated openpyxl Chartsheet import corruption; production code was not changed to work around it."
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "summary": "Iteration 22 — Phase 9B LLM file-upload attachment validation. Wrote /app/backend/tests/test_llm_attachments_iter22.py (17 tests) covering all 16 review scenarios. Result: 15/17 PASS, 2 FAIL — both revealed real backend spec deviations (see backend_issues.critical). All extraction paths (PDF via pypdf, xlsx via openpyxl, CSV, TXT) work; image → kind='unsupported' with chars=0; >10MB PDF correctly rejected with 413; input_summary.attachments carries only slim {file_name, kind, chars} shape with NO base64 for item-standardise and quotation-compare (confirmed by explicit assertion that no string field >400 chars); 0-quote+1-attachment 400; 1-quote+1-att 200; 2-PDF-attach no-structured 200 with attachment_count=2; chars_in audit grows from ~800 to ~7500 when a 6.5KB txt is appended (delta ~6700); item-standardise no-attach regression works; identical no-attachment prompt cache still hits (output_raw identical); suggestions list + decide/accept regression works. Workflow-collection snapshot (mrfs/pos/grns/dcs/invoices/materials/comparative_statements) unchanged before/after 3 attachment-carrying LLM calls — file uploads do NOT leak into workflow tables. Backend tested against public preview URL; EMERGENT_LLM_KEY never printed.",
+  "backend_issues": {
+    "critical": [
+      {
+        "endpoint": "POST /api/llm/quotation-compare",
+        "issue": "9 attachments do NOT return 400 — server silently truncates to 8 and processes. Root cause: server.py:4956 slices `body.attachments[:8]` BEFORE the length check at :4966, so `len(attach_chunks)` can never exceed 8 and the guard is dead code. Test evidence: sending 9 PDFs → 200 with input_summary.attachment_count=8 (see iter22 xml). Spec (review item 7) requires 400. Fix: validate `len(body.attachments) > 8` before slicing, or drop the `[:8]` slice and let the > check fire.",
+        "priority": "HIGH"
+      },
+      {
+        "endpoint": "POST /api/llm/reconcile",
+        "issue": "input_summary.attachments is NOT persisted on llm_suggestions for reconcile calls. Root cause: server.py:5105-5108 the `_save_suggestion(...)` call passes `input_payload={\"po_number\":..., \"grn_count\":..., \"invoice_count\":...}` — the `attach_summary` list built at :5086-5091 is only handed to `_call_llm` (audit) but NEVER to `_save_suggestion`. Consequence: llm_suggestions.input_summary.attachments is missing / empty for reconcile, breaking the review requirement 'input_summary.attachments recorded' and diverging from item-standardise (:4927) and quotation-compare (:5005-5006) which DO include it. Fix: add `\"attachments\": attach_summary` to the input_payload dict at :5107.",
+        "priority": "HIGH"
+      }
+    ],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/test_reports/iteration_22.json",
+    "/app/test_reports/pytest/iter22_llm_attachments.xml",
+    "/app/backend/tests/test_llm_attachments_iter22.py"
+  ],
+  "action_items": [
+    "server.py:4956 — replace `for att in body.attachments[:8]:` with an explicit length check first: `if body.attachments and len(body.attachments) > 8: raise HTTPException(400, 'Max 8 vendor quote attachments per comparison')` (then loop without slicing). Same pattern applies to item-standardise (:4899 slices [:5]) and reconcile (:5089 slices [:5]) — currently silent truncation instead of 400. Only quotation-compare is explicitly spec'd to reject >8, but consider making all three consistent.",
+    "server.py:5105-5108 — add `\"attachments\": attach_summary` key to the `input_payload` dict passed to `_save_suggestion` inside `llm_reconcile`, matching the item-standardise/quotation-compare shape. Without this, purchase/GM reviewers see reconcile suggestions with no record of which invoice PDFs were fed to the LLM.",
+    "After both fixes: re-run `pytest /app/backend/tests/test_llm_attachments_iter22.py -v` — expect 17/17 PASS."
+  ],
+  "critical_code_review_comments": [
+    "The slim `attach_summary` shape `[{file_name, kind, chars}]` is well-designed — nothing else in `input_summary` carries the base64 blob (verified by an assertion that no string value in the summary exceeds 400 chars). Good defence-in-depth against accidental blob leaks in audit / suggestions.",
+    "LLM_MAX_EXTRACTED_CHARS=40000 correctly clamps runaway prompts. xlsx path also short-circuits inside iter_rows once concatenated length exceeds the cap — nice.",
+    "Attachment size check runs on the decoded bytes (`len(raw)`) not the base64 string — correct, since base64 is ~33% larger. LLM_MAX_ATTACHMENT_MB=10 gives ~13.3MB base64 payload upper bound.",
+    "`_extract_text_from_attachment` returns HTTPException on any pypdf/openpyxl parse failure with a 400 — good, but the same error string leaks the file name; probably fine for internal tool, would sanitise for public API.",
+    "The reconcile input_payload passed to `_call_llm` DOES include `attachments` (:5103) so the AUDIT row is fine — only the llm_suggestions row is missing it (`_save_suggestion` gets a different dict). This is a subtle divergence between the two write paths.",
+    "Cache key uses `_payload_hash({tier, sys, user})` where `user` includes appended attachment text — so identical description with DIFFERENT attachments correctly cache-misses; identical description with NO attachment cache-hits as expected (regression verified)."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_llm_attachments_iter22.py (new)"
+  ],
+  "success_rate": {
+    "backend": "88% (15/17)",
+    "frontend": "not_tested (backend-only iteration per review request)"
+  },
+  "seed_data_creation": "None persisted to workflow collections. Test-created llm_suggestions rows (kind=item_standardise / quotation_compare / reconcile, all with 'TEST_iter22' or timestamped identifiers in description/context) will remain in db.llm_suggestions — safe to keep as they don't affect any operational flow. A few Purchase-role llm_accept audit rows for iter22 decide-regression are also present.",
+  "retest_needed": true,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Two backend fixes needed in /app/backend/server.py — (1) tighten the >8-attachments guard in llm_quotation_compare and (2) add attach_summary to the reconcile _save_suggestion input_payload. After the fix, re-run: `pytest /app/backend/tests/test_llm_attachments_iter22.py -v --junitxml=/app/test_reports/pytest/iter22_llm_attachments.xml` — expect 17/17. Test suite generates PDFs/xlsx/csv inline via reportlab+openpyxl+csv (already installed), no binaries checked in. The 11MB oversize payload is a pure base64-padded byte string (%PDF-1.4 + A*N) — server rejects on size before pypdf ever sees it, so no reportlab dependency for that test. Dev-login only — EMERGENT_LLM_KEY not needed by tests. Preview URL: https://purchase-workflow-10.preview.emergentagent.com.",
+  "rca_of_issue": "Bug 1 (max-8 quotation attachments not enforced) — Root cause: control-flow order in llm_quotation_compare. The loop `for att in body.attachments[:8]` at server.py:4956 pre-slices the input before any length validation, so the downstream `if len(attach_chunks) > 8: raise HTTPException(400, ...)` at :4966 is unreachable (attach_chunks size is bounded by the slice). Reproduction: POST /api/llm/quotation-compare with attachments=[9 tiny PDFs] as Purchase → 200 OK with input_summary.attachment_count=8 instead of 400. Mitigation: check `len(body.attachments) > 8` BEFORE slicing, or remove the slice entirely and rely on the > check.\n\nBug 2 (reconcile input_summary missing attachments) — Root cause: two separate input_payload dicts are constructed in llm_reconcile: one for `_call_llm` (:5099-5103) that includes `attach_summary`, and one for `_save_suggestion` (:5107-5108) that omits it. `_save_suggestion` writes `input_summary` on the llm_suggestions doc from its own dict, so attachments never land in the persisted suggestion. Reproduction: POST /api/llm/reconcile with a valid po_id and 1 PDF attachment as Purchase → 200 but response.input_summary has no `attachments` key. Mitigation: add `\"attachments\": attach_summary` to the dict at :5107 (same key as the other two endpoints use)."
+}

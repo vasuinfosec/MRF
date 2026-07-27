@@ -1,0 +1,40 @@
+{
+  "summary": "Iteration 7 security-hardening verification. Wrote 58 new pytest cases in test_security_hardening.py covering all four hardening buckets (SEC-001 dev-login gate + seed admin-only; SEC-002 role/project scoping on /mrf/{id}, /po/{id}, /invoice*, /audit, /billing/items, /users email redaction, /export/*, /po/{id}/grns, /grns; SEC-003 /po/{id}/received purchase/billing/admin only; SEC-004 formula-injection prefix + 5MB upload cap + .xlsx/.xlsm allowlist on both /import/vendors and /import/mrf). All 58 new tests PASS. Additionally patched prior test fixtures (test_project_team.py, test_mrf_po_workflow.py, test_grn_and_import.py, test_invoice_variance.py) so their unauthenticated POST /api/seed calls now use an admin bearer token (required after SEC-001) — this was a test-only fix, not a product change. Full regression: 147/147 passed (58 new + 89 prior).",
+  "backend_issues": {
+    "critical": [],
+    "minor": []
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_security_hardening.py",
+    "/app/test_reports/pytest/pytest_security.xml",
+    "/app/test_reports/pytest/pytest_all_iter7.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "SEC-002: _check_po_access allows any site_engineer who created *any* linked MRF; consider also allowing PM/SE on the project team so approved MRFs remain viewable by requester's project peers if needed (spec-dependent).",
+    "SEC-002: /api/invoice/{id} does 403 before 404 for non-authorized roles — this is correct (avoids existence oracle) but confirm it is the intended contract.",
+    "SEC-004: MAX_UPLOAD_BYTES=5MB is enforced only after the whole body has been read into memory via `await file.read()`; for extreme uploads consider Content-Length pre-check to fail-fast before buffering.",
+    "SEC-004: extension allowlist is filename-based only — an .xlsx-named file that is not a valid zip is caught later by openpyxl (400 path), which is fine, but MIME-sniff could be added defense-in-depth.",
+    "server.py is 1973 lines — still worth splitting into routers/modules (unchanged from prior iterations).",
+    "_safe_cell is applied to string cells only; numeric-first values that begin with '-' (e.g., negative numbers rendered as strings) already covered because they're non-string here; keep an eye if PO totals ever get stringified."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_security_hardening.py (new — 58 tests)",
+    "/app/backend/tests/test_project_team.py (updated seed fixture to send admin auth after SEC-001)",
+    "/app/backend/tests/test_mrf_po_workflow.py (updated seed fixture + test_seed_idempotent to send admin auth)",
+    "/app/backend/tests/test_grn_and_import.py (updated seed fixture to send admin auth)",
+    "/app/backend/tests/test_invoice_variance.py (updated seed fixture to send admin auth)"
+  ],
+  "success_rate": {"backend": "100% (147/147: 58 new security + 89 prior regression)", "frontend": "not tested (backend-only request)"},
+  "seed_data_creation": "POST /api/seed (now admin-gated) is called from module-scope fixtures. Additional ephemeral users created via /api/auth/dev-login (stranger_<hex>@vasu.dev for unrelated-SE authz tests, TEST_INV_* for invoice regression, TEST_VNDR_* for vendor import regression). No production/seed data mutated destructively.",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Any future test module that hits POST /api/seed MUST pass Authorization: Bearer <admin token> — anonymous seed now returns 401 by design (SEC-001). Dev-login remains open as long as ENABLE_DEV_LOGIN=1 in backend/.env. Formula-injection test in TestSec002Sec004Exports::test_formula_injection_defense creates an MRF whose description starts with '=' — the exporter must render it as \"'=DANGER_FORMULA()\". If _safe_cell logic changes, update assertion accordingly.",
+  "rca_of_issue": "N/A — no product bugs found. During regression the pre-existing test suites broke on their module-scope `POST /api/seed` calls because SEC-001 now requires admin auth once users exist; fixed the fixtures to authenticate (test-only change, no server behavior modified)."
+}

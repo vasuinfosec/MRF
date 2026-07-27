@@ -1,0 +1,86 @@
+{
+  "task": "3A.2",
+  "scope": "local code/staging only",
+  "production_contacted": false,
+  "task_3b_started": false,
+  "generated_at_utc": "2026-07-23T10:11:55.171810+00:00",
+  "command": "/Users/viveknarang/Documents/MRF Project/.venv/bin/python -u backend/tests/test_task3a2_access_security.py",
+  "exit_code": 0,
+  "summary": {
+    "total": 14,
+    "passed": 14,
+    "failed": 0
+  },
+  "coverage": [
+    "Director protection",
+    "Last active Director deactivation prevention",
+    "Last active Director role-removal prevention",
+    "Self-deactivation prevention",
+    "Admin Director restrictions",
+    "roles[] authority and secondary roles",
+    "inactive Director denial",
+    "self-elevation prevention",
+    "role-free inactive-user listing",
+    "/users/role closed in V2",
+    "ACCESS_SECURITY_V2=0 compatibility"
+  ],
+  "tests": [
+    {
+      "name": "test_active_director_may_manage_another_director",
+      "status": "passed"
+    },
+    {
+      "name": "test_admin_can_never_create_assign_or_modify_director",
+      "status": "passed"
+    },
+    {
+      "name": "test_admin_cannot_assign_director_on_activation_endpoint",
+      "status": "passed"
+    },
+    {
+      "name": "test_admin_cannot_create_director_invitation_endpoint",
+      "status": "passed"
+    },
+    {
+      "name": "test_admin_cannot_deactivate_director",
+      "status": "passed"
+    },
+    {
+      "name": "test_director_role_cannot_be_removed_from_last_active_director",
+      "status": "passed"
+    },
+    {
+      "name": "test_inactive_director_cannot_manage_directors",
+      "status": "passed"
+    },
+    {
+      "name": "test_last_active_director_cannot_be_deactivated",
+      "status": "passed"
+    },
+    {
+      "name": "test_legacy_users_role_is_closed_in_v2",
+      "status": "passed"
+    },
+    {
+      "name": "test_role_free_inactive_users_list_without_validation_error",
+      "status": "passed"
+    },
+    {
+      "name": "test_roles_array_is_authoritative_and_secondary_roles_work",
+      "status": "passed"
+    },
+    {
+      "name": "test_self_deactivation_is_blocked",
+      "status": "passed"
+    },
+    {
+      "name": "test_self_elevation_is_rejected",
+      "status": "passed"
+    },
+    {
+      "name": "test_v2_off_preserves_legacy_role_endpoint",
+      "status": "passed"
+    }
+  ],
+  "raw_output": "test_active_director_may_manage_another_director (__main__.Task3A2SecurityTests.test_active_director_may_manage_another_director) ... ok\ntest_admin_can_never_create_assign_or_modify_director (__main__.Task3A2SecurityTests.test_admin_can_never_create_assign_or_modify_director) ... ok\ntest_admin_cannot_assign_director_on_activation_endpoint (__main__.Task3A2SecurityTests.test_admin_cannot_assign_director_on_activation_endpoint) ... ok\ntest_admin_cannot_create_director_invitation_endpoint (__main__.Task3A2SecurityTests.test_admin_cannot_create_director_invitation_endpoint) ... ok\ntest_admin_cannot_deactivate_director (__main__.Task3A2SecurityTests.test_admin_cannot_deactivate_director) ... ok\ntest_director_role_cannot_be_removed_from_last_active_director (__main__.Task3A2SecurityTests.test_director_role_cannot_be_removed_from_last_active_director) ... ok\ntest_inactive_director_cannot_manage_directors (__main__.Task3A2SecurityTests.test_inactive_director_cannot_manage_directors) ... ok\ntest_last_active_director_cannot_be_deactivated (__main__.Task3A2SecurityTests.test_last_active_director_cannot_be_deactivated) ... ok\ntest_legacy_users_role_is_closed_in_v2 (__main__.Task3A2SecurityTests.test_legacy_users_role_is_closed_in_v2) ... ok\ntest_role_free_inactive_users_list_without_validation_error (__main__.Task3A2SecurityTests.test_role_free_inactive_users_list_without_validation_error) ... ok\ntest_roles_array_is_authoritative_and_secondary_roles_work (__main__.Task3A2SecurityTests.test_roles_array_is_authoritative_and_secondary_roles_work) ... ok\ntest_self_deactivation_is_blocked (__main__.Task3A2SecurityTests.test_self_deactivation_is_blocked) ... ok\ntest_self_elevation_is_rejected (__main__.Task3A2SecurityTests.test_self_elevation_is_rejected) ... ok\ntest_v2_off_preserves_legacy_role_endpoint (__main__.Task3A2SecurityTests.test_v2_off_preserves_legacy_role_endpoint) ... ok\n\n----------------------------------------------------------------------\nRan 14 tests in 0.056s\n\nOK\n"
+}

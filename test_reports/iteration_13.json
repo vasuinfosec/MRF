@@ -1,0 +1,48 @@
+{
+  "summary": "Iteration 13 — Backend regression for Phase 3a `PUT /api/mrf/{mrf_id}` draft-edit endpoint + new MRFItem fields (material_id, make/make_id, model/model_id, priority). 15/15 pytest cases PASSED in ~7s against the preview URL. All 14 review-request scenarios green: (1) create with new fields round-trips, (2) SE PUT own draft ok, (3) SE submit→pm_review, (4) PUT after submit→400 'cannot edit after submission', (5) PM /approve action=return→'returned', (6) SE PUT returned→200, (7) different SE (chand@vasuinfosec.com) PUT→403 'creator', (8a) admin PUT draft→200 + (8b) admin PUT after submit→400 (admins do NOT bypass submitted-lock — matches spec), (9) admin project_id change re-snapshots customer_id AND customer_name to the new project's customer, (10) items[] preserves existing item_line_id and generates fresh IDs for new lines, (11) empty body {}→400 'Nothing to update', (12) PM (project member, not creator) PUT draft→403, (13) updated_at refreshes on every PUT, (14) audit_logs contains 'edit_draft' action entry (verified via GET /api/audit?entity_id=<mrf_id>). No product bugs found; no code was modified. Backend-only per request; no frontend testing performed.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {
+        "endpoint": "PUT /api/mrf/{mrf_id}",
+        "issue": "If body contains ONLY `project_id` (no other editable key), server returns 400 'Nothing to update' because the `if not updates` guard runs BEFORE the project_id snapshot block (server.py:1365-1378). Test #9 works around this by sending {project_id, site}. If the UI ever emits a lone project_id change, it will incorrectly 400. Recommend moving the project_id resolution above the 'Nothing to update' check, or adding `project_id` to the editable-keys allowlist loop."
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [],
+    "react_native_issues": []
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_mrf_edit_draft_iter13.py",
+    "/app/test_reports/pytest/mrf_edit_draft_iter13.xml"
+  ],
+  "action_items": [
+    "OPTIONAL: In `update_mrf_draft` (server.py:1342-1381) move the `project_id` snapshot block above the `if not updates: raise HTTPException(400, 'Nothing to update')` guard (or seed `updates['project_id']` early) so that a project-only change is accepted. Currently the test suite passes because it always pairs project_id with another field, but a UI that sends only `{project_id: new_id}` will 400.",
+    "OPTIONAL (informational): The endpoint intentionally does NOT allow admin/director to override the 'submitted' lock via PUT /api/mrf/{id}. If admins need to fix a submitted MRF, they must use PUT /api/mrf/{id}/items/{line_id} (per-line edit with reason), or PM/GM/Director must first `return` it. Confirm this is the intended UX."
+  ],
+  "critical_code_review_comments": [
+    "server.py:1325-1383 `PUT /api/mrf/{mrf_id}` — status gate (draft|returned) uses both raw and canonical_mrf_status() for defence-in-depth; correct. Error string exactly matches the spec verbiage ('cannot edit after submission (only \\'returned\\' MRFs can be re-edited)').",
+    "server.py:1338-1340 RBAC — creator-OR-admin/director-only. PMs (even when assigned to the project) are correctly blocked from editing SE-authored drafts (test 12).",
+    "server.py:1346-1363 items merge — merges old-item dict with new-item dict when item_line_id matches; new items get `mli_<uuid>` (test 10 verified both branches). Sensible default fills for status/billing_status/qty_* counters. `qty_approved` defaults to `qty_requested` when omitted — matches create_mrf semantics.",
+    "server.py:1368-1378 project change block — re-fetches project and customer to update `customer_id` + `customer_name` snapshot. Fallback chain: customer.name → project.client → '' (test 9 verified update path to a DIFFERENT customer).",
+    "server.py:1365-1378 EDGE CASE — as flagged above, a body containing only `project_id` (no other editable key) will 400 before the snapshot block runs. Low-impact but worth a one-line fix.",
+    "server.py:1380-1383 `updated_at = now_utc()` on every successful PUT (test 13 verified >=1s delta) and `audit('edit_draft', ..., {non-items updates})` recorded — visible via GET /api/audit?entity_id=<mrf_id> (test 14).",
+    "server.py:193-211 MRFItemIn — new optional fields (material_id, make, make_id, model, model_id, priority) accept null/empty; priority defaults to 'normal'. Round-trip verified via POST /mrf → response items[] (test 1). NOTE: server does NOT validate `priority` values against {low, normal, high, urgent} — an arbitrary string would be persisted as-is. Not tested but flagging for defensive-input hardening.",
+    "server.py file size: 3026 lines — repeat of iter-12 note. Consider extracting mrf/po/masters routers for maintainability."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_mrf_edit_draft_iter13.py (new)"
+  ],
+  "success_rate": {
+    "backend": "100% (15/15 iter13 draft-edit tests)",
+    "frontend": "not tested (backend-only request)"
+  },
+  "seed_data_creation": "Test file creates two isolated projects with distinct customers per test session: TESTCUSTA-<hex>/TP-A-<hex> and TESTCUSTB-<hex>/TP-B-<hex>. Both projects have siteeng@vasu.dev and pm@vasu.dev pre-assigned as site_engineer/project_manager. Each PUT test creates a fresh MRF so tests are independent; every MRF is prefixed 'TEST-Iter13' in item description for easy identification. Fully idempotent — safe to re-run. Uses second SE via chand@vasuinfosec.com (fresh dev-login user auto-created).",
+  "retest_needed": false,
+  "should_main_agent_self_test": true,
+  "context_for_next_testing_agent": "Run: `EXPO_PUBLIC_BACKEND_URL=https://purchase-workflow-10.preview.emergentagent.com python -m pytest backend/tests/test_mrf_edit_draft_iter13.py -v` (from /app). Prereq: ENABLE_DEV_LOGIN=1 in backend/.env; at least one `material`, one `brand`, one `model` master (auto-seeded by /api/seed). Test module is fully independent — does not touch anything the phase2c suite exercises. Do NOT run the deprecated suites listed in iteration_10.json / iteration_11.json.",
+  "rca_of_issue": "N/A — no product bugs. One minor design smell noted (lone project_id → 400 due to guard ordering; see backend_issues.minor). Not blocking, has an obvious 1-line fix if desired."
+}

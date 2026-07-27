@@ -1,0 +1,53 @@
+{
+  "status": "not_executable_from_codex",
+  "published_app": "Purchase Workflow 10",
+  "production_touched": false,
+  "production_connected": false,
+  "production_deployed": false,
+  "access_security_v2": "0",
+  "tested_code_package": {
+    "archive": "test_reports/production_part_a_task3b_code_package.tar.gz",
+    "checksum": "test_reports/production_part_a_task3b_code_package.tar.gz.sha256",
+    "runtime_files": [
+      "backend/routers/access_security_v2.py",
+      "frontend/app/access-console.tsx",
+      "frontend/app/more.tsx",
+      "frontend/src/api.ts",
+      "frontend/src/auth.tsx"
+    ],
+    "evidence_files": [
+      "backend/tests/test_task3a2_access_security.py",
+      "backend/tests/test_task3b_access_console.py",
+      "frontend/tests/task3b_access_console.test.mjs",
+      "backend/scripts/task3b_test_report.py",
+      "test_reports/task3b_test_report.json",
+      "test_reports/task3b_test_report.md"
+    ],
+    "secrets_or_data_included": false
+  },
+  "tests": {
+    "task3a2_security": {"passed": 14, "failed": 0},
+    "task3b_backend": {"passed": 8, "failed": 0},
+    "task3b_frontend": {"passed": 8, "failed": 0},
+    "total": {"passed": 30, "failed": 0}
+  },
+  "backup_reference": {
+    "command": "cd /app && umask 077 && test -n \"$MONGO_URL\" && test -n \"$DB_NAME\" && command -v mongodump && python3 /app/backend/scripts/backup_db.py",
+    "destination": "/app/backup_artifacts/backup_<UTCstamp>/",
+    "codex_backup_created": false
+  },
+  "platform_controlled_values": {
+    "deployment": "Emergent-controlled; unavailable to repository",
+    "rollback": "Emergent-controlled; unavailable to repository",
+    "host": "Emergent-managed platform value unavailable to repository",
+    "region": "Emergent-managed platform value unavailable to repository",
+    "cluster": "Emergent-managed platform value unavailable to repository"
+  },
+  "handover": {
+    "channel": "Emergent Re-publish",
+    "migration": false,
+    "seed": false,
+    "supervisor_change": false,
+    "director_approval_required_for_v2_enablement": true
+  }
+}
