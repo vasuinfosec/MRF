@@ -304,6 +304,7 @@ async def categories_import(file: UploadFile = File(...),
             continue
         cur_parent: Optional[str] = None
         last_cat_id: Optional[str] = None
+        created_any = False
         skipped = False
         for name in parts:
             if len(name) > 60:
@@ -334,10 +335,15 @@ async def categories_import(file: UploadFile = File(...),
             await db.material_categories.insert_one(doc)
             last_cat_id = doc["cat_id"]
             cur_parent = doc["cat_id"]
+            created_any = True
             created.append({"path": "/".join(parts[: parts.index(name) + 1])})
         if skipped:
             continue
-        if last_cat_id is None:
+        # If every segment of this row already existed, mark it as a duplicate
+        # so the summary correctly reflects "nothing new was added".
+        if not created_any and last_cat_id is not None:
+            dup.append({"row": idx, "path": path})
+        elif last_cat_id is None:
             dup.append({"row": idx, "path": path})
     await _recompute_paths(None)
     await master_audit("category.import", f"batch_{now_utc().timestamp()}",

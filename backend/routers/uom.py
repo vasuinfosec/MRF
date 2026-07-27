@@ -125,6 +125,10 @@ async def uom_delete_unit(item_id: str, reason: str = "Deactivated",
     )
     if in_use:
         raise HTTPException(400, "Unit is used in conversion rules — remove them first")
+    # Symmetry with categories: block if referenced as base_uom by any material
+    ref = await db.materials.find_one({"base_uom": existing["name"]})
+    if ref:
+        raise HTTPException(400, "Unit is used as base_uom by existing materials — re-assign them first")
     await db.masters.update_one({"item_id": item_id}, {"$set": {"active": False}})
     await master_audit("master.unit", item_id, "deactivate", u, reason,
                        {"active": True}, {"active": False})
