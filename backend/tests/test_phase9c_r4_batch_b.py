@@ -11,7 +11,10 @@ import os
 import pytest
 import requests
 
-BASE = os.environ.get("EXPO_BACKEND_URL", "http://localhost:8001").rstrip("/")
+BASE = (os.environ.get("EXPO_PUBLIC_BACKEND_URL")
+        or os.environ.get("EXPO_BACKEND_URL")
+        or os.environ.get("VASU_BASE_URL")
+        or "http://localhost:8001").rstrip("/")
 
 ROLES = ["admin", "director", "gm", "pm", "purchase", "siteeng", "store"]
 

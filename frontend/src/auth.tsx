@@ -64,6 +64,12 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   }, [refresh]);
 
   const login = async (email: string, role: string, name?: string) => {
+    // Deployment health-check gate: dev-login is a demo-only flow. In release
+    // builds the backend returns 404 (ACCESS_SECURITY_V2), so we fail fast
+    // here with a friendlier error instead of surfacing the raw 404.
+    if (!__DEV__) {
+      throw new Error("Demo login is disabled in production builds. Please use Google Sign-in.");
+    }
     const r = await api<{ session_token: string; user: User }>("/auth/dev-login", {
       method: "POST", body: { email, role, name }, token: null,
     });

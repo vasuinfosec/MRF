@@ -80,7 +80,9 @@ export default function Login() {
         <Card style={{ marginTop: 24 }} testID="login-card">
           <H1>Sign in</H1>
           <Muted style={{ marginTop: 4, marginBottom: 16 }}>
-            Choose a demo role, use custom email, or sign in with Google.
+            {__DEV__
+              ? "Choose a demo role, use custom email, or sign in with Google."
+              : "Sign in with your Google account."}
           </Muted>
 
           <Btn
@@ -91,37 +93,41 @@ export default function Login() {
             disabled={busy}
           />
 
-          <View style={styles.divider}>
-            <View style={styles.line} />
-            <Text style={styles.dividerText}>DEMO USERS</Text>
-            <View style={styles.line} />
-          </View>
+          {__DEV__ ? (
+            <>
+              <View style={styles.divider}>
+                <View style={styles.line} />
+                <Text style={styles.dividerText}>DEMO USERS</Text>
+                <View style={styles.line} />
+              </View>
 
-          <View style={{ gap: 8 }}>
-            {DEMO.map((d) => (
-              <Btn
-                key={d.email}
-                testID={`demo-${d.role}-btn`}
-                title={`Login as ${d.label}`}
-                variant="outline"
-                onPress={() => seedAndLogin(d.email, d.role, d.label)}
-                disabled={busy}
-              />
-            ))}
-          </View>
+              <View style={{ gap: 8 }}>
+                {DEMO.map((d) => (
+                  <Btn
+                    key={d.email}
+                    testID={`demo-${d.role}-btn`}
+                    title={`Login as ${d.label}`}
+                    variant="outline"
+                    onPress={() => seedAndLogin(d.email, d.role, d.label)}
+                    disabled={busy}
+                  />
+                ))}
+              </View>
 
-          <View style={{ marginTop: 20 }}>
-            <Label>OR CUSTOM EMAIL (demo)</Label>
-            <Input
-              testID="custom-email-input"
-              placeholder="your.name@company.com"
-              autoCapitalize="none"
-              keyboardType="email-address"
-              value={customEmail}
-              onChangeText={setCustomEmail}
-            />
-            <Btn testID="custom-login-btn" title="Sign in" variant="action" onPress={customLogin} disabled={busy || !customEmail} />
-          </View>
+              <View style={{ marginTop: 20 }}>
+                <Label>OR CUSTOM EMAIL (demo)</Label>
+                <Input
+                  testID="custom-email-input"
+                  placeholder="your.name@company.com"
+                  autoCapitalize="none"
+                  keyboardType="email-address"
+                  value={customEmail}
+                  onChangeText={setCustomEmail}
+                />
+                <Btn testID="custom-login-btn" title="Sign in" variant="action" onPress={customLogin} disabled={busy || !customEmail} />
+              </View>
+            </>
+          ) : null}
 
           {err ? <Text style={styles.err} testID="login-error">{err}</Text> : null}
         </Card>

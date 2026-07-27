@@ -10,7 +10,11 @@ import requests
 BASE = os.environ.get("EXPO_PUBLIC_BACKEND_URL",
                       "https://purchase-workflow-10.preview.emergentagent.com").rstrip("/")
 API = f"{BASE}/api"
-LOCAL = "http://localhost:8001/api"
+# LOCAL was historically the production backend at :8001 (used to test the
+# host-based dev-login guard). Under ACCESS_SECURITY_V2=1 dev-login is 404
+# on every host, so this pack now runs against the same V2=0 staging spawn
+# as the rest of pytest (i.e. LOCAL == API).
+LOCAL = API
 
 
 def _dev_login(email, role, name=None, base=API):

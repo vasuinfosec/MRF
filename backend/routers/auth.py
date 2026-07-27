@@ -292,6 +292,10 @@ async def dev_login(body: dict, request: Request):
     name = body.get("name", email.split("@")[0] if email else "Dev User")
     if not email:
         raise HTTPException(400, "email required")
+    # Canonicalise legacy role names so pre-role-reshuffle test-fixtures still
+    # work through dev-login (project_manager → pm, billing → purchase).
+    if role in LEGACY_ROLE_MAP:
+        role = LEGACY_ROLE_MAP[role]
     if role not in ROLES:
         raise HTTPException(400, "invalid role")
     existing = await db.users.find_one({"email": email}, {"_id": 0})

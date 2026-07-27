@@ -6,7 +6,9 @@ import os
 import pytest
 import requests
 
-BASE_URL = "https://purchase-workflow-10.preview.emergentagent.com"
+BASE_URL = (os.environ.get("EXPO_PUBLIC_BACKEND_URL")
+             or os.environ.get("EXPO_BACKEND_URL")
+             or "https://purchase-workflow-10.preview.emergentagent.com").rstrip("/")
 
 
 def _login(role: str, email: str, name: str):

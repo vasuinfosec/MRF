@@ -219,24 +219,28 @@ class TestPoListScoping:
 class TestPoPdfScoping:
     def test_stranger_se_403(self, tokens, po_and_grn):
         tok = tokens["tokens"]["stranger"]
-        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf?token={tok}")
+        # Use Bearer header (not URL ?token=) — post-audit SEC-003 hardening
+        # rejects long-lived session tokens via URL. This test targets the
+        # RBAC 403, not the URL-token 401 short-circuit.
+        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf",
+                         headers={"Authorization": f"Bearer {tok}"})
         assert r.status_code == 403, f"expected 403 got {r.status_code}"
 
     def test_creator_se_200(self, tokens, po_and_grn):
         tok = tokens["tokens"]["site_engineer"]
-        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 200, r.text[:200]
         assert r.headers.get("content-type", "").startswith("application/pdf")
 
     def test_pm_stranger_403(self, tokens, po_and_grn):
         tok = tokens["tokens"]["pm_stranger"]
-        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 403
 
     @pytest.mark.parametrize("role", ["admin", "purchase", "billing"])
     def test_privileged_200(self, tokens, po_and_grn, role):
         tok = tokens["tokens"][role]
-        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/po/{po_and_grn['po_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 200, f"{role}: {r.status_code} {r.text[:200]}"
         assert r.headers.get("content-type", "").startswith("application/pdf")
 
@@ -245,24 +249,26 @@ class TestPoPdfScoping:
 class TestGrnPdfScoping:
     def test_stranger_se_403(self, tokens, po_and_grn):
         tok = tokens["tokens"]["stranger"]
-        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf?token={tok}")
+        # Post-SEC-003 hardening: use Bearer header to reach the RBAC layer.
+        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf",
+                         headers={"Authorization": f"Bearer {tok}"})
         assert r.status_code == 403
 
     def test_creator_se_200(self, tokens, po_and_grn):
         tok = tokens["tokens"]["site_engineer"]
-        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 200
         assert r.headers.get("content-type", "").startswith("application/pdf")
 
     def test_pm_stranger_403(self, tokens, po_and_grn):
         tok = tokens["tokens"]["pm_stranger"]
-        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 403
 
     @pytest.mark.parametrize("role", ["admin", "purchase", "billing"])
     def test_privileged_200(self, tokens, po_and_grn, role):
         tok = tokens["tokens"][role]
-        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/grn/{po_and_grn['grn_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 200
         assert r.headers.get("content-type", "").startswith("application/pdf")
 
@@ -272,12 +278,12 @@ class TestInvoicePdfScoping:
     @pytest.mark.parametrize("role", ["site_engineer", "project_manager", "stranger", "pm_stranger"])
     def test_restricted_roles_403(self, tokens, po_and_grn, role):
         tok = tokens["tokens"][role]
-        r = requests.get(f"{API}/invoice/{po_and_grn['invoice_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/invoice/{po_and_grn['invoice_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 403, f"{role} got {r.status_code}"
 
     @pytest.mark.parametrize("role", ["purchase", "billing", "admin"])
     def test_privileged_200(self, tokens, po_and_grn, role):
         tok = tokens["tokens"][role]
-        r = requests.get(f"{API}/invoice/{po_and_grn['invoice_id']}/pdf?token={tok}")
+        r = requests.get(f"{API}/invoice/{po_and_grn['invoice_id']}/pdf", headers={"Authorization": f"Bearer tok"})
         assert r.status_code == 200
         assert r.headers.get("content-type", "").startswith("application/pdf")

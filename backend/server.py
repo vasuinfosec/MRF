@@ -1794,6 +1794,12 @@ async def startup():
     await db.materials.create_index([("description_norm", 1)], unique=True, sparse=True)
     await db.variants.create_index("variant_uid", unique=True)
     await db.variants.create_index([("material_uid", 1), ("make_norm", 1), ("model_norm", 1)], unique=True)
+    # Task 3B / security hardening: LLM budget reservations auto-expire so
+    # a crashed process cannot indefinitely hold an unused reservation.
+    # 30 minutes is long enough for any legitimate slow LLM call.
+    await db.llm_budget_reservations.create_index("reservation_id", unique=True)
+    await db.llm_budget_reservations.create_index("created_at",
+                                                    expireAfterSeconds=1800)
 
 @app.on_event("shutdown")
 async def shutdown():

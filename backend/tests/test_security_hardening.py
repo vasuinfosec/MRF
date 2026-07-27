@@ -150,17 +150,33 @@ class TestSec001DevLoginAndSeed:
         assert r.json().get("ok") is True
 
 
-# ============ SEC-002: /api/audit admin-only ============
+# ============ SEC-002: /api/audit role-scoping (iter14 update) ============
 class TestSec002Audit:
-    @pytest.mark.parametrize("role", ["site_engineer", "project_manager", "purchase", "billing"])
-    def test_non_admin_forbidden(self, tokens, role):
+    # iter14 broadened /audit access: management (admin/director/gm/pm/purchase)
+    # sees company-wide, non-management sees their own actions only. The
+    # old "admin-only 403" contract is superseded by the newer role-scoping.
+    @pytest.mark.parametrize("role", ["site_engineer"])
+    def test_non_management_scoped_ok(self, tokens, role):
         r = requests.get(f"{API}/audit", headers=_hdr(tokens["tokens"][role]))
-        assert r.status_code == 403, f"{role} got {r.status_code}"
+        assert r.status_code == 200, f"{role} got {r.status_code}"
+        rows = r.json()
+        assert isinstance(rows, list)
+        # Non-management callers must ONLY see their own actions.
+        for row in rows:
+            assert row.get("user_role") == role or row.get("user_id") == tokens["users"][role].get("user_id", "")
 
     def test_admin_ok(self, tokens):
         r = requests.get(f"{API}/audit", headers=_hdr(tokens["tokens"]["admin"]))
         assert r.status_code == 200
         assert isinstance(r.json(), list)
+
+    def test_non_management_entity_id_customer_403(self, tokens):
+        # SEC-001 remediation: entity_id probes for customer/vendor/master
+        # audits are blocked for non-management (PII leakage protection).
+        r = requests.get(f"{API}/audit",
+                         params={"entity_id": "some_customer_id"},
+                         headers=_hdr(tokens["tokens"]["site_engineer"]))
+        assert r.status_code == 403
 
 
 # ============ SEC-002: /api/users email redaction for non-admin ============
