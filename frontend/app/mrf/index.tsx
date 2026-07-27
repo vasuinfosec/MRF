@@ -8,6 +8,7 @@ import { useAuth } from "@/src/auth";
 import { api, backendUrl, getDownloadToken } from "@/src/api";
 import { Btn, Card, H1, Muted, Pill, Empty, Loader } from "@/src/components/ui";
 import { theme, statusLabel } from "@/src/theme";
+import { useResponsive } from "@/src/hooks/useResponsive";
 
 // 17-status filter set + summarized groupings
 const STATUS_FILTERS = [
@@ -52,6 +53,7 @@ export default function MRFList() {
   const { user } = useAuth();
   const params = useLocalSearchParams<{ status?: string; filter?: string }>();
   const router = useRouter();
+  const { isDesktop } = useResponsive();
   const [mrfs, setMrfs] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -163,52 +165,105 @@ export default function MRFList() {
       {busy && !mrfs.length ? <Loader /> : null}
 
       <ScrollView refreshControl={<RefreshControl refreshing={busy} onRefresh={load} />} style={{ marginTop: 16 }}>
-        <View style={{ gap: 10, paddingBottom: 60 }}>
-          {filtered.map((m) => (
-            <TouchableOpacity
-              key={m.mrf_id}
-              testID={`mrf-item-${m.mrf_number.replace(/\//g, "-")}`}
-              onPress={() => openMRF(m.mrf_id)}
-              activeOpacity={0.75}
-            >
-              <Card>
-                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
-                  <View style={{ flex: 1 }}>
-                    <Text style={styles.mrfNum} testID={`mrfnum-${m.mrf_number.replace(/\//g, "-")}`}>{m.mrf_number}</Text>
-                    <Text style={styles.mrfProj}>{projName(m.project_id)} · {m.site}</Text>
-                    {m.customer_id ? (
-                      <Text style={styles.mrfCust} numberOfLines={1}>
-                        <Text style={{ fontWeight: "700", color: theme.colors.primary }}>{m.customer_id}</Text>
-                        {m.customer_name ? ` · ${m.customer_name}` : ""}
-                      </Text>
-                    ) : null}
-                    <Text style={styles.mrfMeta}>{m.system_category} · {m.items.length} item(s)</Text>
+        {isDesktop ? (
+          <View style={styles.table}>
+            {/* Column header */}
+            <View style={[styles.trow, styles.thead]}>
+              <Text style={[styles.th, { flex: 1.2 }]}>MRF #</Text>
+              <Text style={[styles.th, { flex: 1.4 }]}>Project · Site</Text>
+              <Text style={[styles.th, { flex: 1.6 }]}>Customer</Text>
+              <Text style={[styles.th, { flex: 1 }]}>System / Items</Text>
+              <Text style={[styles.th, { flex: 1 }]}>Required by</Text>
+              <Text style={[styles.th, { flex: 0.9 }]}>Requester</Text>
+              <Text style={[styles.th, { flex: 1.2 }]}>Status</Text>
+            </View>
+            {filtered.map((m) => (
+              <TouchableOpacity
+                key={m.mrf_id}
+                testID={`mrf-item-${m.mrf_number.replace(/\//g, "-")}`}
+                onPress={() => openMRF(m.mrf_id)}
+                activeOpacity={0.75}
+                style={styles.trow}
+                // @ts-ignore — RN Web passes through unknown props to DOM node
+                dataSet={{ role: "table-row" }}
+              >
+                <View style={{ flex: 1.2 }}>
+                  <Text style={styles.tcellStrong} testID={`mrfnum-${m.mrf_number.replace(/\//g, "-")}`}>{m.mrf_number}</Text>
+                  {pendingForRole(user?.role, m.status) ? (
+                    <Text style={styles.actionTag}>YOUR ACTION</Text>
+                  ) : null}
+                </View>
+                <Text style={[styles.tcell, { flex: 1.4 }]} numberOfLines={1}>{projName(m.project_id)} · {m.site}</Text>
+                <View style={{ flex: 1.6 }}>
+                  {m.customer_id ? (
+                    <Text style={styles.tcell} numberOfLines={1}>
+                      <Text style={{ fontWeight: "700", color: theme.colors.primary }}>{m.customer_id}</Text>
+                      {m.customer_name ? ` · ${m.customer_name}` : ""}
+                    </Text>
+                  ) : <Text style={[styles.tcell, { color: theme.colors.textMuted }]}>—</Text>}
+                </View>
+                <Text style={[styles.tcell, { flex: 1 }]} numberOfLines={1}>{m.system_category} · {m.items.length}</Text>
+                <Text style={[styles.tcell, { flex: 1 }]} numberOfLines={1}>{m.required_by}</Text>
+                <Text style={[styles.tcell, { flex: 0.9 }]} numberOfLines={1}>{m.requesting_person}</Text>
+                <View style={{ flex: 1.2, alignItems: "flex-start" }}>
+                  <Pill status={m.status} />
+                </View>
+              </TouchableOpacity>
+            ))}
+            {!busy && !filtered.length && !err ? (
+              <View style={{ paddingVertical: 24 }}>
+                <Empty msg={filter === "all" ? "No MRFs found. Tap 'New MRF' to create one." : `No MRFs in status: ${statusLabel(filter)}`} testID="empty-mrf" />
+              </View>
+            ) : null}
+          </View>
+        ) : (
+          <View style={{ gap: 10, paddingBottom: 60 }}>
+            {filtered.map((m) => (
+              <TouchableOpacity
+                key={m.mrf_id}
+                testID={`mrf-item-${m.mrf_number.replace(/\//g, "-")}`}
+                onPress={() => openMRF(m.mrf_id)}
+                activeOpacity={0.75}
+              >
+                <Card>
+                  <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.mrfNum} testID={`mrfnum-${m.mrf_number.replace(/\//g, "-")}`}>{m.mrf_number}</Text>
+                      <Text style={styles.mrfProj}>{projName(m.project_id)} · {m.site}</Text>
+                      {m.customer_id ? (
+                        <Text style={styles.mrfCust} numberOfLines={1}>
+                          <Text style={{ fontWeight: "700", color: theme.colors.primary }}>{m.customer_id}</Text>
+                          {m.customer_name ? ` · ${m.customer_name}` : ""}
+                        </Text>
+                      ) : null}
+                      <Text style={styles.mrfMeta}>{m.system_category} · {m.items.length} item(s)</Text>
+                    </View>
+                    <View style={{ alignItems: "flex-end" }}>
+                      <Pill status={m.status} />
+                      {pendingForRole(user?.role, m.status) ? (
+                        <View style={{ marginTop: 6, backgroundColor: theme.colors.danger, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
+                          <Text style={{ color: "#fff", fontSize: 9, fontWeight: "800" }}>YOUR ACTION</Text>
+                        </View>
+                      ) : null}
+                    </View>
                   </View>
-                  <View style={{ alignItems: "flex-end" }}>
-                    <Pill status={m.status} />
-                    {pendingForRole(user?.role, m.status) ? (
-                      <View style={{ marginTop: 6, backgroundColor: theme.colors.danger, borderRadius: 6, paddingHorizontal: 6, paddingVertical: 2 }}>
-                        <Text style={{ color: "#fff", fontSize: 9, fontWeight: "800" }}>YOUR ACTION</Text>
-                      </View>
-                    ) : null}
+                  <View style={styles.mrfFoot}>
+                    <Text style={styles.mrfDate}>Required by: {m.required_by}</Text>
+                    <Text style={styles.mrfDate}>By {m.requesting_person}</Text>
                   </View>
-                </View>
-                <View style={styles.mrfFoot}>
-                  <Text style={styles.mrfDate}>Required by: {m.required_by}</Text>
-                  <Text style={styles.mrfDate}>By {m.requesting_person}</Text>
-                </View>
-                <View style={{ marginTop: 8, flexDirection: "row", justifyContent: "flex-end", alignItems: "center" }}>
-                  <Text style={{ color: theme.colors.primary, fontSize: 11, fontWeight: "700" }}>OPEN</Text>
-                  <Ionicons name={Platform.OS === "web" ? "open-outline" : "chevron-forward"} size={14} color={theme.colors.primary} style={{ marginLeft: 4 }} />
-                </View>
-              </Card>
-            </TouchableOpacity>
-          ))}
+                  <View style={{ marginTop: 8, flexDirection: "row", justifyContent: "flex-end", alignItems: "center" }}>
+                    <Text style={{ color: theme.colors.primary, fontSize: 11, fontWeight: "700" }}>OPEN</Text>
+                    <Ionicons name={Platform.OS === "web" ? "open-outline" : "chevron-forward"} size={14} color={theme.colors.primary} style={{ marginLeft: 4 }} />
+                  </View>
+                </Card>
+              </TouchableOpacity>
+            ))}
 
-          {!busy && !filtered.length && !err ? (
-            <Empty msg={filter === "all" ? "No MRFs found. Tap 'New MRF' to create one." : `No MRFs in status: ${statusLabel(filter)}`} testID="empty-mrf" />
-          ) : null}
-        </View>
+            {!busy && !filtered.length && !err ? (
+              <Empty msg={filter === "all" ? "No MRFs found. Tap 'New MRF' to create one." : `No MRFs in status: ${statusLabel(filter)}`} testID="empty-mrf" />
+            ) : null}
+          </View>
+        )}
       </ScrollView>
     </AppShell>
   );
@@ -223,4 +278,21 @@ const styles = StyleSheet.create({
   mrfMeta: { fontSize: 11, color: theme.colors.textMuted, marginTop: 4, textTransform: "uppercase", letterSpacing: 1 },
   mrfFoot: { flexDirection: "row", justifyContent: "space-between", marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: theme.colors.border },
   mrfDate: { fontSize: 11, color: theme.colors.textMuted },
+
+  // Desktop table view
+  table: {
+    borderWidth: 1, borderColor: theme.colors.border, borderRadius: 8,
+    backgroundColor: theme.colors.bg, overflow: "hidden", marginBottom: 40,
+  },
+  trow: {
+    flexDirection: "row", alignItems: "center",
+    paddingHorizontal: 14, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: theme.colors.border,
+    gap: 12,
+  },
+  thead: { backgroundColor: theme.colors.surface2, paddingVertical: 10 },
+  th: { fontSize: 11, fontWeight: "700", color: theme.colors.textMuted, textTransform: "uppercase", letterSpacing: 0.8 },
+  tcell: { fontSize: 13, color: theme.colors.text },
+  tcellStrong: { fontSize: 13, fontWeight: "700", color: theme.colors.text },
+  actionTag: { marginTop: 4, alignSelf: "flex-start", backgroundColor: theme.colors.danger, color: "#fff", fontSize: 9, fontWeight: "800", paddingHorizontal: 5, paddingVertical: 2, borderRadius: 4 },
 });

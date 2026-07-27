@@ -43,13 +43,30 @@ export default function Root({ children }: PropsWithChildren) {
               @media (hover: hover) and (pointer: fine) {
                 [role="button"]:hover,
                 a:hover,
-                [data-testid$="-btn"]:hover {
+                [data-testid$="-btn"]:hover,
+                [data-testid^="side-"]:hover,
+                [data-testid^="tab-"]:hover {
                   filter: brightness(0.96);
-                  transition: filter 120ms ease-out;
+                  transition: filter 120ms ease-out, background-color 120ms ease-out;
                 }
-                input:focus, textarea:focus, select:focus {
-                  outline: 2px solid #0F172A;
-                  outline-offset: 1px;
+                /* Card hover — subtle lift */
+                [data-testid$="-card"]:hover,
+                [data-testid^="mrf-item-"]:hover,
+                [data-testid^="po-item-"]:hover {
+                  box-shadow: 0 6px 18px -8px rgba(15,23,42,0.18);
+                  transform: translateY(-1px);
+                  transition: box-shadow 160ms ease-out, transform 160ms ease-out;
+                }
+                /* Table rows */
+                [data-role="table-row"]:hover {
+                  background-color: #F1F5F9 !important;
+                }
+                /* Focus rings */
+                input:focus-visible, textarea:focus-visible, select:focus-visible,
+                button:focus-visible, [role="button"]:focus-visible {
+                  outline: 2px solid #2563EB;
+                  outline-offset: 2px;
+                  border-radius: 4px;
                 }
               }
 
@@ -69,6 +86,79 @@ export default function Root({ children }: PropsWithChildren) {
                 display: flex; align-items: center; justify-content: center;
                 color: #64748B; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
                 background: #F8FAFC;
+              }
+
+              /* ===================== DARK MODE (web-only lightweight overlay) =====================
+                 React Native Web compiles inline styles to hashed classes such as
+                 `r-backgroundColor-14lw9ot` (= #FFFFFF).  We target those specific
+                 hashes so brand accents (primary blue #002FA7, action orange, etc.)
+                 remain untouched.
+              */
+              html[data-theme="dark"] { color-scheme: dark; background:#0B1220; }
+              html[data-theme="dark"] body { background:#0B1220; color:#E2E8F0; }
+              html[data-theme="dark"] #root:empty::before { color:#94A3B8; background:#0B1220; }
+
+              /* --- Surfaces (backgrounds) --- */
+              html[data-theme="dark"] .r-backgroundColor-14lw9ot { background-color:#111827 !important; } /* #FFFFFF → dark card */
+              html[data-theme="dark"] .r-backgroundColor-11j01x2 { background-color:#0B1220 !important; } /* #F8FAFC → dark bg */
+              html[data-theme="dark"] .r-backgroundColor-1jh0li6 { background-color:#1F2937 !important; } /* #F1F5F9 → dark surface2 */
+
+              /* --- Borders (all four sides + shorthand) --- */
+              html[data-theme="dark"] .r-borderColor-1wr2p1e,
+              html[data-theme="dark"] .r-borderTopColor-174iedc,
+              html[data-theme="dark"] .r-borderRightColor-13zh0bf,
+              html[data-theme="dark"] .r-borderBottomColor-eaxd7d,
+              html[data-theme="dark"] .r-borderLeftColor-2yi16 { border-color:#1F2937 !important; }
+
+              /* --- Text --- */
+              html[data-theme="dark"] .r-color-15ijx5m { color:#E2E8F0 !important; } /* #0F172A body text */
+              html[data-theme="dark"] .r-color-1s7ct43 { color:#94A3B8 !important; } /* muted */
+              /* textSecondary #475569 is used as inline color too */
+              html[data-theme="dark"] div[style*="color: rgb(71, 85, 105)"],
+              html[data-theme="dark"] [style*="color: rgb(71, 85, 105)"] { color:#94A3B8 !important; }
+              html[data-theme="dark"] div[style*="color: rgb(15, 23, 42)"],
+              html[data-theme="dark"] [style*="color: rgb(15, 23, 42)"] { color:#E2E8F0 !important; }
+              html[data-theme="dark"] div[style*="color: rgb(100, 116, 139)"],
+              html[data-theme="dark"] [style*="color: rgb(100, 116, 139)"] { color:#94A3B8 !important; }
+              /* Fallback for RN-Web dynamic style attr for backgrounds */
+              html[data-theme="dark"] div[style*="background-color: rgb(255, 255, 255)"],
+              html[data-theme="dark"] [style*="background-color: rgb(255, 255, 255)"] { background-color:#111827 !important; }
+
+              /* --- Inputs / textareas --- */
+              html[data-theme="dark"] input,
+              html[data-theme="dark"] textarea,
+              html[data-theme="dark"] select {
+                background-color:#0F172A !important;
+                color:#E2E8F0 !important;
+                border-color:#334155 !important;
+              }
+              html[data-theme="dark"] input::placeholder,
+              html[data-theme="dark"] textarea::placeholder { color:#64748B !important; }
+
+              /* Dark scrollbars */
+              html[data-theme="dark"] ::-webkit-scrollbar-thumb { background: rgba(203,213,225,0.25); }
+              html[data-theme="dark"] ::-webkit-scrollbar-thumb:hover { background: rgba(203,213,225,0.45); }
+
+              /* ===================== PRINT ===================== */
+              @media print {
+                @page { margin: 12mm; }
+                html, body, #root, body > div:first-child { position: static !important; inset: auto !important; overflow: visible !important; height: auto !important; background:#fff !important; color:#000 !important; }
+                /* Hide chrome */
+                [nativeID="app-sidebar"],
+                [id="app-sidebar"],
+                [nativeID="app-tabbar"],
+                [id="app-tabbar"],
+                [data-testid="notif-icon"],
+                [data-testid="theme-toggle"],
+                [data-testid="shortcuts-btn"],
+                [data-testid$="-btn"],
+                [role="button"][data-testid*="back"] { display: none !important; }
+                /* Expand content */
+                [nativeID="app-content"], [id="app-content"] { max-width: 100% !important; }
+                /* Force light theme in print */
+                * { color:#000 !important; background:#fff !important; box-shadow:none !important; }
+                /* Add page breaks between top-level cards for long docs */
+                [data-testid$="-card"] { page-break-inside: avoid; break-inside: avoid; }
               }
             `,
           }}
