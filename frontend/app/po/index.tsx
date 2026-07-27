@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
@@ -8,10 +8,15 @@ import { useAuth } from "@/src/auth";
 import { api, backendUrl, getDownloadToken } from "@/src/api";
 import { Btn, Card, H1, Muted, Pill, Empty, Loader } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import { useResponsive } from "@/src/hooks/useResponsive";
+import { DTable, DHead, DH, DRow, DC } from "@/src/components/DataTable";
+
+const inr = (n: number) => "\u20B9 " + new Intl.NumberFormat("en-IN").format(n || 0);
 
 export default function POList() {
   const { user } = useAuth();
   const router = useRouter();
+  const { isDesktop } = useResponsive();
   const [pos, setPos] = useState<any[]>([]);
   const [vendors, setVendors] = useState<any[]>([]);
   const [projects, setProjects] = useState<any[]>([]);
@@ -54,27 +59,61 @@ export default function POList() {
 
       {busy && !pos.length ? <Loader /> : null}
 
-      <View style={{ marginTop: 16, gap: 10 }}>
-        {pos.map((p) => (
-          <TouchableOpacity key={p.po_id} testID={`po-item-${p.po_number.replace(/\//g, "-")}`}
-            onPress={() => router.push(`/po/${p.po_id}` as any)} activeOpacity={0.7}>
-            <Card>
-              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.poNum}>{p.po_number}</Text>
-                  <Text style={styles.poVendor}>{vName(p.vendor_id)}</Text>
-                  <Text style={styles.poMeta}>Project {pName(p.project_id)} · {p.items?.length || 0} items · MRF {p.mrf_refs?.length || 0}</Text>
-                </View>
-                <View style={{ alignItems: "flex-end" }}>
-                  <Pill status={p.status === "issued" ? "sent_to_purchase" : p.status} />
-                  <Text style={styles.poTotal}>₹ {new Intl.NumberFormat("en-IN").format(p.total || 0)}</Text>
-                </View>
+      {isDesktop ? (
+        <View style={{ marginTop: 16 }}>
+          <DTable>
+            <DHead>
+              <DH flex={1.2}>PO #</DH>
+              <DH flex={1.6}>Vendor</DH>
+              <DH flex={0.8}>Project</DH>
+              <DH flex={0.6}>Items</DH>
+              <DH flex={0.6}>MRFs</DH>
+              <DH flex={1.2}>Status</DH>
+              <DH flex={1} right>Total</DH>
+            </DHead>
+            {pos.map((p) => (
+              <DRow key={p.po_id}
+                testID={`po-item-${p.po_number.replace(/\//g, "-")}`}
+                onPress={() => router.push(`/po/${p.po_id}` as any)}>
+                <DC flex={1.2} strong>{p.po_number}</DC>
+                <DC flex={1.6}>{vName(p.vendor_id)}</DC>
+                <DC flex={0.8}>{pName(p.project_id)}</DC>
+                <DC flex={0.6}>{p.items?.length || 0}</DC>
+                <DC flex={0.6}>{p.mrf_refs?.length || 0}</DC>
+                <DC flex={1.2}><Pill status={p.status === "issued" ? "sent_to_purchase" : p.status} /></DC>
+                <DC flex={1} right strong color={theme.colors.primary}>{inr(p.total || 0)}</DC>
+              </DRow>
+            ))}
+            {!busy && !pos.length ? (
+              <View style={{ paddingVertical: 24 }}>
+                <Empty msg="No purchase orders yet." testID="empty-po" />
               </View>
-            </Card>
-          </TouchableOpacity>
-        ))}
-        {!busy && !pos.length ? <Empty msg="No purchase orders yet." testID="empty-po" /> : null}
-      </View>
+            ) : null}
+          </DTable>
+        </View>
+      ) : (
+        <View style={{ marginTop: 16, gap: 10 }}>
+          {pos.map((p) => (
+            <TouchableOpacity key={p.po_id} testID={`po-item-${p.po_number.replace(/\//g, "-")}`}
+              onPress={() => router.push(`/po/${p.po_id}` as any)} activeOpacity={0.7}>
+              <Card>
+                <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.poNum}>{p.po_number}</Text>
+                    <Text style={styles.poVendor}>{vName(p.vendor_id)}</Text>
+                    <Text style={styles.poMeta}>Project {pName(p.project_id)} · {p.items?.length || 0} items · MRF {p.mrf_refs?.length || 0}</Text>
+                  </View>
+                  <View style={{ alignItems: "flex-end" }}>
+                    <Pill status={p.status === "issued" ? "sent_to_purchase" : p.status} />
+                    <Text style={styles.poTotal}>{inr(p.total || 0)}</Text>
+                  </View>
+                </View>
+              </Card>
+            </TouchableOpacity>
+          ))}
+          {!busy && !pos.length ? <Empty msg="No purchase orders yet." testID="empty-po" /> : null}
+        </View>
+      )}
     </AppShell>
   );
 }

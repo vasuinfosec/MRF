@@ -8,11 +8,14 @@ import { useAuth } from "@/src/auth";
 import { api } from "@/src/api";
 import { Btn, Card, H1, Muted, Pill, Empty, Loader, Label, Stat } from "@/src/components/ui";
 import { theme, statusLabel } from "@/src/theme";
+import { useResponsive } from "@/src/hooks/useResponsive";
+import { DTable, DHead, DH, DRow, DC } from "@/src/components/DataTable";
 
 const FILTERS = ["all", "not_billed", "partially_billed", "fully_billed", "non_billable"];
 
 export default function BillingScreen() {
   const { user } = useAuth();
+  const { isDesktop } = useResponsive();
   const insets = useSafeAreaInsets();
   const [items, setItems] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
@@ -106,26 +109,58 @@ export default function BillingScreen() {
 
       {busy && !items.length ? <Loader /> : null}
 
-      <View style={{ marginTop: 16, gap: 10 }}>
-        {items.map((it, i) => (
-          <TouchableOpacity key={i} testID={`bill-item-${it.item_line_id}`} onPress={() => openEdit(it)} activeOpacity={0.7}>
-            <Card>
-              <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                <Text style={{ fontWeight: "700", flex: 1 }}>{it.description}</Text>
-                <Pill status={it.billing_status || "not_billed"} />
+      {isDesktop ? (
+        <View style={{ marginTop: 16 }}>
+          <DTable>
+            <DHead>
+              <DH flex={2}>Description</DH>
+              <DH flex={1}>MRF · Site</DH>
+              <DH flex={0.7} right>Approved</DH>
+              <DH flex={0.7} right>Received</DH>
+              <DH flex={0.7} right>Issued</DH>
+              <DH flex={0.7} right>Billed</DH>
+              <DH flex={1.2}>Status</DH>
+            </DHead>
+            {items.map((it, i) => (
+              <DRow key={i} testID={`bill-item-${it.item_line_id}`} onPress={() => openEdit(it)}>
+                <DC flex={2} strong>{it.description}</DC>
+                <DC flex={1} muted>{it.mrf_number} · {it.site}</DC>
+                <DC flex={0.7} right>{it.qty_approved || 0}</DC>
+                <DC flex={0.7} right>{it.qty_received || 0}</DC>
+                <DC flex={0.7} right>{it.qty_issued || 0}</DC>
+                <DC flex={0.7} right strong color={theme.colors.primary}>{it.qty_billed || 0}</DC>
+                <DC flex={1.2}><Pill status={it.billing_status || "not_billed"} /></DC>
+              </DRow>
+            ))}
+            {!busy && !items.length ? (
+              <View style={{ paddingVertical: 24 }}>
+                <Empty msg="No items to display." testID="bill-empty" />
               </View>
-              <Text style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>{it.mrf_number} · {it.site}</Text>
-              <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
-                <BillStat label="Approved" v={it.qty_approved} />
-                <BillStat label="Received" v={it.qty_received} />
-                <BillStat label="Issued" v={it.qty_issued} />
-                <BillStat label="Billed" v={it.qty_billed} tone />
-              </View>
-            </Card>
-          </TouchableOpacity>
-        ))}
-        {!busy && !items.length ? <Empty msg="No items to display." testID="bill-empty" /> : null}
-      </View>
+            ) : null}
+          </DTable>
+        </View>
+      ) : (
+        <View style={{ marginTop: 16, gap: 10 }}>
+          {items.map((it, i) => (
+            <TouchableOpacity key={i} testID={`bill-item-${it.item_line_id}`} onPress={() => openEdit(it)} activeOpacity={0.7}>
+              <Card>
+                <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
+                  <Text style={{ fontWeight: "700", flex: 1 }}>{it.description}</Text>
+                  <Pill status={it.billing_status || "not_billed"} />
+                </View>
+                <Text style={{ fontSize: 12, color: theme.colors.textMuted, marginTop: 2 }}>{it.mrf_number} · {it.site}</Text>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: 8 }}>
+                  <BillStat label="Approved" v={it.qty_approved} />
+                  <BillStat label="Received" v={it.qty_received} />
+                  <BillStat label="Issued" v={it.qty_issued} />
+                  <BillStat label="Billed" v={it.qty_billed} tone />
+                </View>
+              </Card>
+            </TouchableOpacity>
+          ))}
+          {!busy && !items.length ? <Empty msg="No items to display." testID="bill-empty" /> : null}
+        </View>
+      )}
 
       <Modal visible={!!editing} transparent animationType="fade" onRequestClose={() => setEditing(null)}>
         <View style={styles.modalBg}>

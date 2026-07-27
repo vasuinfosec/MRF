@@ -8,6 +8,8 @@ import { api } from "@/src/api";
 import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Label, Muted, Empty } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import { useResponsive } from "@/src/hooks/useResponsive";
+import { DTable, DHead, DH, DRow, DC } from "@/src/components/DataTable";
 
 type Customer = {
   customer_id: string;
@@ -41,6 +43,7 @@ const INR = (n: number) => new Intl.NumberFormat("en-IN").format(n || 0);
 export default function CustomersScreen() {
   const router = useRouter();
   const { user } = useAuth();
+  const { isDesktop } = useResponsive();
   const [rows, setRows] = useState<Customer[]>([]);
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
@@ -214,6 +217,50 @@ export default function CustomersScreen() {
         <View style={{ marginTop: 12 }}>
           {filtered.length === 0 ? (
             <Empty title="No customers" subtitle="Start by creating your first customer above." />
+          ) : isDesktop ? (
+            <DTable>
+              <DHead>
+                <DH flex={1}>Customer ID</DH>
+                <DH flex={1.6}>Name</DH>
+                <DH flex={1.2}>GSTIN</DH>
+                <DH flex={1.3}>Contact</DH>
+                <DH flex={0.7}>POs</DH>
+                <DH flex={0.7}>Status</DH>
+                {canWrite ? <DH flex={1.4}>Actions</DH> : null}
+              </DHead>
+              {filtered.map((c) => (
+                <DRow key={c.customer_id} testID={`cust-row-${c.customer_id}`}>
+                  <DC flex={1} strong color={theme.colors.primary}>{c.customer_id}</DC>
+                  <DC flex={1.6}>{c.name}</DC>
+                  <DC flex={1.2} muted>{c.gstin || "—"}</DC>
+                  <DC flex={1.3} muted>{c.contact_person ? `${c.contact_person}${c.phone ? " · " + c.phone : ""}` : "—"}</DC>
+                  <DC flex={0.7}>{c.po_count || 0}</DC>
+                  <DC flex={0.7} color={c.active ? theme.colors.success : theme.colors.textMuted}>{c.active ? "Active" : "Inactive"}</DC>
+                  {canWrite ? (
+                    <DC flex={1.4}>
+                      <View style={{ flexDirection: "row", gap: 6 }}>
+                        <TouchableOpacity testID={`cust-po-${c.customer_id}`} onPress={() => openPOs(c)} style={styles.iconBtn}>
+                          <Ionicons name="document-text-outline" size={16} color={theme.colors.primary} />
+                        </TouchableOpacity>
+                        <TouchableOpacity testID={`cust-audit-${c.customer_id}`}
+                          onPress={() => router.push({ pathname: "/audit", params: { entity_id: c.customer_id } })}
+                          style={styles.iconBtn}>
+                          <Ionicons name="time-outline" size={16} color={theme.colors.action} />
+                        </TouchableOpacity>
+                        <TouchableOpacity testID={`cust-edit-${c.customer_id}`} onPress={() => openEdit(c)} style={styles.iconBtn}>
+                          <Ionicons name="pencil" size={16} color={theme.colors.primary} />
+                        </TouchableOpacity>
+                        {c.active ? (
+                          <TouchableOpacity testID={`cust-del-${c.customer_id}`} onPress={() => deactivate(c)} style={styles.iconBtn}>
+                            <Ionicons name="power" size={16} color={theme.colors.danger} />
+                          </TouchableOpacity>
+                        ) : null}
+                      </View>
+                    </DC>
+                  ) : null}
+                </DRow>
+              ))}
+            </DTable>
           ) : filtered.map((c) => (
             <Card key={c.customer_id} style={{ marginTop: 8 }} testID={`cust-row-${c.customer_id}`}>
               <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" }}>

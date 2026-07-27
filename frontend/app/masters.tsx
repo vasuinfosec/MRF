@@ -9,6 +9,8 @@ import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Label, Muted, Empty } from "@/src/components/ui";
 import { theme } from "@/src/theme";
 import ProjectTeamModal from "@/src/components/ProjectTeamModal";
+import { useResponsive } from "@/src/hooks/useResponsive";
+import { DTable, DHead, DH, DRow, DC } from "@/src/components/DataTable";
 
 type Tab = "projects" | "vendors" | "sites" | "units" | "brands" | "materials" | "models" | "gst" | "departments" | "thresholds" | "audit";
 const TABS: { key: Tab; label: string; roles?: string[] }[] = [
@@ -42,6 +44,7 @@ export default function Masters() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { user } = useAuth();
+  const { isDesktop } = useResponsive();
   const [tab, setTab] = useState<Tab>("projects");
   const [projects, setProjects] = useState<any[]>([]);
   const [vendors, setVendors] = useState<any[]>([]);
@@ -427,7 +430,39 @@ export default function Masters() {
             ) : null}
 
             <H2 style={{ marginTop: 20 }}>All Vendors ({filteredVendors.length})</H2>
-            {filteredVendors.map((v) => (
+            {isDesktop && filteredVendors.length ? (
+              <DTable>
+                <DHead>
+                  <DH flex={1.4}>Name</DH>
+                  <DH flex={1}>GSTIN</DH>
+                  <DH flex={1.4}>Address</DH>
+                  <DH flex={1.2}>Contact</DH>
+                  <DH flex={0.6}>Status</DH>
+                  {canVendor ? <DH flex={0.8}>Actions</DH> : null}
+                </DHead>
+                {filteredVendors.map((v) => (
+                  <DRow key={v.vendor_id} testID={`v-${v.vendor_id}`}>
+                    <DC flex={1.4} strong>{v.name}</DC>
+                    <DC flex={1} muted>{v.gstin || "—"}</DC>
+                    <DC flex={1.4} muted>{v.address || "—"}</DC>
+                    <DC flex={1.2} muted>{v.contact ? `${v.contact}${v.email ? " · " + v.email : ""}` : "—"}</DC>
+                    <DC flex={0.6} color={v.active === false ? theme.colors.textMuted : theme.colors.success}>{v.active === false ? "Inactive" : "Active"}</DC>
+                    {canVendor ? (
+                      <DC flex={0.8}>
+                        <View style={{ flexDirection: "row", gap: 4 }}>
+                          <TouchableOpacity testID={`v-edit-${v.vendor_id}`} onPress={() => setVEdit({ ...v })} style={styles.iconBtn}>
+                            <Ionicons name="pencil-outline" size={16} color={theme.colors.text} />
+                          </TouchableOpacity>
+                          <TouchableOpacity testID={`v-deactivate-${v.vendor_id}`} onPress={() => deactivateVendor(v.vendor_id)} style={styles.iconBtn}>
+                            <Ionicons name="trash-outline" size={16} color={theme.colors.danger} />
+                          </TouchableOpacity>
+                        </View>
+                      </DC>
+                    ) : null}
+                  </DRow>
+                ))}
+              </DTable>
+            ) : filteredVendors.map((v) => (
               <Card key={v.vendor_id} style={{ marginTop: 8, opacity: v.active === false ? 0.5 : 1 }} testID={`v-${v.vendor_id}`}>
                 <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
                   <View style={{ flex: 1 }}>
@@ -554,16 +589,31 @@ export default function Masters() {
             ) : null}
 
             <H2 style={{ marginTop: 20 }}>{TABS.find((t) => t.key === tab)?.label} ({filteredMasters.length})</H2>
-            <Card style={{ marginTop: 8 }}>
-              {filteredMasters.length ? filteredMasters.map((it: any, i: number) => (
-                <View key={it.item_id || i} style={styles.masterRow} testID={`m-item-${it.name}`}>
-                  <Text style={{ flex: 1, fontWeight: "500" }}>
-                    {it.name}
-                    {it.value ? <Text style={{ color: theme.colors.textMuted, fontWeight: "400" }}>  ·  {it.value}{currentMasterKey === "gst" ? "%" : ""}</Text> : null}
-                  </Text>
-                </View>
-              )) : <Muted>None match.</Muted>}
-            </Card>
+            {isDesktop && filteredMasters.length ? (
+              <DTable>
+                <DHead>
+                  <DH flex={2}>Name</DH>
+                  <DH flex={1}>{currentMasterKey === "gst" ? "Rate %" : "Value"}</DH>
+                </DHead>
+                {filteredMasters.map((it: any, i: number) => (
+                  <DRow key={it.item_id || i} testID={`m-item-${it.name}`}>
+                    <DC flex={2} strong>{it.name}</DC>
+                    <DC flex={1} muted>{it.value ? (currentMasterKey === "gst" ? `${it.value}%` : it.value) : "—"}</DC>
+                  </DRow>
+                ))}
+              </DTable>
+            ) : (
+              <Card style={{ marginTop: 8 }}>
+                {filteredMasters.length ? filteredMasters.map((it: any, i: number) => (
+                  <View key={it.item_id || i} style={styles.masterRow} testID={`m-item-${it.name}`}>
+                    <Text style={{ flex: 1, fontWeight: "500" }}>
+                      {it.name}
+                      {it.value ? <Text style={{ color: theme.colors.textMuted, fontWeight: "400" }}>  ·  {it.value}{currentMasterKey === "gst" ? "%" : ""}</Text> : null}
+                    </Text>
+                  </View>
+                )) : <Muted>None match.</Muted>}
+              </Card>
+            )}
           </>
         ) : null}
 
