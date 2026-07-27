@@ -84,9 +84,16 @@ android-sdk/
 backup_artifacts/
 **/backup_artifacts/
 
-.env
-.env.*
-*.env
+# Env files — narrow rules so Emergent deployment picks up frontend/.env
+# and backend/.env, but local overrides + secrets stay out of git.
+.env.local
+.env.*.local
+*.local.env
+# Pre-migration env snapshots (created during controlled rollouts)
+.env.*.bak.*
+.env.preauth.bak.*
+.env.postauth.rejected.*
+.env.pre_v2.bak.*
 credentials.json
 *.key
 .credentials
