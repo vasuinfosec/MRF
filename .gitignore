@@ -97,3 +97,6 @@ backup_artifacts/
 credentials.json
 *.key
 .credentials
+.env
+.env.*
+*.env
