@@ -7,8 +7,9 @@ import { api } from "@/src/api";
 import { useAccessGuard } from "@/src/hooks/useAccessGuard";
 import { Card, H1, H2, Muted, Loader, Empty, Btn, Label, Input, Pill } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import { ACCESS_ADMIN_EMAIL } from "@/src/access";
 
-const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "admin", "store"];
+const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "store"];
 
 type Inv = {
   invitation_id: string;
@@ -23,11 +24,12 @@ type Inv = {
 };
 
 export default function Invitations() {
-  const { permitted, loading } = useAccessGuard();
+  const { permitted, loading } = useAccessGuard(["admin"], [ACCESS_ADMIN_EMAIL]);
   const [refreshing, setRefreshing] = useState(false);
   const [rows, setRows] = useState<Inv[]>([]);
   const [err, setErr] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
+  const [editing, setEditing] = useState<Inv | null>(null);
   const [email, setEmail] = useState("");
   const [role, setRole] = useState<string>("pm");
   const [hours, setHours] = useState<string>("72");
@@ -41,18 +43,45 @@ export default function Invitations() {
   }, []);
   useEffect(() => { if (permitted) load(); }, [permitted, load]);
 
-  const create = async () => {
+  const resetForm = () => {
+    setCreating(false);
+    setEditing(null);
+    setEmail("");
+    setRole("pm");
+    setHours("72");
+    setNote("");
+  };
+
+  const openCreate = () => {
+    resetForm();
+    setCreating(true);
+  };
+
+  const openEdit = (inv: Inv) => {
+    setCreating(false);
+    setEditing(inv);
+    setEmail(inv.email);
+    setRole(inv.role);
+    setHours("72");
+    setNote(inv.note || "");
+  };
+
+  const save = async () => {
     if (!email.includes("@")) { Alert.alert("Invalid", "Enter a valid email."); return; }
     setBusy(true);
     try {
-      await api("/admin/access/invitations", {
-        method: "POST",
+      await api(
+        editing
+          ? `/admin/access/invitations/${editing.invitation_id}`
+          : "/admin/access/invitations",
+        {
+        method: editing ? "PUT" : "POST",
         body: { email: email.trim().toLowerCase(), role, expires_in_hours: Number(hours) || 72, note },
       });
-      setCreating(false); setEmail(""); setNote("");
+      resetForm();
       await load();
     } catch (e: any) {
-      Alert.alert("Failed", e?.message || "Could not create invitation.");
+      Alert.alert("Failed", e?.message || "Could not save email access.");
     } finally { setBusy(false); }
   };
 
@@ -90,10 +119,10 @@ export default function Invitations() {
       >
         <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
           <View style={{ flex: 1 }}>
-            <H1>Invitations</H1>
-            <Muted>Grant access by inviting an email + role.</Muted>
+            <H1>Google Login Access</H1>
+            <Muted>Only emails added here can sign in, with the assigned role.</Muted>
           </View>
-          <TouchableOpacity testID="new-invitation-btn" onPress={() => setCreating(true)} style={styles.newBtn}>
+          <TouchableOpacity testID="new-invitation-btn" onPress={openCreate} style={styles.newBtn}>
             <Ionicons name="add" size={22} color="#fff" />
           </TouchableOpacity>
         </View>
@@ -106,7 +135,7 @@ export default function Invitations() {
 
         <Section title={`Open (${open.length})`}>
           {open.length === 0 ? <Empty title="No open invitations" /> : open.map((i) => (
-            <InviteRow key={i.invitation_id} inv={i} onRevoke={() => revoke(i.invitation_id, i.email)} />
+            <InviteRow key={i.invitation_id} inv={i} onEdit={() => openEdit(i)} onRevoke={() => revoke(i.invitation_id, i.email)} />
           ))}
         </Section>
 
@@ -118,15 +147,15 @@ export default function Invitations() {
 
         {expired.length > 0 ? (
           <Section title={`Expired (${expired.length})`}>
-            {expired.map((i) => <InviteRow key={i.invitation_id} inv={i} onRevoke={() => revoke(i.invitation_id, i.email)} />)}
+            {expired.map((i) => <InviteRow key={i.invitation_id} inv={i} onEdit={() => openEdit(i)} onRevoke={() => revoke(i.invitation_id, i.email)} />)}
           </Section>
         ) : null}
       </ScrollView>
 
-      <Modal visible={creating} transparent animationType="slide" onRequestClose={() => setCreating(false)}>
+      <Modal visible={creating || !!editing} transparent animationType="slide" onRequestClose={resetForm}>
         <View style={styles.modalBg}>
           <View style={styles.modal}>
-            <H2>New Invitation</H2>
+            <H2>{editing ? "Update Email Access" : "Add Email Access"}</H2>
             <Input label="Email" value={email} onChangeText={setEmail} placeholder="user@vasuinfosec.com" autoCapitalize="none" keyboardType="email-address" />
             <Label>Role</Label>
             <View style={styles.roleGrid}>
@@ -140,8 +169,8 @@ export default function Invitations() {
             <Input label="Expires in (hours)" value={hours} onChangeText={setHours} keyboardType="numeric" />
             <Input label="Note (optional)" value={note} onChangeText={setNote} placeholder="e.g. new hire, replacement for X" />
             <View style={{ flexDirection: "row", gap: 8 }}>
-              <Btn title="Cancel" variant="outline" onPress={() => setCreating(false)} style={{ flex: 1 }} />
-              <Btn testID="create-invitation-confirm" title={busy ? "Sending…" : "Send"} onPress={create} disabled={busy} style={{ flex: 2 }} />
+              <Btn title="Cancel" variant="outline" onPress={resetForm} style={{ flex: 1 }} />
+              <Btn testID="create-invitation-confirm" title={busy ? "Saving…" : "Save Access"} onPress={save} disabled={busy} style={{ flex: 2 }} />
             </View>
           </View>
         </View>
@@ -159,7 +188,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function InviteRow({ inv, onRevoke }: { inv: Inv; onRevoke?: () => void }) {
+function InviteRow({ inv, onEdit, onRevoke }: { inv: Inv; onEdit?: () => void; onRevoke?: () => void }) {
   const state = inv.consumed ? "approved" : isExpired(inv.expires_at) ? "rejected" : "pm_review";
   return (
     <View style={styles.row}>
@@ -174,11 +203,18 @@ function InviteRow({ inv, onRevoke }: { inv: Inv; onRevoke?: () => void }) {
           issued {rel(inv.issued_at)} · expires {rel(inv.expires_at)}
         </Text>
       </View>
-      {onRevoke ? (
-        <TouchableOpacity onPress={onRevoke} style={styles.iconBtn} testID={`revoke-${inv.invitation_id}`}>
-          <Ionicons name="trash-outline" size={18} color={theme.colors.danger} />
-        </TouchableOpacity>
-      ) : null}
+      <View style={{ flexDirection: "row" }}>
+        {onEdit ? (
+          <TouchableOpacity onPress={onEdit} style={styles.iconBtn} testID={`edit-${inv.invitation_id}`}>
+            <Ionicons name="pencil-outline" size={18} color={theme.colors.primary} />
+          </TouchableOpacity>
+        ) : null}
+        {onRevoke ? (
+          <TouchableOpacity onPress={onRevoke} style={styles.iconBtn} testID={`revoke-${inv.invitation_id}`}>
+            <Ionicons name="trash-outline" size={18} color={theme.colors.danger} />
+          </TouchableOpacity>
+        ) : null}
+      </View>
     </View>
   );
 }

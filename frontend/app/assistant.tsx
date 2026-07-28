@@ -615,10 +615,11 @@ function NegotiatePanel() {
   const history = parsed.history || {};
   const market = parsed.market_benchmark || {};
   const variance = parsed.variance || {};
-  const decisionColor: any = {
+  const decisionColors: Record<string, string> = {
     issue_at_target: "#065F46", ok_current: "#065F46",
     negotiate_more: "#B45309", reject_and_retender: "#B91C1C",
-  }[parsed.decision] || theme.colors.muted;
+  };
+  const decisionColor = decisionColors[String(parsed.decision || "")] || theme.colors.textMuted;
 
   // Colour of the budget chip
   const budgetPct = budget && !budget.unlimited && budget.limit_inr

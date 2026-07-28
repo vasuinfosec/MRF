@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Modal } from "react-native";
+import React, { useCallback, useEffect, useState } from "react";
+import { View, Text, StyleSheet, TouchableOpacity, Modal } from "react-native";
 import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -10,6 +10,7 @@ import { api } from "@/src/api";
 import { Btn, Card, H1, H2, Muted, Label, Pill } from "@/src/components/ui";
 import { theme } from "@/src/theme";
 import ProjectTeamModal from "@/src/components/ProjectTeamModal";
+import { isAccessAdmin } from "@/src/access";
 
 const ROLES = [
   { key: "director", label: "Director" },
@@ -18,7 +19,6 @@ const ROLES = [
   { key: "purchase", label: "Purchase" },
   { key: "site_engineer", label: "Site Engineer" },
   { key: "store", label: "Stores" },
-  { key: "admin", label: "Admin" },
 ];
 
 export default function More() {
@@ -31,16 +31,18 @@ export default function More() {
   const [roleEdit, setRoleEdit] = useState<any>(null);
   const [teamPid, setTeamPid] = useState<string | null>(null);
 
-  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, []);
-  const load = async () => {
+  const load = useCallback(async () => {
+    if (!user) return;
     try {
       const [u, v, p] = await Promise.all([
         api<any[]>("/users"), api<any[]>("/vendors"),
-        api<any[]>(user?.role === "admin" ? "/projects?all=1" : "/projects"),
+        api<any[]>(user.role === "admin" ? "/projects?all=1" : "/projects"),
       ]);
       setUsers(u); setVendors(v); setProjects(p);
     } catch (_e) { /* noop */ }
-  };
+  }, [user]);
+
+  useEffect(() => { load(); }, [load]);
 
   const setRole = async (uid: string, role: string) => {
     await api("/users/role", { method: "POST", body: { user_id: uid, role } });
@@ -48,7 +50,7 @@ export default function More() {
     if (uid === user?.user_id) refresh();
   };
 
-  const isAdmin = user?.role === "admin";
+  const isAdmin = isAccessAdmin(user);
 
   return (
     <AppShell title="More" testID="more-screen">
@@ -69,7 +71,7 @@ export default function More() {
         <View style={{ marginTop: 8, gap: 8 }}>
           <Btn testID="masters-btn" title="Master Data (Projects, Vendors, Sites, Units, Brands, Materials)" variant="primary" onPress={() => router.push("/masters")} />
           <Btn testID="reports-btn" title="Reports Dashboard" variant="outline" onPress={() => router.push("/reports")} />
-          {(user?.role === "admin" || user?.role === "director") ? (
+          {isAccessAdmin(user) ? (
             <Btn testID="access-control-btn" title="Access Control (Invitations & Roles)" variant="primary" onPress={() => router.push("/admin/access")} />
           ) : null}
           {(user?.role === "admin" || user?.role === "director") ? (

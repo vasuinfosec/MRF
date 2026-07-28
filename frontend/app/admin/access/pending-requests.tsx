@@ -7,8 +7,9 @@ import { api } from "@/src/api";
 import { useAccessGuard } from "@/src/hooks/useAccessGuard";
 import { Card, H1, H2, Muted, Loader, Empty, Btn, Label, Input } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import { ACCESS_ADMIN_EMAIL } from "@/src/access";
 
-const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "admin", "store"];
+const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "store"];
 
 type Req = {
   request_id: string;
@@ -21,7 +22,7 @@ type Req = {
 };
 
 export default function PendingRequests() {
-  const { permitted, loading } = useAccessGuard();
+  const { permitted, loading } = useAccessGuard(["admin"], [ACCESS_ADMIN_EMAIL]);
   const [refreshing, setRefreshing] = useState(false);
   const [rows, setRows] = useState<Req[]>([]);
   const [err, setErr] = useState<string | null>(null);

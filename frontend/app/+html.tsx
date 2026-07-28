@@ -90,7 +90,7 @@ export default function Root({ children }: PropsWithChildren) {
 
               /* ===================== DARK MODE (web-only lightweight overlay) =====================
                  React Native Web compiles inline styles to hashed classes such as
-                 `r-backgroundColor-14lw9ot` (= #FFFFFF).  We target those specific
+                 r-backgroundColor-14lw9ot (= #FFFFFF).  We target those specific
                  hashes so brand accents (primary blue #002FA7, action orange, etc.)
                  remain untouched.
               */

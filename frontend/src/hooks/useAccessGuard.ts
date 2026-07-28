@@ -13,7 +13,10 @@ import { useAuth } from "@/src/auth";
  * should render a small "not authorised" placeholder while the redirect
  * is in flight to avoid a flash of protected UI.
  */
-export function useAccessGuard(allowed: string[] = ["admin", "director"]) {
+export function useAccessGuard(
+  allowed: string[] = ["admin", "director"],
+  allowedEmails?: string[],
+) {
   const { user, loading } = useAuth();
   const router = useRouter();
 
@@ -21,7 +24,10 @@ export function useAccessGuard(allowed: string[] = ["admin", "director"]) {
     ...(user?.role ? [user.role] : []),
     ...(((user as any)?.roles as string[] | undefined) || []),
   ]);
-  const permitted = !!user && allowed.some((r) => roles.has(r));
+  const emailAllowed = !allowedEmails || allowedEmails.some(
+    (email) => email.toLowerCase() === (user?.email || "").toLowerCase()
+  );
+  const permitted = !!user && emailAllowed && allowed.some((r) => roles.has(r));
 
   useEffect(() => {
     if (!loading && user && !permitted) {

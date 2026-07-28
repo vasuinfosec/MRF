@@ -22,16 +22,18 @@ export function Body({ children, style }: { children: React.ReactNode; style?: T
   return <Text style={[s.body, style]}>{children}</Text>;
 }
 
-export function Btn({ title, onPress, variant = "primary", testID, disabled, style, icon }: {
-  title: string; onPress?: () => void; variant?: "primary" | "action" | "outline" | "ghost" | "danger";
+export function Btn({ title, children, onPress, variant = "primary", testID, disabled, style, icon }: {
+  title?: string; children?: React.ReactNode; onPress?: () => void;
+  variant?: "primary" | "action" | "secondary" | "outline" | "ghost" | "danger";
   testID?: string; disabled?: boolean; style?: ViewStyle; icon?: React.ReactNode;
 }) {
   const bg = variant === "primary" ? theme.colors.primary
     : variant === "action" ? theme.colors.action
     : variant === "danger" ? theme.colors.danger
+    : variant === "secondary" ? theme.colors.surface2
     : variant === "outline" ? "transparent" : "transparent";
-  const color = variant === "outline" || variant === "ghost" ? theme.colors.text : "#fff";
-  const border = variant === "outline" ? theme.colors.borderStrong : "transparent";
+  const color = variant === "outline" || variant === "ghost" || variant === "secondary" ? theme.colors.text : "#fff";
+  const border = variant === "outline" || variant === "secondary" ? theme.colors.borderStrong : "transparent";
   return (
     <TouchableOpacity
       testID={testID}
@@ -39,12 +41,12 @@ export function Btn({ title, onPress, variant = "primary", testID, disabled, sty
       disabled={disabled}
       style={[
         s.btn,
-        { backgroundColor: bg, borderColor: border, borderWidth: variant === "outline" ? 1 : 0, opacity: disabled ? 0.5 : 1 },
+        { backgroundColor: bg, borderColor: border, borderWidth: variant === "outline" || variant === "secondary" ? 1 : 0, opacity: disabled ? 0.5 : 1 },
         style,
       ]}
     >
       {icon}
-      <Text style={[s.btnText, { color, marginLeft: icon ? 6 : 0 }]}>{title}</Text>
+      <Text style={[s.btnText, { color, marginLeft: icon ? 6 : 0 }]}>{title ?? children}</Text>
     </TouchableOpacity>
   );
 }

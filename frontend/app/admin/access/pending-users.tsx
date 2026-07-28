@@ -7,8 +7,9 @@ import { api } from "@/src/api";
 import { useAccessGuard } from "@/src/hooks/useAccessGuard";
 import { Card, H1, H2, Muted, Loader, Empty, Btn, Label } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import { ACCESS_ADMIN_EMAIL } from "@/src/access";
 
-const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "admin", "store"];
+const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "store"];
 
 type PU = {
   user_id: string;
@@ -23,7 +24,7 @@ type PU = {
 };
 
 export default function PendingUsers() {
-  const { permitted, loading } = useAccessGuard();
+  const { permitted, loading } = useAccessGuard(["admin"], [ACCESS_ADMIN_EMAIL]);
   const [refreshing, setRefreshing] = useState(false);
   const [rows, setRows] = useState<PU[]>([]);
   const [err, setErr] = useState<string | null>(null);

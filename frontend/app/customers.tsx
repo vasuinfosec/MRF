@@ -420,5 +420,5 @@ const styles = StyleSheet.create({
   err: { color: theme.colors.danger, marginTop: 8 },
   msg: { color: theme.colors.success, marginTop: 8 },
   modalBg: { flex: 1, backgroundColor: "rgba(0,0,0,0.4)", justifyContent: "flex-end" },
-  modalCard: { backgroundColor: theme.colors.background, padding: 16, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "90%" },
+  modalCard: { backgroundColor: theme.colors.bg, padding: 16, borderTopLeftRadius: 20, borderTopRightRadius: 20, maxHeight: "90%" },
 });

@@ -45,6 +45,19 @@ api = APIRouter(prefix="/api")
 # Vasu operational chain: Site Engineer -> PM -> Purchase -> GM -> Director.
 # Admin is a system-management role and NOT part of the approval chain by default.
 ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "admin", "store"]
+# The sole account allowed to approve access and manage roles. This explicit
+# bootstrap identity prevents a fresh deployment from locking out its admin
+# when Access-Security V2 requires invitations for every other account.
+ACCESS_ADMIN_EMAIL = os.getenv(
+    "ACCESS_ADMIN_EMAIL", "pundalik.shinde@vasuinfosec.com"
+).strip().lower()
+DIRECTOR_EMAIL = os.getenv(
+    "DIRECTOR_EMAIL", "vivek@vasuinfosec.com"
+).strip().lower()
+FIXED_ROLE_EMAILS = {
+    ACCESS_ADMIN_EMAIL: "admin",
+    DIRECTOR_EMAIL: "director",
+}
 LEGACY_ROLE_MAP = {
     # Historic aliases -> canonical roles. site_engineer is now a first-class role
     # and MUST NOT be mapped to pm any more.
@@ -1583,13 +1596,13 @@ async def seed_data(authorization: Optional[str] = Header(None)):
         {"email": "admin@vasu.dev", "name": "Master Admin", "role": "admin"},
         {"email": "siteeng@vasu.dev", "name": "Sanjay (Site Engineer demo)", "role": "site_engineer"},
         # Real Vasu Infosec roster (Google-sign-in enabled). Roles pre-assigned.
-        {"email": "vivek@vasuinfosec.com", "name": "Vivek (Director)", "role": "director"},
+        {"email": DIRECTOR_EMAIL, "name": "Vivek (Director)", "role": "director"},
         {"email": "balkrishna@vasuinfosec.com", "name": "Balkrishna (GM)", "role": "gm"},
         {"email": "saket.iyer@vasuinfosec.com", "name": "Saket Iyer (PM · Pune)", "role": "pm"},
         {"email": "himanshu@vasuinfosec.com", "name": "Himanshu (PM · Delhi)", "role": "pm"},
         {"email": "wasim@vasuinfosec.com", "name": "Wasim (Purchase · Pune)", "role": "purchase"},
         {"email": "sanjeev@vasuinfosec.com", "name": "Sanjeev (Purchase · Delhi)", "role": "purchase"},
-        {"email": "pundlik@vasuinfosec.com", "name": "Pundlik (Admin)", "role": "admin"},
+        {"email": ACCESS_ADMIN_EMAIL, "name": "Pundalik Shinde (Access Admin)", "role": "admin"},
         {"email": "chand@vasuinfosec.com", "name": "Chand (Site Engineer)", "role": "site_engineer"},
         {"email": "saurabh@vasuinfosec.com", "name": "Saurabh (Site Engineer)", "role": "site_engineer"},
         {"email": "abhishek.yadav@vasuinfosec.com", "name": "Abhishek Yadav (Site Engineer)", "role": "site_engineer"},

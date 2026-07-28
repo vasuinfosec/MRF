@@ -1,13 +1,12 @@
-"""Task 3A.1 — Access-Security V2 (staging-only, feature-flagged).
+"""Task 3A.1 — Access-Security V2 (secure by default, feature-flagged).
 
-Activated only when env `ACCESS_SECURITY_V2=1`. When OFF, the module is not
-mounted and the legacy auth flow in auth.py is used unchanged (prod path).
+Active unless env `ACCESS_SECURITY_V2=0` explicitly selects the legacy flow.
 
 Corrected staging behaviour when flag=1 (post T3A.1 review):
   * Uninvited Google sign-in → records into `pending_access_requests` ONLY,
     NEVER inserts a row into `users`. HTTP 403 access_pending.
-  * Invited Google sign-in → creates user with `is_active=False, role=None,
-    roles=[]`, records the invitation as consumed, HTTP 403 pending_activation.
+  * Invited Google sign-in → creates an active user with the Access Admin's
+    assigned role and records the invitation as consumed.
   * `count==0 → admin` bootstrap: REMOVED.
   * OWNER_EMAILS: IGNORED (no auto-Director).
   * dev-login: HARD-DISABLED (returns 404 regardless of host).
@@ -19,17 +18,9 @@ Corrected staging behaviour when flag=1 (post T3A.1 review):
   * Multi-role storage: `roles: list[str]` is authoritative. Legacy `role`
     is dual-written (roles[0]) for BC and rolled back cleanly when needed.
 
-Endpoints under /api/admin/access/*:
-  POST   /invitations                – admin/director
-  GET    /invitations                – admin/director
-  DELETE /invitations/{iid}          – admin/director
-  GET    /pending-users              – admin/director
-  GET    /pending-requests           – admin/director  (uninvited attempts)
-  POST   /pending-requests/{rid}/invite – admin/director  (promote → invitation)
-  POST   /users/{uid}/activate       – admin/director  (body: {role})
-  POST   /users/{uid}/deactivate     – admin/director  (body: {reason})
-  POST   /users/{uid}/roles          – admin/director  (body: {roles: [str]})
-  GET    /permissions/me             – any authenticated user
+All review and mutation endpoints under /api/admin/access/* are restricted to
+the single email-bound Access Admin. /permissions/me remains available to any
+authenticated user.
 """
 from __future__ import annotations
 import os
@@ -41,15 +32,15 @@ from pydantic import BaseModel, EmailStr, Field
 
 from server import (
     api, db, get_current_user, audit, now_utc, ROLES, UserOut,
-    _ensure_roles_shape,
+    _ensure_roles_shape, ACCESS_ADMIN_EMAIL, FIXED_ROLE_EMAILS,
 )
 
 CANONICAL_ROLES = set(ROLES)
-MANAGEMENT_ROLES = {"admin", "director"}
+ASSIGNABLE_ROLES = CANONICAL_ROLES - {"admin"}
 
 
 def _flag_on() -> bool:
-    return os.environ.get("ACCESS_SECURITY_V2", "0") == "1"
+    return os.environ.get("ACCESS_SECURITY_V2", "1") == "1"
 
 
 async def _count_active_directors(exclude_uid: Optional[str] = None) -> int:
@@ -68,15 +59,20 @@ def _requires_v2():
 
 
 def _requires_mgmt(u: UserOut):
-    role_set = set(u.roles or []) | ({u.role} if u.role else set())
-    if not (role_set & MANAGEMENT_ROLES):
-        raise HTTPException(403, "Admin or Director only")
+    if (u.email or "").strip().lower() != ACCESS_ADMIN_EMAIL:
+        raise HTTPException(403, "Only the Access Admin can manage users and roles")
 
 
 # ---------------------- Models ----------------------
 class InvitationIn(BaseModel):
     email: EmailStr
     role: str = Field(..., description="Canonical role at activation time")
+    expires_in_hours: int = 72
+    note: Optional[str] = ""
+
+class InvitationUpdate(BaseModel):
+    email: EmailStr
+    role: str
     expires_in_hours: int = 72
     note: Optional[str] = ""
 
@@ -104,9 +100,19 @@ async def create_invitation(body: InvitationIn,
     _requires_v2()
     u = await get_current_user(authorization)
     _requires_mgmt(u)
-    if body.role not in CANONICAL_ROLES:
-        raise HTTPException(400, f"role must be one of {sorted(CANONICAL_ROLES)}")
+    if body.role not in ASSIGNABLE_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(ASSIGNABLE_ROLES)}")
     email = str(body.email).strip().lower()
+    fixed_role = FIXED_ROLE_EMAILS.get(email)
+    if fixed_role and body.role != fixed_role:
+        raise HTTPException(400, f"This account has the fixed role: {fixed_role}")
+    if await db.users.find_one({"email": email, "is_active": True}, {"_id": 1}):
+        raise HTTPException(409, "This email already belongs to an active user")
+    if await db.invitations.find_one(
+        {"email": email, "consumed": False, "expires_at": {"$gt": now_utc()}},
+        {"_id": 1},
+    ):
+        raise HTTPException(409, "An active access entry already exists for this email")
     iid = f"inv_{uuid.uuid4().hex[:12]}"
     doc = {
         "invitation_id": iid,
@@ -122,6 +128,54 @@ async def create_invitation(body: InvitationIn,
     await audit("invitation", iid, "create", u,
                 {"email": email, "role": body.role})
     return {k: v for k, v in doc.items() if k != "_id"}
+
+@api.put("/admin/access/invitations/{iid}")
+async def update_invitation(iid: str, body: InvitationUpdate,
+                            authorization: Optional[str] = Header(None)):
+    _requires_v2()
+    u = await get_current_user(authorization)
+    _requires_mgmt(u)
+    if body.role not in ASSIGNABLE_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(ASSIGNABLE_ROLES)}")
+    current = await db.invitations.find_one(
+        {"invitation_id": iid, "consumed": False}, {"_id": 0}
+    )
+    if not current:
+        raise HTTPException(404, "Access entry not found or already used")
+    email = str(body.email).strip().lower()
+    fixed_role = FIXED_ROLE_EMAILS.get(email)
+    if fixed_role and body.role != fixed_role:
+        raise HTTPException(400, f"This account has the fixed role: {fixed_role}")
+    if await db.users.find_one({"email": email, "is_active": True}, {"_id": 1}):
+        raise HTTPException(409, "This email already belongs to an active user")
+    duplicate = await db.invitations.find_one(
+        {
+            "invitation_id": {"$ne": iid},
+            "email": email,
+            "consumed": False,
+            "expires_at": {"$gt": now_utc()},
+        },
+        {"_id": 1},
+    )
+    if duplicate:
+        raise HTTPException(409, "An active access entry already exists for this email")
+    changes = {
+        "email": email,
+        "role": body.role,
+        "note": body.note or "",
+        "expires_at": now_utc() + timedelta(hours=max(1, int(body.expires_in_hours))),
+        "updated_by": u.user_id,
+        "updated_at": now_utc(),
+    }
+    await db.invitations.update_one({"invitation_id": iid}, {"$set": changes})
+    await audit("invitation", iid, "update", u, {
+        "old_email": current.get("email"),
+        "new_email": email,
+        "old_role": current.get("role"),
+        "new_role": body.role,
+    })
+    updated = await db.invitations.find_one({"invitation_id": iid}, {"_id": 0})
+    return updated
 
 
 @api.get("/admin/access/invitations")
@@ -164,7 +218,7 @@ async def list_pending_users(authorization: Optional[str] = Header(None)):
 
 @api.get("/admin/access/pending-requests")
 async def list_pending_requests(authorization: Optional[str] = Header(None)):
-    """Uninvited sign-in attempts — Director may promote to invitation."""
+    """Uninvited sign-in attempts — Access Admin may promote to invitation."""
     _requires_v2()
     u = await get_current_user(authorization)
     _requires_mgmt(u)
@@ -179,12 +233,15 @@ async def invite_from_request(rid: str, body: InviteFromRequestIn,
     _requires_v2()
     u = await get_current_user(authorization)
     _requires_mgmt(u)
-    if body.role not in CANONICAL_ROLES:
-        raise HTTPException(400, f"role must be one of {sorted(CANONICAL_ROLES)}")
+    if body.role not in ASSIGNABLE_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(ASSIGNABLE_ROLES)}")
     req = await db.pending_access_requests.find_one({"request_id": rid}, {"_id": 0})
     if not req:
         raise HTTPException(404, "pending request not found")
     email = str(req["email"]).strip().lower()
+    fixed_role = FIXED_ROLE_EMAILS.get(email)
+    if fixed_role and body.role != fixed_role:
+        raise HTTPException(400, f"This account has the fixed role: {fixed_role}")
     iid = f"inv_{uuid.uuid4().hex[:12]}"
     doc = {
         "invitation_id": iid,
@@ -215,14 +272,19 @@ async def activate_user(uid: str, body: ActivateIn,
     _requires_v2()
     u = await get_current_user(authorization)
     _requires_mgmt(u)
-    if body.role not in CANONICAL_ROLES:
-        raise HTTPException(400, f"role must be one of {sorted(CANONICAL_ROLES)}")
+    if body.role not in ASSIGNABLE_ROLES:
+        raise HTTPException(400, f"role must be one of {sorted(ASSIGNABLE_ROLES)}")
     # Guardrail: no self-elevation
     if uid == u.user_id:
         raise HTTPException(400, "Cannot activate or elevate yourself")
     target = await db.users.find_one({"user_id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "user not found")
+    fixed_role = FIXED_ROLE_EMAILS.get(
+        (target.get("email") or "").strip().lower()
+    )
+    if fixed_role and body.role != fixed_role:
+        raise HTTPException(400, f"This account has the fixed role: {fixed_role}")
     # Dual-write: role (BC) + roles (source of truth)
     await db.users.update_one(
         {"user_id": uid},
@@ -253,6 +315,11 @@ async def deactivate_user(uid: str,
     target = await db.users.find_one({"user_id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "user not found")
+    fixed_role = FIXED_ROLE_EMAILS.get(
+        (target.get("email") or "").strip().lower()
+    )
+    if fixed_role:
+        raise HTTPException(400, f"Cannot deactivate the fixed {fixed_role} account")
     # Guardrail: don't remove the last active Director
     target_roles = set(target.get("roles") or []) | (
         {target.get("role")} if target.get("role") else set()
@@ -296,7 +363,7 @@ async def set_user_roles(uid: str, body: RolesIn,
     # Canonicalise, dedupe (preserve order)
     seen, cleaned = set(), []
     for r in body.roles:
-        if r not in CANONICAL_ROLES:
+        if r not in ASSIGNABLE_ROLES:
             raise HTTPException(400, f"invalid role: {r}")
         if r not in seen:
             seen.add(r)
@@ -304,6 +371,11 @@ async def set_user_roles(uid: str, body: RolesIn,
     target = await db.users.find_one({"user_id": uid}, {"_id": 0})
     if not target:
         raise HTTPException(404, "user not found")
+    fixed_role = FIXED_ROLE_EMAILS.get(
+        (target.get("email") or "").strip().lower()
+    )
+    if fixed_role and cleaned != [fixed_role]:
+        raise HTTPException(400, f"This account has the fixed role: {fixed_role}")
     # Guardrail: don't strip Director from the last active Director
     old_roles = set(target.get("roles") or []) | (
         {target.get("role")} if target.get("role") else set()

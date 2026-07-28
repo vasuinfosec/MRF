@@ -255,7 +255,7 @@ const styles = StyleSheet.create({
   awaiting: {
     marginTop: 8,
     fontSize: 12,
-    color: theme.colors.warning || "#B45309",
+    color: "#B45309",
     fontStyle: "italic",
   },
   approved: {

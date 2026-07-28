@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { View, Text, ScrollView, RefreshControl, TouchableOpacity, StyleSheet, Modal, Alert, TextInput } from "react-native";
+import { View, Text, ScrollView, RefreshControl, TouchableOpacity, StyleSheet, Modal, Alert, TextInput, Platform } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AppShell } from "@/src/components/AppShell";
@@ -8,8 +8,9 @@ import { useAuth } from "@/src/auth";
 import { useAccessGuard } from "@/src/hooks/useAccessGuard";
 import { Card, H1, H2, Muted, Loader, Empty, Btn, Label } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import { ACCESS_ADMIN_EMAIL } from "@/src/access";
 
-const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "admin", "store"];
+const ROLES = ["site_engineer", "pm", "purchase", "gm", "director", "store"];
 
 type U = {
   user_id: string;
@@ -21,7 +22,7 @@ type U = {
 };
 
 export default function UsersAndRoles() {
-  const { permitted, loading } = useAccessGuard();
+  const { permitted, loading } = useAccessGuard(["admin"], [ACCESS_ADMIN_EMAIL]);
   const { user: me } = useAuth();
   const [refreshing, setRefreshing] = useState(false);
   const [rows, setRows] = useState<U[]>([]);
@@ -77,38 +78,41 @@ export default function UsersAndRoles() {
 
   const deactivate = (u: U) => {
     if (u.user_id === me?.user_id) { Alert.alert("Not allowed", "You cannot deactivate your own account."); return; }
-    Alert.prompt?.(
-      "Deactivate user",
-      `Reason for deactivating ${u.email}?`,
-      async (reason) => {
-        if (!reason) return;
-        try {
-          await api(`/admin/access/users/${u.user_id}/deactivate`, { method: "POST", body: { reason } });
-          await load();
-        } catch (e: any) {
-          Alert.alert("Cannot deactivate", friendlyError(e?.message));
-        }
-      }
-    ) || (async () => {
-      // Alert.prompt is iOS-only. Fall back to a two-step confirmation.
-      Alert.alert(
+    if (Platform.OS === "ios") {
+      Alert.prompt(
         "Deactivate user",
-        `Deactivate ${u.email}? All their sessions will be terminated.`,
-        [
-          { text: "Cancel", style: "cancel" },
-          {
-            text: "Deactivate", style: "destructive", onPress: async () => {
-              try {
-                await api(`/admin/access/users/${u.user_id}/deactivate`, {
-                  method: "POST", body: { reason: "Deactivated via Admin Console" },
-                });
-                await load();
-              } catch (e: any) { Alert.alert("Cannot deactivate", friendlyError(e?.message)); }
-            },
-          },
-        ]
+        `Reason for deactivating ${u.email}?`,
+        async (reason) => {
+          if (!reason) return;
+          try {
+            await api(`/admin/access/users/${u.user_id}/deactivate`, { method: "POST", body: { reason } });
+            await load();
+          } catch (e: any) {
+            Alert.alert("Cannot deactivate", friendlyError(e?.message));
+          }
+        }
       );
-    })();
+      return;
+    }
+
+    // Alert.prompt is iOS-only. Fall back to a two-step confirmation.
+    Alert.alert(
+      "Deactivate user",
+      `Deactivate ${u.email}? All their sessions will be terminated.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Deactivate", style: "destructive", onPress: async () => {
+            try {
+              await api(`/admin/access/users/${u.user_id}/deactivate`, {
+                method: "POST", body: { reason: "Deactivated via Admin Console" },
+              });
+              await load();
+            } catch (e: any) { Alert.alert("Cannot deactivate", friendlyError(e?.message)); }
+          },
+        },
+      ]
+    );
   };
 
   if (loading || !permitted) return <AppShell title="Users & Roles"><Loader /></AppShell>;

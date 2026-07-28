@@ -10,6 +10,7 @@ import { useResponsive, CONTENT_MAX_WIDTH, SIDEBAR_WIDTH } from "@/src/hooks/use
 import { useKeyboardShortcuts } from "@/src/hooks/useKeyboardShortcuts";
 import { useThemeMode } from "@/src/theme-context";
 import { ShortcutsHelp } from "@/src/components/ShortcutsHelp";
+import { isAccessAdmin } from "@/src/access";
 
 type Tab = { key: string; label: string; icon: keyof typeof Ionicons.glyphMap; path: string; roles: string[] };
 const TABS: Tab[] = [
@@ -42,7 +43,11 @@ export function AppShell({ children, title, right, testID }: { children: React.R
   useKeyboardShortcuts(setHelpOpen);
 
   const tabs = TABS.filter((t) => !user || t.roles.includes(user.role));
-  const extras = DESKTOP_EXTRAS.filter((t) => !t.roles || (user && t.roles.includes(user.role)));
+  const extras = DESKTOP_EXTRAS.filter(
+    (t) =>
+      (!t.roles || (user && t.roles.includes(user.role))) &&
+      (t.key !== "access" || isAccessAdmin(user))
+  );
 
   const isActive = (path: string) => {
     // Home is only active on exact match; other tabs match on prefix.

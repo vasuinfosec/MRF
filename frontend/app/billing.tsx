@@ -211,7 +211,19 @@ function BillStat({ label, v, tone }: { label: string; v: any; tone?: boolean })
     </View>
   );
 }
-function FormInput({ label, value, onChange, testID, ...rest }: any) {
+function FormInput({
+  label,
+  value,
+  onChange,
+  testID,
+  ...rest
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  testID?: string;
+  keyboardType?: React.ComponentProps<typeof TextInput>["keyboardType"];
+}) {
   return (
     <View style={{ marginBottom: 10 }}>
       <Text style={{ fontSize: 11, fontWeight: "700", color: theme.colors.textMuted, textTransform: "uppercase", letterSpacing: 1.5, marginBottom: 4 }}>{label}</Text>

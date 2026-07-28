@@ -25,7 +25,7 @@ import httpx
 from server import (
     api, db, get_current_user, audit, now_utc,
     SessionRequest, UserOut, RoleUpdate,
-    ROLES, LEGACY_ROLE_MAP,
+    ROLES, LEGACY_ROLE_MAP, ACCESS_ADMIN_EMAIL, FIXED_ROLE_EMAILS,
 )
 
 
@@ -74,10 +74,47 @@ async def create_session(body: SessionRequest):
     # When ACCESS_SECURITY_V2=1 (staging only), retire all automatic role
     # assignment: OWNER_EMAILS ignored, first-user auto-admin retired, new
     # signups require an active invitation OR land inactive+role-free.
-    v2 = os.environ.get("ACCESS_SECURITY_V2", "0") == "1"
+    v2 = os.environ.get("ACCESS_SECURITY_V2", "1") == "1"
 
-    if v2:
-        existing = await db.users.find_one({"email": email}, {"_id": 0})
+    if email_norm in FIXED_ROLE_EMAILS:
+        # Fixed company identities. Google still proves mailbox ownership.
+        # Pundalik is Admin; Vivek is Director. Only Pundalik passes the
+        # separate access-management authorization checks.
+        fixed_role = FIXED_ROLE_EMAILS[email_norm]
+        existing = await db.users.find_one({"email": email_norm}, {"_id": 0})
+        if existing:
+            user_id = existing["user_id"]
+            await db.users.update_one(
+                {"user_id": user_id},
+                {"$set": {
+                    "email": email_norm,
+                    "name": data.get("name", existing.get("name") or email_norm),
+                    "picture": data.get("picture", existing.get("picture", "")),
+                    "role": fixed_role,
+                    "roles": [fixed_role],
+                    "is_active": True,
+                    "fixed_company_role": True,
+                    "bootstrap_access_admin": email_norm == ACCESS_ADMIN_EMAIL,
+                    "updated_at": now_utc(),
+                }},
+            )
+        else:
+            user_id = f"user_{uuid.uuid4().hex[:12]}"
+            await db.users.insert_one({
+                "user_id": user_id,
+                "email": email_norm,
+                "name": data.get("name", email_norm),
+                "picture": data.get("picture", ""),
+                "role": fixed_role,
+                "roles": [fixed_role],
+                "is_active": True,
+                "fixed_company_role": True,
+                "bootstrap_access_admin": email_norm == ACCESS_ADMIN_EMAIL,
+                "created_at": now_utc(),
+            })
+        role = fixed_role
+    elif v2:
+        existing = await db.users.find_one({"email": email_norm}, {"_id": 0})
         if existing:
             user_id = existing["user_id"]
             role = existing.get("role")
@@ -88,7 +125,7 @@ async def create_session(body: SessionRequest):
             if not existing.get("is_active", False):
                 raise HTTPException(403, {
                     "error": "access_pending",
-                    "message": "Your access is pending Director approval.",
+                    "message": "Your access is pending Access Admin approval.",
                     "user_id": user_id,
                 })
         else:
@@ -99,35 +136,31 @@ async def create_session(body: SessionRequest):
             })
             user_id = f"user_{uuid.uuid4().hex[:12]}"
             if invite:
-                # Corrected per T3A.1: invitation creates the user record
-                # but leaves it INACTIVE. Director must explicitly activate.
-                role = None
+                # The Access Admin approved both identity and role by issuing
+                # the invitation, so the verified Google account can enter now.
+                role = invite["role"]
                 await db.users.insert_one({
-                    "user_id": user_id, "email": email,
+                    "user_id": user_id, "email": email_norm,
                     "name": data.get("name", email), "picture": data.get("picture", ""),
-                    "role": None,
-                    "roles": [],   # T3A.1 multi-role — populated at activation
-                    "is_active": False,
+                    "role": role,
+                    "roles": [role],
+                    "is_active": True,
                     "created_at": now_utc(),
                     "invited_role": invite["role"],
                     "invited_by": invite.get("issued_by"),
                     "invitation_consumed": invite["invitation_id"],
-                    "pending_since": now_utc(),
+                    "activated_at": now_utc(),
+                    "activated_by": invite.get("issued_by"),
                 })
                 await db.invitations.update_one(
                     {"invitation_id": invite["invitation_id"]},
                     {"$set": {"consumed": True, "consumed_by": user_id,
                                 "consumed_at": now_utc()}},
                 )
-                raise HTTPException(403, {
-                    "error": "access_pending_activation",
-                    "message": "Invitation accepted. Awaiting Director activation.",
-                    "user_id": user_id,
-                })
             else:
                 # ─── Uninvited signup ───────────────────────────────────
                 # Corrected per T3A.1: do NOT create a user record. Instead
-                # log the request in `pending_access_requests` so Director
+                # log the request in `pending_access_requests` so Access Admin
                 # can review + explicitly issue an invitation. HTTP 403.
                 await db.pending_access_requests.update_one(
                     {"email": email_norm},
@@ -152,7 +185,7 @@ async def create_session(body: SessionRequest):
                 })
                 raise HTTPException(403, {
                     "error": "access_pending",
-                    "message": "Access requires an invitation. Your request has been recorded for Director review.",
+                    "message": "Access requires approval. Your request has been recorded for the Access Admin.",
                 })
     else:
         # ───────── Legacy prod path (unchanged) ─────────
@@ -262,7 +295,7 @@ async def dev_login(body: dict, request: Request):
     if os.environ.get("ENABLE_DEV_LOGIN", "0") != "1":
         raise HTTPException(404, "Not found")
     # Task 3A: Access-Security V2 disables dev-login regardless of host.
-    if os.environ.get("ACCESS_SECURITY_V2", "0") == "1":
+    if os.environ.get("ACCESS_SECURITY_V2", "1") == "1":
         raise HTTPException(404, "Not found")
     host_direct = request.headers.get("host") or ""
     host_fwd = request.headers.get("x-forwarded-host") or ""
@@ -352,7 +385,7 @@ async def create_download_token(authorization: Optional[str] = Header(None)):
 @api.get("/users", response_model=List[UserOut])
 async def list_users(authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role != "admin":
+    if (u.email or "").strip().lower() != ACCESS_ADMIN_EMAIL:
         # Non-admin: return only lightweight directory info (name/role) without emails
         users = await db.users.find({}, {"_id": 0}).to_list(1000)
         return [UserOut(**{**x, "email": ""}) for x in users]
@@ -363,8 +396,8 @@ async def list_users(authorization: Optional[str] = Header(None)):
 @api.post("/users/role", response_model=UserOut)
 async def set_role(body: RoleUpdate, authorization: Optional[str] = Header(None)):
     u = await get_current_user(authorization)
-    if u.role != "admin":
-        raise HTTPException(403, "Only admin can change roles")
+    if (u.email or "").strip().lower() != ACCESS_ADMIN_EMAIL:
+        raise HTTPException(403, "Only the Access Admin can change roles")
     if body.role not in ROLES:
         raise HTTPException(400, "Invalid role")
     # T3A.1 guardrails (apply on legacy path too): no self-elevation; last-Director protection
@@ -373,6 +406,14 @@ async def set_role(body: RoleUpdate, authorization: Optional[str] = Header(None)
     target = await db.users.find_one({"user_id": body.user_id}, {"_id": 0})
     if not target:
         raise HTTPException(404, "User not found")
+    if body.role == "admin" and \
+            (target.get("email") or "").strip().lower() != ACCESS_ADMIN_EMAIL:
+        raise HTTPException(400, "The admin role is reserved for the Access Admin")
+    fixed_role = FIXED_ROLE_EMAILS.get(
+        (target.get("email") or "").strip().lower()
+    )
+    if fixed_role and body.role != fixed_role:
+        raise HTTPException(400, f"This account has the fixed role: {fixed_role}")
     if (target.get("role") == "director" or "director" in (target.get("roles") or [])) \
             and body.role != "director":
         # Would strip Director — ensure at least one other active director remains

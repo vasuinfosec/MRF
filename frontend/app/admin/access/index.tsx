@@ -8,6 +8,7 @@ import { api } from "@/src/api";
 import { useAccessGuard } from "@/src/hooks/useAccessGuard";
 import { Card, H1, H2, Muted, Loader, Btn, Stat } from "@/src/components/ui";
 import { theme } from "@/src/theme";
+import { ACCESS_ADMIN_EMAIL } from "@/src/access";
 
 type Counts = {
   pending_requests: number;
@@ -18,7 +19,7 @@ type Counts = {
 };
 
 export default function AccessHub() {
-  const { permitted, loading } = useAccessGuard();
+  const { permitted, loading } = useAccessGuard(["admin"], [ACCESS_ADMIN_EMAIL]);
   const router = useRouter();
   const [refreshing, setRefreshing] = useState(false);
   const [counts, setCounts] = useState<Counts | null>(null);
@@ -105,8 +106,8 @@ export default function AccessHub() {
           <Tile
             testID="tile-invitations"
             icon="mail-open-outline"
-            title="Invitations"
-            subtitle="Create, revoke and audit access invitations"
+            title="Google Login Access"
+            subtitle="Add, update or revoke email access and assigned roles"
             badge={counts?.invitations_open || 0}
             onPress={() => router.push("/admin/access/invitations")}
           />
@@ -132,7 +133,7 @@ export default function AccessHub() {
           <H2>Access Model</H2>
           <Muted>
             Under Access-Security V2, all new sign-ins require an active invitation. Uninvited attempts are recorded for
-            Director review. Individual office-email allow-lists are retired in favour of explicit invitations.
+            Access Admin review. Other office accounts receive access only after an explicit role invitation.
           </Muted>
         </Card>
       </ScrollView>

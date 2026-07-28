@@ -16,7 +16,7 @@ import { useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 
 import { AppShell } from "@/src/components/AppShell";
-import { api, backendUrl, getDownloadToken } from "@/src/api";
+import { api, backendUrl, getDownloadToken, getToken } from "@/src/api";
 import { useAccessGuard } from "@/src/hooks/useAccessGuard";
 import { Card, H2, Btn, Label, Muted, Empty, Loader } from "@/src/components/ui";
 import { theme } from "@/src/theme";
@@ -137,7 +137,7 @@ export default function UomAdminScreen() {
       const fd = new FormData();
       fd.append("file", file);
       try {
-        const tok = (await import("@/src/api")).getToken ? await (await import("@/src/api")).getToken() : null;
+        const tok = await getToken();
         const r = await fetch(`${backendUrl}/api/uom/${kind}/import`, {
           method: "POST",
           headers: tok ? { Authorization: `Bearer ${tok}` } : undefined,
