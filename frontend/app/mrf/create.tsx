@@ -14,6 +14,11 @@ import { theme } from "@/src/theme";
 type Master = { item_id: string; name: string; category: string; parent_id?: string; value?: string };
 type Project = { project_id: string; code: string; name: string; site: string; client?: string; customer_id?: string; sites?: any[]; system_categories?: string[] };
 type Customer = { customer_id: string; name: string };
+type BoqOption = {
+  boq_ref: string; description: string; category: string; system: string;
+  make?: string; model?: string; part_number?: string; unit: string;
+  qty_estimated: number; qty_requested: number; qty_remaining: number;
+};
 type LineItem = {
   item_line_id?: string;
   material_id?: string;
@@ -26,6 +31,8 @@ type LineItem = {
   priority: "low" | "normal" | "high" | "urgent";
   remarks: string;
   specification?: string;            // kept for backwards compat but not exposed to SE
+  boq_ref?: string;
+  part_number?: string;
 };
 
 const PRIORITIES = [
@@ -53,6 +60,7 @@ const empty = (): LineItem => ({
   billable: true,
   priority: "normal",
   remarks: "",
+  boq_ref: "",
 });
 
 export default function CreateMRF() {
@@ -68,6 +76,11 @@ export default function CreateMRF() {
   const [masters, setMasters] = useState<{ unit: Master[]; brand: Master[]; material: Master[]; model: Master[] }>(
     { unit: [], brand: [], material: [], model: [] });
   const [loading, setLoading] = useState(true);
+  const [boqOptions, setBoqOptions] = useState<BoqOption[]>([]);
+  // Customer directory is restricted to management roles (PII). Site Engineers/
+  // Store can still create MRFs (see MRF_CREATORS on the backend) — they just
+  // can't browse the customer list, so Project selection must not depend on it.
+  const [customersLoadFailed, setCustomersLoadFailed] = useState(false);
 
   // Form state
   const [customerId, setCustomerId] = useState("");
@@ -89,8 +102,14 @@ export default function CreateMRF() {
   const load = useCallback(async () => {
     setLoading(true);
     try {
+      // Customer list is fetched separately: Site Engineer/Store can create MRFs
+      // but cannot read the customer directory (PII-restricted), so a 403 here
+      // must not block loading Projects/Masters/Materials for them.
+      const customersPromise = api<Customer[]>("/customers")
+        .then((cs) => { setCustomersLoadFailed(false); return cs; })
+        .catch(() => { setCustomersLoadFailed(true); return []; });
       const [cs, ps, mm, mats] = await Promise.all([
-        api<Customer[]>("/customers"),
+        customersPromise,
         api<Project[]>("/projects"),
         api<any>("/masters"),
         api<any[]>("/materials?status=approved"),   // Phase 4: only approved materials
@@ -131,6 +150,8 @@ export default function CreateMRF() {
           billable: it.billable ?? true,
           priority: (it.priority as any) || "normal",
           remarks: it.remarks || "",
+          boq_ref: it.boq_ref || "",
+          part_number: it.part_number || "",
         })));
       }
     } catch (e: any) { setErr(e.message || "Failed to load"); }
@@ -164,6 +185,25 @@ export default function CreateMRF() {
     }
   }, [customerId, projectId, projects]);
 
+  // Roles that can't read the customer directory (Site Engineer/Store) pick a
+  // Project directly; auto-fill the customer from the project so downstream
+  // filtering/display still works without ever requiring a manual pick.
+  useEffect(() => {
+    if (customersLoadFailed && currentProject?.customer_id && customerId !== currentProject.customer_id) {
+      setCustomerId(currentProject.customer_id);
+    }
+  }, [customersLoadFailed, currentProject, customerId]);
+
+  useEffect(() => {
+    if (!projectId) {
+      setBoqOptions([]);
+      return;
+    }
+    api<BoqOption[]>(`/integrations/estimator/boq-options?project_id=${encodeURIComponent(projectId)}`)
+      .then(setBoqOptions)
+      .catch(() => setBoqOptions([]));
+  }, [projectId]);
+
   const setItem = (i: number, patch: Partial<LineItem>) => {
     setItems((arr) => arr.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
   };
@@ -175,10 +215,69 @@ export default function CreateMRF() {
     const patch: Partial<LineItem> = {
       material_id: m.material_uid || m.item_id,  // Phase 4: prefer MAT-#### UID
       description: m.name,
+      boq_ref: "",
     };
     if (m.value && !items[i].unit) patch.unit = m.value; // material master default unit
     setItem(i, patch);
     setPicker(null); setPickerSearch("");
+  };
+
+  const chooseBoq = (i: number, option: BoqOption) => {
+    const material = masters.material.find(
+      (m) => m.name.trim().toLowerCase() === option.description.trim().toLowerCase()
+    );
+    setItem(i, {
+      boq_ref: option.boq_ref,
+      material_id: material?.item_id || `EST:${option.boq_ref}`,
+      description: option.description,
+      unit: option.unit,
+      make: option.make || "",
+      model: option.model || "",
+      part_number: option.part_number || "",
+      qty_requested: String(Math.max(Math.min(option.qty_remaining, 1), 0)),
+    });
+    setPicker(null); setPickerSearch("");
+  };
+
+  const openPicker = async (type: string, index?: number) => {
+    setPicker({ type, index });
+    setPickerSearch("");
+    try {
+      if (type === "customer") {
+        try {
+          const cs = await api<Customer[]>("/customers");
+          setCustomers(cs);
+          setCustomersLoadFailed(false);
+        } catch {
+          setCustomers([]);
+          setCustomersLoadFailed(true);
+        }
+      } else if (type === "project" || type === "site" || type === "category") {
+        setProjects(await api<Project[]>("/projects"));
+      } else if (type === "material") {
+        const mats = await api<any[]>("/materials?status=approved");
+        const matAsMaster = mats.map((m) => ({
+          item_id: m.material_uid,
+          material_uid: m.material_uid,
+          name: m.description,
+          category: "material",
+          value: m.unit || "",
+          gst_rate: m.gst_rate,
+          item_code: m.item_code,
+        }));
+        setMasters((current) => ({ ...current, material: matAsMaster }));
+      } else if (type === "unit" || type === "make" || type === "model") {
+        const mm = await api<any>("/masters");
+        setMasters((current) => ({
+          ...current,
+          unit: mm.unit || [],
+          brand: mm.brand || [],
+          model: mm.model || [],
+        }));
+      }
+    } catch (e: any) {
+      setErr(e.message || "Failed to refresh master data");
+    }
   };
 
   const chooseMake = (i: number, brand: Master) => {
@@ -193,7 +292,7 @@ export default function CreateMRF() {
 
   const submit = async (asDraft: boolean) => {
     setErr("");
-    if (!customerId) { setErr("Please select a Customer"); return; }
+    if (!customersLoadFailed && !customerId) { setErr("Please select a Customer"); return; }
     if (!projectId) { setErr("Please select a Project"); return; }
     if (!site) { setErr("Please select a Site"); return; }
     if (!systemCat) { setErr("Please select a Material Category"); return; }
@@ -218,6 +317,8 @@ export default function CreateMRF() {
         billable: it.billable,
         priority: it.priority,
         remarks: it.remarks || "",
+        boq_ref: it.boq_ref || "",
+        part_number: it.part_number || "",
       }));
       let mrfId = params.edit;
       if (isEdit) {
@@ -253,6 +354,10 @@ export default function CreateMRF() {
       case "project": return filt(projectsForCustomer.map((p) => ({ ...p, name: `${p.code} — ${p.name}` })));
       case "site": return projectSites.filter((s) => !q || s.toLowerCase().includes(q)).map((s) => ({ name: s }));
       case "category": return projectCategories.filter((s) => !q || s.toLowerCase().includes(q)).map((s) => ({ name: s }));
+      case "boq": return boqOptions.filter((x) => {
+        const label = `${x.boq_ref} ${x.description}`.toLowerCase();
+        return x.qty_remaining > 0 && (!q || label.includes(q));
+      }).map((x) => ({ ...x, name: `${x.boq_ref} · ${x.description} · Remaining ${x.qty_remaining} ${x.unit}` }));
       case "material": return filt(masters.material);
       case "make": return filt(masters.brand);
       case "model": {
@@ -268,7 +373,7 @@ export default function CreateMRF() {
       case "billable": return BILLABLE_OPTS;
       default: return [];
     }
-  }, [picker, pickerSearch, customers, projectsForCustomer, projectSites, projectCategories, masters, items]);
+  }, [picker, pickerSearch, customers, projectsForCustomer, projectSites, projectCategories, masters, items, boqOptions]);
 
   const closePicker = () => { setPicker(null); setPickerSearch(""); };
 
@@ -281,7 +386,7 @@ export default function CreateMRF() {
   return (
     <SafeAreaView style={{ flex: 1, backgroundColor: theme.colors.surface }} edges={["top"]}>
       <View style={styles.header}>
-        <TouchableOpacity testID="back-btn" onPress={() => router.back()} style={{ padding: 8 }}>
+        <TouchableOpacity testID="back-btn" onPress={() => router.replace("/mrf")} style={{ padding: 8 }}>
           <Ionicons name="arrow-back" size={22} color={theme.colors.text} />
         </TouchableOpacity>
         <Text style={styles.title}>{isEdit ? "Edit MRF" : "New MRF"}</Text>
@@ -296,24 +401,31 @@ export default function CreateMRF() {
           <>
             {/* Header — Customer / Project / Site / Category / Required Date */}
             <Card style={{ marginTop: 16 }} testID="mrf-form-card">
-              <Label>CUSTOMER *</Label>
-              <PickerBox testID="pick-customer" value={customerLabel}
-                onPress={() => { setPicker({ type: "customer" }); }} />
+              <Label>{customersLoadFailed ? "CUSTOMER (from project)" : "CUSTOMER *"}</Label>
+              {customersLoadFailed ? (
+                <PickerBox testID="pick-customer" value={currentProject?.customer_id ? customerLabel : "Auto-filled once you pick a Project"}
+                  disabled
+                  onPress={() => {}} />
+              ) : (
+                <PickerBox testID="pick-customer" value={customerLabel}
+                  onPress={() => { void openPicker("customer"); }} />
+              )}
 
               <Label>PROJECT *</Label>
-              <PickerBox testID="pick-project" value={customerId ? projectLabel : "Select a customer first"}
-                disabled={!customerId}
-                onPress={() => { setPicker({ type: "project" }); }} />
+              <PickerBox testID="pick-project"
+                value={(!customersLoadFailed && !customerId) ? "Select a customer first" : projectLabel}
+                disabled={!customersLoadFailed && !customerId}
+                onPress={() => { void openPicker("project"); }} />
 
               <Label>SITE *</Label>
               <PickerBox testID="pick-site" value={site || (currentProject ? "Select site" : "Select project first")}
                 disabled={!currentProject}
-                onPress={() => setPicker({ type: "site" })} />
+                onPress={() => { void openPicker("site"); }} />
 
               <Label>MATERIAL CATEGORY (SYSTEM) *</Label>
               <PickerBox testID="pick-category" value={systemCat || "Select category"}
                 disabled={!currentProject}
-                onPress={() => setPicker({ type: "category" })} />
+                onPress={() => { void openPicker("category"); }} />
 
               <Label>REQUIRED BY *</Label>
               <TouchableOpacity testID="pick-date" onPress={() => setShowDatePicker(true)} style={pStyles.pick}>
@@ -358,10 +470,22 @@ export default function CreateMRF() {
                   ) : null}
                 </View>
 
+                {boqOptions.length ? (
+                  <>
+                    <Label>APPROVED ESTIMATE BOQ LINE</Label>
+                    <PickerBox testID={`pick-boq-${i}`}
+                      value={it.boq_ref || "Select approved BOQ line"}
+                      onPress={() => setPicker({ type: "boq", index: i })} />
+                    {it.boq_ref ? (
+                      <Text style={styles.uid}>Quantity is controlled against the approved estimate balance.</Text>
+                    ) : null}
+                  </>
+                ) : null}
+
                 <Label>MATERIAL *</Label>
                 <PickerBox testID={`pick-material-${i}`}
                   value={it.description || (it.material_id ? "Loading…" : "Select material")}
-                  onPress={() => setPicker({ type: "material", index: i })} />
+                  onPress={() => { void openPicker("material", i); }} />
                 {it.material_id ? (
                   <Text style={styles.uid}>Material UID: {it.material_id}</Text>
                 ) : null}
@@ -370,14 +494,14 @@ export default function CreateMRF() {
                   <View style={{ flex: 1 }}>
                     <Label>MAKE / BRAND</Label>
                     <PickerBox testID={`pick-make-${i}`} value={it.make || "Select make"}
-                      onPress={() => setPicker({ type: "make", index: i })} />
+                      onPress={() => { void openPicker("make", i); }} />
                   </View>
                   <View style={{ flex: 1 }}>
                     <Label>MODEL</Label>
                     <PickerBox testID={`pick-model-${i}`}
                       value={it.model || (it.make ? "Select model" : "Pick make first")}
                       disabled={!it.make}
-                      onPress={() => setPicker({ type: "model", index: i })} />
+                      onPress={() => { void openPicker("model", i); }} />
                   </View>
                 </View>
 
@@ -385,7 +509,7 @@ export default function CreateMRF() {
                   <View style={{ flex: 1 }}>
                     <Label>UNIT *</Label>
                     <PickerBox testID={`pick-unit-${i}`} value={it.unit || "Select unit"}
-                      onPress={() => setPicker({ type: "unit", index: i })} />
+                      onPress={() => { void openPicker("unit", i); }} />
                   </View>
                   <View style={{ flex: 1 }}>
                     <Label>QTY REQUIRED *</Label>
@@ -497,6 +621,7 @@ export default function CreateMRF() {
                   else if (t === "project") { setProjectId(opt.project_id); setSite(""); setSystemCat(""); closePicker(); }
                   else if (t === "site") { setSite(opt.name); closePicker(); }
                   else if (t === "category") { setSystemCat(opt.name); closePicker(); }
+                  else if (t === "boq") { chooseBoq(i, opt); }
                   else if (t === "material") { chooseMaterial(i, opt); }
                   else if (t === "make") { chooseMake(i, opt); }
                   else if (t === "model") { chooseModel(i, opt); }
