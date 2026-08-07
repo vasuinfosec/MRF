@@ -77,6 +77,7 @@ export default function CreateMRF() {
     { unit: [], brand: [], material: [], model: [] });
   const [loading, setLoading] = useState(true);
   const [boqOptions, setBoqOptions] = useState<BoqOption[]>([]);
+  const [projectMaterials, setProjectMaterials] = useState<any[]>([]);
   // Customer directory is restricted to management roles (PII). Site Engineers/
   // Store can still create MRFs (see MRF_CREATORS on the backend) — they just
   // can't browse the customer list, so Project selection must not depend on it.
@@ -197,12 +198,20 @@ export default function CreateMRF() {
   useEffect(() => {
     if (!projectId) {
       setBoqOptions([]);
+      setProjectMaterials([]);
       return;
     }
     api<BoqOption[]>(`/integrations/estimator/boq-options?project_id=${encodeURIComponent(projectId)}`)
       .then(setBoqOptions)
       .catch(() => setBoqOptions([]));
+    api<any[]>(`/projects/${encodeURIComponent(projectId)}/materials`)
+      .then(setProjectMaterials)
+      .catch(() => setProjectMaterials([]));
   }, [projectId]);
+
+  // Admin-assigned BOQ balance for a material (undefined = no assignment, unlimited)
+  const boqBalanceFor = useCallback((materialUid?: string) =>
+    projectMaterials.find((pm) => pm.material_uid === materialUid), [projectMaterials]);
 
   const setItem = (i: number, patch: Partial<LineItem>) => {
     setItems((arr) => arr.map((it, idx) => (idx === i ? { ...it, ...patch } : it)));
@@ -303,6 +312,11 @@ export default function CreateMRF() {
       if (!it.unit) { setErr(`Row ${i + 1}: unit is required`); return; }
       const q = Number(it.qty_requested);
       if (!(q > 0)) { setErr(`Row ${i + 1}: qty must be > 0`); return; }
+      const pm = boqBalanceFor(it.material_id);
+      if (pm && q > pm.balance) {
+        setErr(`Row ${i + 1}: Requested qty (${q}) exceeds the approved BOQ balance (${pm.balance}) for this material. Contact Admin to increase the allocation.`);
+        return;
+      }
     }
     setSaving(true);
     try {
@@ -489,6 +503,16 @@ export default function CreateMRF() {
                 {it.material_id ? (
                   <Text style={styles.uid}>Material UID: {it.material_id}</Text>
                 ) : null}
+                {(() => {
+                  const pm = boqBalanceFor(it.material_id);
+                  if (!pm) return null;
+                  const over = Number(it.qty_requested) > pm.balance;
+                  return (
+                    <Text style={[styles.uid, over ? { color: theme.colors.danger, fontWeight: "700" } : null]}>
+                      BOQ Balance: {pm.balance} {it.unit || ""} (of {pm.boq_qty}){over ? " — exceeds balance, contact Admin" : ""}
+                    </Text>
+                  );
+                })()}
 
                 <View style={{ flexDirection: "row", gap: 8 }}>
                   <View style={{ flex: 1 }}>

@@ -301,6 +301,34 @@ class MRFItem(MRFItemIn):
     billing_date: Optional[str] = ""
     billing_remarks: Optional[str] = ""
 
+class ProjectMaterialIn(BaseModel):
+    material_uid: str
+    variant_uid: Optional[str] = None
+    boq_qty: float
+    source: str = "manual"        # "manual" | "estimator"
+    boq_ref: Optional[str] = None
+
+    @field_validator("source")
+    @classmethod
+    def _validate_source(cls, v):
+        if v not in ("manual", "estimator"):
+            raise ValueError("source must be 'manual' or 'estimator'")
+        return v
+
+    @field_validator("boq_qty")
+    @classmethod
+    def _validate_boq_qty(cls, v):
+        if v is None or float(v) <= 0:
+            raise ValueError("boq_qty must be greater than 0")
+        return float(v)
+
+class ProjectMaterial(ProjectMaterialIn):
+    pm_id: str = Field(default_factory=lambda: gid("pm"))
+    project_id: str
+    created_by: str
+    created_at: datetime = Field(default_factory=now_utc)
+    updated_at: datetime = Field(default_factory=now_utc)
+
 class MRFCreate(BaseModel):
     project_id: str
     site: str
@@ -880,6 +908,32 @@ async def _resolve_material_info(item: dict) -> dict:
             out["variant_uid"] = v.get("variant_uid", "")
     return out
 
+
+async def _project_material_consumed(project_id: str, material_uid: str,
+                                      exclude_mrf_id: Optional[str] = None) -> float:
+    """Sum of qty_approved across this project's MRF items for `material_uid`
+    whose item-level status is 'approved' — balance only decrements once an
+    MRF item has actually been authorised, not while it's still draft/pending."""
+    q: Dict[str, Any] = {"project_id": project_id, "deleted": False}
+    if exclude_mrf_id:
+        q["mrf_id"] = {"$ne": exclude_mrf_id}
+    consumed = 0.0
+    async for m in db.mrfs.find(q, {"_id": 0, "items": 1}):
+        for it in m.get("items", []):
+            if it.get("material_id") == material_uid and it.get("status") == "approved":
+                consumed += float(it.get("qty_approved") or 0)
+    return consumed
+
+async def _project_material_balance(project_id: str, material_uid: str,
+                                     exclude_mrf_id: Optional[str] = None) -> Optional[dict]:
+    """Returns None if no BOQ assignment exists for this material on this project
+    (validation is skipped entirely in that case — assignment is optional)."""
+    pm = await db.project_materials.find_one(
+        {"project_id": project_id, "material_uid": material_uid}, {"_id": 0})
+    if not pm:
+        return None
+    consumed = await _project_material_consumed(project_id, material_uid, exclude_mrf_id)
+    return {**pm, "consumed_qty": consumed, "balance": pm["boq_qty"] - consumed}
 
 def _split_gst_amt(taxable: float, gst_pct: float, intra_state: bool) -> tuple:
     """Return (cgst, sgst, igst)."""
@@ -1809,6 +1863,8 @@ async def startup():
     await db.materials.create_index([("description_norm", 1)], unique=True, sparse=True)
     await db.variants.create_index("variant_uid", unique=True)
     await db.variants.create_index([("material_uid", 1), ("make_norm", 1), ("model_norm", 1)], unique=True)
+    await db.project_materials.create_index("pm_id", unique=True)
+    await db.project_materials.create_index([("project_id", 1), ("material_uid", 1)], unique=True)
     # Task 3B / security hardening: LLM budget reservations auto-expire so
     # a crashed process cannot indefinitely hold an unused reservation.
     # 30 minutes is long enough for any legitimate slow LLM call.
@@ -1858,6 +1914,7 @@ from routers import ai_purchase as _ai_purchase_router  # noqa: E402,F401
 from routers import access_security_v2 as _access_security_v2_router  # noqa: E402,F401
 from routers import uom as _uom_router  # noqa: E402,F401
 from routers import categories as _categories_router  # noqa: E402,F401
+from routers import project_materials as _project_materials_router  # noqa: E402,F401
 
 app.include_router(api)
 # CORS: Bearer-token auth (no cookies) — allow_credentials MUST be False when

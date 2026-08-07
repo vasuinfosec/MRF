@@ -9,6 +9,7 @@ import { useAuth } from "@/src/auth";
 import { Btn, Card, H1, H2, Label, Muted, Empty } from "@/src/components/ui";
 import { theme } from "@/src/theme";
 import ProjectTeamModal from "@/src/components/ProjectTeamModal";
+import ProjectMaterialsModal from "@/src/components/ProjectMaterialsModal";
 import { useResponsive } from "@/src/hooks/useResponsive";
 import { DTable, DHead, DH, DRow, DC } from "@/src/components/DataTable";
 
@@ -53,6 +54,7 @@ export default function Masters() {
   const [err, setErr] = useState("");
   const [q, setQ] = useState("");
   const [teamPid, setTeamPid] = useState<string | null>(null);
+  const [materialsPid, setMaterialsPid] = useState<string | null>(null);
 
   // Add-Project form
   const [pf, setPf] = useState({ code: "", name: "", site: "", client: "", customer_id: "", system_categories: [] as string[] });
@@ -395,7 +397,14 @@ export default function Masters() {
                   ) : null}
                 </View>
                 {isAdmin ? (
-                  <Btn testID={`assign-team-${p.code}`} title="Assign Team & Sites" variant="outline" onPress={() => setTeamPid(p.project_id)} style={{ marginTop: 10 }} />
+                  <View style={{ flexDirection: "row", gap: 8, marginTop: 10 }}>
+                    <View style={{ flex: 1 }}>
+                      <Btn testID={`assign-team-${p.code}`} title="Assign Team & Sites" variant="outline" onPress={() => setTeamPid(p.project_id)} />
+                    </View>
+                    <View style={{ flex: 1 }}>
+                      <Btn testID={`assign-materials-${p.code}`} title="Materials & BOQ" variant="outline" onPress={() => setMaterialsPid(p.project_id)} />
+                    </View>
+                  </View>
                 ) : null}
               </Card>
             ))}
@@ -626,6 +635,11 @@ export default function Masters() {
       {/* Team modal */}
       {teamPid ? (
         <ProjectTeamModal projectId={teamPid} onClose={() => setTeamPid(null)} onChanged={load} />
+      ) : null}
+
+      {/* Materials & BOQ modal */}
+      {materialsPid ? (
+        <ProjectMaterialsModal projectId={materialsPid} onClose={() => setMaterialsPid(null)} onChanged={load} />
       ) : null}
 
       {/* Edit-project modal */}

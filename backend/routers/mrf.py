@@ -29,7 +29,33 @@ from server import (
     MRFCreate, MRF, MRFItem, ApprovalAction,
     MRF_CREATORS,
     bearer_from_url_token,
+    _project_material_balance,
 )
+
+
+async def _check_boq_balance(project_id: str, items: list,
+                              exclude_mrf_id: Optional[str] = None) -> None:
+    """Raise HTTP 400 with a boq_balance_exceeded payload if any item's
+    qty_requested exceeds the project's assigned BOQ balance for that material.
+    Items with no project_materials assignment are skipped (assignment is optional)."""
+    for it in items:
+        material_uid = it.get("material_id") if isinstance(it, dict) else getattr(it, "material_id", None)
+        qty_requested = it.get("qty_requested") if isinstance(it, dict) else getattr(it, "qty_requested", None)
+        if not material_uid or qty_requested is None:
+            continue
+        pm = await _project_material_balance(project_id, material_uid, exclude_mrf_id)
+        if pm is None:
+            continue
+        if float(qty_requested) > pm["balance"]:
+            raise HTTPException(400, {
+                "error": "boq_balance_exceeded",
+                "material_uid": material_uid,
+                "requested": float(qty_requested),
+                "balance": pm["balance"],
+                "message": (f"Requested qty ({qty_requested}) exceeds the approved BOQ "
+                            f"balance ({pm['balance']}) for this material. Contact Admin "
+                            f"to increase the allocation."),
+            })
 
 
 # ---------------------- MRF create ----------------------
@@ -51,6 +77,7 @@ async def create_mrf(body: MRFCreate, authorization: Optional[str] = Header(None
         else:  # pm
             if u.user_id not in (p.get("project_managers") or []):
                 raise HTTPException(403, "You are not the PM for this project")
+    await _check_boq_balance(body.project_id, [i.model_dump() for i in body.items])
     items = []
     for i in body.items:
         d = i.model_dump()
@@ -144,6 +171,7 @@ async def submit_mrf(mrf_id: str, authorization: Optional[str] = Header(None)):
         raise HTTPException(403, "Only the MRF creator (or admin) can submit")
     if d["status"] not in ["draft", "returned"]:
         raise HTTPException(400, "Cannot submit from current status")
+    await _check_boq_balance(d["project_id"], d.get("items", []), exclude_mrf_id=mrf_id)
     await db.mrfs.update_one(
         {"mrf_id": mrf_id},
         {"$set": {"status": "pm_review", "updated_at": now_utc()}}
@@ -296,6 +324,8 @@ async def update_mrf_draft(mrf_id: str, body: dict,
             if merged.get("qty_approved") is None:
                 merged["qty_approved"] = merged.get("qty_requested")
             new_items.append(merged)
+        target_project_id = body.get("project_id") or mrf.get("project_id")
+        await _check_boq_balance(target_project_id, new_items, exclude_mrf_id=mrf_id)
         updates["items"] = new_items
 
     if body.get("project_id") and body["project_id"] != mrf.get("project_id"):
